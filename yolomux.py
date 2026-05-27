@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CLI entrypoint for YOLOMux."""
+"""CLI entrypoint for YOLOmux."""
 
 from __future__ import annotations
 
