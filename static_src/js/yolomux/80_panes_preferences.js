@@ -392,10 +392,7 @@ function restorePaneTabPopover(strip, item) {
 
 function createPaneTab(side, item) {
   const type = tabTypeForItem(item);
-  const isInfo = type?.key === 'info';
   const isFiles = type?.key === 'files';
-  const isPrefs = type?.key === 'preferences';
-  const isChanges = type?.key === 'changes';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
   const info = transcriptMeta.sessions?.[item];
@@ -428,7 +425,7 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? infoTabLabel : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', type ? itemLabel(item) : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -561,7 +558,7 @@ function positionPaneTabPopover(tab) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(infoTabLabel)}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -828,7 +825,7 @@ function bindPaneFrameControls(panel, session) {
   if (!panel || panel.dataset.frameControlsBound === 'true') return;
   panel.dataset.frameControlsBound = 'true';
   panel.addEventListener('click', async event => {
-    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-file-editor-close]');
+    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
     if (!button || !panel.contains(button)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -844,10 +841,6 @@ function bindPaneFrameControls(panel, session) {
     }
     if (button.dataset.paneExpand !== undefined) {
       expandPaneFromLayout(button.dataset.paneExpand || session);
-      return;
-    }
-    if (button.dataset.fileEditorClose !== undefined) {
-      closeFileTab(button.dataset.fileEditorClose || fileItemPath(session), {item: session});
       return;
     }
     if (button.dataset.paneClose !== undefined) {
@@ -1073,7 +1066,7 @@ function createInfoPanel() {
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
-          <div id="meta-${infoItemId}" class="meta">AI activity and branches sorted by recent activity</div>
+          <div id="meta-${infoItemId}" class="meta">Branches, PRs, CI, and repo metadata sorted by recent activity</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
@@ -1094,6 +1087,39 @@ function createInfoPanel() {
   return panel;
 }
 
+function createYosupPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel yosup-panel';
+  panel.id = `panel-${yosupItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head">
+        ${virtualPanelControlsHtml(yosupItemId, yosupTabLabel)}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${yosupItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yosupTabLabel)}</span></div>
+          <div id="meta-${yosupItemId}" class="meta">Casual roll-up of active AI agents and changed files</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yosupItemId)}" title="hide details" aria-label="hide details"></button>
+      </div>
+      <div class="info-pane panel-overlay-root">
+        <div id="panel-toasts-${yosupItemId}" class="panel-toast-stack"></div>
+        <div class="transcript-head info-head">
+          <span>${esc(yosupTabLabel)}</span>
+          <button type="button" class="info-refresh" data-yosup-refresh title="Refresh AI activity summary">Refresh summary</button>
+        </div>
+        <div id="yosup-content" class="info-list yosup-list"></div>
+      </div>`;
+  bindPanelShell(panel, yosupItemId);
+  panel.querySelector('[data-yosup-refresh]')?.addEventListener('click', event => {
+    event.preventDefault();
+    refreshActivitySummary();
+  });
+  renderYosupPanel();
+  return panel;
+}
+
 function sessionActivitySummary(session) {
   return activitySummaryPayload?.sessions?.[session] || null;
 }
@@ -1110,9 +1136,9 @@ function globalActivitySummaryHtml() {
   const headline = summary.headline || lines[0] || '';
   const details = headline ? lines.filter((line, index) => index > 0 || line !== headline) : lines;
   const generated = activitySummaryPayload?.generated_at ? `updated ${shortText(activitySummaryPayload.generated_at, 19)}` : 'not loaded';
-  return `<section class="yosup-global" aria-label="${esc(infoTabLabel)} AI activity summary">
+  return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
     <div class="yosup-global-head">
-      <span>${esc(infoTabLabel)}</span>
+      <span>${esc(yosupTabLabel)}</span>
       <span class="yosup-generated">${esc(generated)}</span>
     </div>
     ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
@@ -1135,6 +1161,7 @@ async function refreshActivitySummary(options = {}) {
     if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
   }
   renderInfoPanel();
+  renderYosupPanel();
 }
 
 function editorSchemePreferenceChoices(options = {}) {
