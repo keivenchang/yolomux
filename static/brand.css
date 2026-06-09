@@ -1,5 +1,5 @@
 :root {
-  --brand-nv-green: var(--active-control-bg, var(--nv-green, #76b900));
+  --brand-nv-green: var(--nv-green, #76b900);
   --brand-yolo-text: var(--active-control-text, #071000);
   --brand-yolo-border: var(--active-control-border, #9be33d);
 }
