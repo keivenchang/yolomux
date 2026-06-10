@@ -1,4 +1,5 @@
 function renderPanels(previousActive = [], options = {}) {
+  if (renderPanelsDockview(previousActive, options)) return;
   // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
@@ -65,6 +66,10 @@ function poolDisplacedPanel(node) {
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
 function syncActivePanelsInPlace() {
+  if (dockviewLayoutActive()) {
+    syncActivePanelsDockview();
+    return;
+  }
   for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
     const slot = dropSlot.dataset.slot;
     const item = activeItemForSide(slot);
@@ -346,6 +351,11 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
+  if (dockviewLayoutActive()) {
+    dockviewRefreshTabs();
+    dockviewSyncMountedPanels();
+    return;
+  }
   // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
   if (dragSession != null) { pendingTabStripRender = true; return; }
@@ -436,8 +446,12 @@ function fileTabParentSuffix(segments, depth) {
   return segments.slice(Math.max(0, segments.length - depth)).join('/');
 }
 
+function paneTabPopoverForAnchor(tab) {
+  return tab?.querySelector?.(':scope > .session-popover') || tab?.__yolomuxDetachedPopover || null;
+}
+
 function paneTabShouldPreserve(tab) {
-  const popover = tab.querySelector(':scope > .session-popover');
+  const popover = paneTabPopoverForAnchor(tab);
   return Boolean(popover && (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover)));
 }
 
@@ -479,7 +493,7 @@ function syncPreservedPaneTab(tab, fresh) {
 
 function paneTabPopoverItemToRestore(strip) {
   for (const tab of strip.querySelectorAll(':scope > .pane-tab')) {
-    const popover = tab.querySelector(':scope > .session-popover');
+    const popover = paneTabPopoverForAnchor(tab);
     if (popover && (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover))) return tab.dataset.paneTab || null;
   }
   return null;
@@ -488,10 +502,10 @@ function paneTabPopoverItemToRestore(strip) {
 function restorePaneTabPopover(strip, item) {
   if (!item) return;
   const tab = strip.querySelector(`:scope > .pane-tab[data-pane-tab="${cssEscape(item)}"]`);
-  const popover = tab?.querySelector(':scope > .session-popover');
+  const popover = paneTabPopoverForAnchor(tab);
   if (!tab || !popover) return;
   if (tab.classList.contains('popover-open') && popoverLifecycleActive(tab, popover)) return;
-  positionPaneTabPopover(tab);
+  positionPaneTabPopover(tab, popover);
   closeOtherSessionPopovers(tab);
   tab.classList.add('popover-open');
 }
@@ -511,13 +525,14 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${active ? 'active' : ''}`;
+  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
   if (type?.rowHtml) tab.innerHTML = type.rowHtml(item, rowOptions);
   else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
+  tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
   if (!isFiles) {
     const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
     const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
@@ -589,10 +604,12 @@ function createPaneTab(side, item, displayContext = {}) {
       event.stopPropagation();
       beginPaneTabRename(tab, item);
     });
+  }
+  if (isPinnableTab(item)) {
     tab.addEventListener('contextmenu', event => {
       event.preventDefault();
       event.stopPropagation();
-      showSessionContextMenu(item, event.clientX, event.clientY, {tab});
+      showTabContextMenu(item, event.clientX, event.clientY, {tab});
     });
   }
   tab.addEventListener('dragstart', event => {
@@ -633,8 +650,12 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab), {
+  const detached = tab.classList?.contains('dockview-pane-tab') === true;
+  if (detached) detachPaneTabPopover(tab, popover);
+  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
     onOpen: () => maybeLoadFileTabForPopover(tab, session),
+    onStateOpen: () => popover.classList.add('popover-open'),
+    onClose: () => popover.classList.remove('popover-open'),
   });
 }
 
@@ -646,10 +667,27 @@ function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
-    onOpen: options.onOpen,
+    onOpen: event => {
+      options.onStateOpen?.(event);
+      options.onOpen?.(event);
+    },
+    onClose: options.onClose,
     position,
     closeOthers: () => closeOtherSessionPopovers(anchor),
   });
+}
+
+function detachPaneTabPopover(tab, popover) {
+  cleanupDetachedPaneTabPopover(tab, popover);
+  popover.classList.add('pane-tab-detached-popover');
+  if (popover.parentElement !== document.body) document.body.appendChild(popover);
+  tab.__yolomuxDetachedPopover = popover;
+}
+
+function cleanupDetachedPaneTabPopover(tab, keep = null) {
+  const previous = tab?.__yolomuxDetachedPopover;
+  if (previous && previous !== keep) previous.remove();
+  if (previous && previous !== keep) tab.__yolomuxDetachedPopover = null;
 }
 
 function maybeLoadFileTabForPopover(tab, item) {
@@ -688,7 +726,8 @@ function refreshFilePopoversForPath(path) {
 }
 
 function refreshFileTabPopover(tab, item) {
-  const popover = tab?.querySelector?.(':scope > .file-popover');
+  const detached = tab?.__yolomuxDetachedPopover?.classList?.contains('file-popover') ? tab.__yolomuxDetachedPopover : null;
+  const popover = tab?.querySelector?.(':scope > .file-popover') || detached;
   if (!popover) return;
   const path = fileItemPath(item);
   const rows = filePopoverRows(path, fileStateFor(path) || {});
@@ -702,9 +741,9 @@ function refreshFileTabPopover(tab, item) {
   bindFilePopoverActions(popover);
 }
 
-function positionPaneTabPopover(tab) {
+function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
-  const popover = tab.querySelector?.(':scope > .session-popover');
+  popover = popover || paneTabPopoverForAnchor(tab);
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
@@ -802,7 +841,7 @@ function bindPaneTabStrip(strip, side) {
   };
   strip.ondrop = event => {
     const filePayload = fileDragPayload(event);
-    if (filePayload?.path) {
+  if (filePayload?.path) {
       clearPaneTabDropPreview(strip);
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -816,12 +855,18 @@ function bindPaneTabStrip(strip, side) {
     event.preventDefault();
     event.stopImmediatePropagation();
     if (slotIsFileExplorerPane(side)) return;
-    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
+    const placement = paneTabDropPlacement(strip, event, payload.session);
+    if (placement.noop) return;
+    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), placement.index);
   };
 }
 
 function showPaneTabDropPreview(strip, event, movingSession) {
   const placement = paneTabDropPlacement(strip, event, movingSession);
+  if (placement.noop) {
+    clearPaneTabDropPreview(strip);
+    return;
+  }
   strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
   strip.style.setProperty('--tab-drop-y', `${Math.round(placement.y)}px`);
   strip.style.setProperty('--tab-drop-height', `${Math.round(placement.height)}px`);
@@ -863,6 +908,16 @@ function dragMeasureTab(cache, tab) {
   return rect;
 }
 
+function paneTabDropPlacementResult(index, x, y, height, sourceVisualIndex = -1) {
+  return {
+    index,
+    x,
+    y,
+    height,
+    noop: sourceVisualIndex >= 0 && index === sourceVisualIndex,
+  };
+}
+
 function paneTabDropPlacement(strip, event, movingSession) {
   dragTimingMarkOnce('paneTabDropPlacement:first');   // S14: first drop-placement pass (first real dragover)
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
@@ -876,12 +931,13 @@ function paneTabDropPlacement(strip, event, movingSession) {
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
   const defaultHeight = Math.min(32, Math.max(24, stripRect.height || 27));
   if (!tabs.length) {
-    return {
-      index: 0,
-      x: clampX(event.clientX - stripRect.left),
-      y: clampY(event.clientY - stripRect.top - defaultHeight / 2, defaultHeight),
-      height: defaultHeight,
-    };
+    return paneTabDropPlacementResult(
+      0,
+      clampX(event.clientX - stripRect.left),
+      clampY(event.clientY - stripRect.top - defaultHeight / 2, defaultHeight),
+      defaultHeight,
+      sourceVisualIndex,
+    );
   }
   const rows = paneTabRows(tabs, tab => dragMeasureTab(measure, tab));
   const row = rows.reduce((best, item) => {
@@ -898,21 +954,23 @@ function paneTabDropPlacement(strip, event, movingSession) {
     let threshold = rect.left + rect.width / 2;
     if (sameStrip) threshold = item.index >= sourceVisualIndex ? rect.left : rect.right;
     if (event.clientX < threshold) {
-      return {
-        index: item.index,
-        x: clampX(rect.left - stripRect.left),
-        y: clampY(row.top - stripRect.top, row.height),
-        height: row.height,
-      };
+      return paneTabDropPlacementResult(
+        item.index,
+        clampX(rect.left - stripRect.left),
+        clampY(row.top - stripRect.top, row.height),
+        row.height,
+        sourceVisualIndex,
+      );
     }
   }
   const last = rowTabs[rowTabs.length - 1];
-  return {
-    index: last.index + 1,
-    x: clampX(last.rect.right - stripRect.left),
-    y: clampY(row.top - stripRect.top, row.height),
-    height: row.height,
-  };
+  return paneTabDropPlacementResult(
+    last.index + 1,
+    clampX(last.rect.right - stripRect.left),
+    clampY(row.top - stripRect.top, row.height),
+    row.height,
+    sourceVisualIndex,
+  );
 }
 
 function paneTabRows(tabs, rectFor = tab => tab.getBoundingClientRect()) {
@@ -970,9 +1028,25 @@ function bindPanelShell(panel, session) {
   if (head) {
     head.draggable = true;
     head.dataset.dragSession = session;
-    head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
+    head.addEventListener('dragstart', event => startPaneDrag(event, head.dataset.dragSlot || slotForSession(session)));
     head.addEventListener('dragend', endSessionDrag);
     head.addEventListener('dragover', event => {
+      const panePayload = paneDragPayload(event);
+      if (panePayload?.slot) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearDropPreview();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
+        if (!paneSwapIntentAllowed(intent)) {
+          event.dataTransfer.dropEffect = 'none';
+          head.classList.remove(CLS.tabDragOver);
+          return;
+        }
+        event.dataTransfer.dropEffect = 'move';
+        head.classList.add(CLS.tabDragOver);
+        return;
+      }
       const filePayload = fileDragPayload(event);
       if (filePayload?.path) {
         event.preventDefault();
@@ -1005,6 +1079,17 @@ function bindPanelShell(panel, session) {
       if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
     });
     head.addEventListener('drop', event => {
+      const panePayload = paneDragPayload(event);
+      if (panePayload?.slot && !event.target.closest('.pane-tabs')) {
+        head.classList.remove(CLS.tabDragOver);
+        event.preventDefault();
+        event.stopPropagation();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
+        clearDropPreview();
+        if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
+        return;
+      }
       const filePayload = fileDragPayload(event);
       if (filePayload?.path && !event.target.closest('.pane-tabs')) {
         head.classList.remove(CLS.tabDragOver);
@@ -1183,10 +1268,17 @@ function previewTmuxWindowLabel(session, key) {
 }
 
 function handleWindowStepButtonClick(event) {
-  const button = event.currentTarget;
+  const button = windowStepButtonFromEvent(event);
+  if (!button) return;
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
   tmuxWindow(button.dataset.windowSession, key, label);
+}
+
+function windowStepButtonFromEvent(event) {
+  const current = event?.currentTarget;
+  if (current?.matches?.('[data-window-dir]')) return current;
+  return event?.target?.closest?.('[data-window-dir]') || null;
 }
 
 function createWindowStepButton(session, dir) {
@@ -1821,12 +1913,12 @@ function applyActivitySummaryPayloadFromPush(payload = {}) {
 function editorSchemePreferenceChoices(options = {}) {
   const preferredOrder = [
     'dark',
-    'vscode-dark-plus',
+    'popular-ide-dark-plus',
     'one-dark',
     'dracula',
     'monokai',
     'nord',
-    'vscode-light-plus',
+    'popular-ide-light-plus',
     'yolomux-light',
     'github-light',
     'one-light',
@@ -1868,12 +1960,12 @@ function activeColorPreferenceChoices() {
 function cursorColorPreferenceChoice(value) {
   const preset = UI_COLOR_PRESETS[value];
   const color = value === 'theme' ? activeEditorScheme().cursor : preset?.cursor;
-  const label = value === 'theme' ? t('pref.appearance.editor_cursor_color.theme') : t(preset.labelKey);
+  const label = value === 'theme' ? t('pref.appearance.editor_cursor_color.theme') : t(preset.cursorLabelKey);
   return color ? {value, label, swatches: [color]} : {value, label};
 }
 
 function cursorColorPreferenceChoices() {
-  return [DEFAULT_CURSOR_COLOR, ...UI_COLOR_CHOICES.filter(value => value !== DEFAULT_CURSOR_COLOR), 'theme']
+  return [...UI_COLOR_CHOICES, 'theme']
     .map(cursorColorPreferenceChoice);
 }
 
