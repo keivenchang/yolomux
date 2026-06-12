@@ -35,7 +35,7 @@ function renderPanels(previousActive = [], options = {}) {
 
 function movePanelsToPool() {
   for (const [item, panel] of panelNodes.entries()) {
-    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
+    capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -56,7 +56,7 @@ function panelItemForNode(node) {
 function poolDisplacedPanel(node) {
   const item = panelItemForNode(node);
   if (item == null) return;
-  if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, node);
+  capturePaneViewState(item, node);
   node.classList.remove('active-pane');
   node.dataset.slot = '';
   panelPool.appendChild(node);
@@ -90,6 +90,7 @@ function syncActivePanelsInPlace() {
     dropSlot.replaceChildren(desired);
     updatePanelSlot(desired, item, slot);
     renderAttachedPanelContent(item);
+    restorePaneViewState(item, desired);
   }
 }
 
@@ -337,6 +338,7 @@ function renderDropSlot(slot, session) {
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
   renderAttachedPanelContent(session);
+  restorePaneViewState(session, panel);
   return node;
 }
 
@@ -1037,6 +1039,12 @@ function bindPanelShell(panel, session) {
       setFocusedPanelItem(session);
     }
   });
+  panel.addEventListener('scroll', event => {
+    const target = event.target;
+    if (target?.matches?.(paneScrollContainerSelector) && panel.contains(target)) {
+      schedulePaneViewStateCapture(session, panel);
+    }
+  }, true);
   const head = panel.querySelector('.panel-head');
   if (head) {
     head.draggable = true;
