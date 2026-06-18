@@ -1435,7 +1435,8 @@ function previewTmuxWindowLabel(session, key) {
       [session]: nextInfo,
     },
   };
-  updatePanelControlLabels(session, nextInfo);
+  updatePanelHeader(session, nextInfo);
+  renderInfoPanel();
 }
 
 function handleWindowStepButtonClick(event) {
