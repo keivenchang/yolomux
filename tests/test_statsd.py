@@ -652,7 +652,7 @@ def test_statsd_reprojects_retained_usage_when_catalog_revision_changes_without_
     assert after["cost_summary"]["total_micro_usd"] == 300
     assert int(after["cost_summary"]["components"][0]["catalog_revision"]) == 8
     assert after["tokens_per_agent_total"] == 11
-    assert service._maybe_reproject_cost_summaries()["reason"] == "current_catalog"
+    assert service._maybe_reproject_cost_summaries()["reason"] in {"complete", "current_catalog"}
     service.store.close()
 
 
@@ -1275,8 +1275,9 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
 
     while service.agent_token_scan_persistence is not None:
         service._drain_agent_token_scan_result()
-    assert pages == [64, 64, 2]
-    assert compact_flags == [False, False, False]
+    assert len(pages) == 130
+    assert set(pages) == {1}
+    assert set(compact_flags) == {False}
     assert service._agent_token_state() == {}
     done = service.finish_agent_token_scan("scan-1")
     assert done["done"] is True

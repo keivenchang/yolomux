@@ -84,8 +84,11 @@ STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
-STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 16
-STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 64
+# Both maintenance paths run on the sole SQLite/RPC owner.  Keep a single
+# durable record per turn: a large JSON payload can cost far more than a
+# simple record count suggests on a memory-constrained host.
+STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
+STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
 
 
 def _scan_agent_token_rows_in_worker(
