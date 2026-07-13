@@ -1628,3 +1628,8 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - Completed `DOIT.cost-details-agent-model-tables.md`. Cost `More Info` uses a responsive wide report with semantic By Agent and Model Usages tables: each class pairs token quantity with cost, each row has accessible detail, and each table ends in a reconciling grand total.
 - Agent/source attribution carries only safe canonical transcript metadata; absolute `.jsonl`/`.ndjson` sources open through the shared Preview action, while missing or unsafe paths remain plain text. The GUI contract and focused Node/browser tests cover modal containment, exact arithmetic, table columns, and Preview navigation.
+
+### Finder Sync cache-first switching
+
+- Completed `DOIT.finder-sync-switch-instant-cache.md`. A warm Finder Sync target reconciles its remembered tree synchronously from the bounded shared listing LRU, preserving mounted rows and session-specific disclosure state. The next frame revalidates visible directories in the background; a cold path uses bounded parallel workers.
+- `tests/layout_async.test.js` covers zero blocking warm requests, changed/unchanged revalidation behavior, mounted-node preservation, bounded cold batches, and LRU eviction.
