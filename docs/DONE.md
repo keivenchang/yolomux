@@ -1612,3 +1612,8 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - Completed `DOIT.pinned-is-tab-scoped-not-pane-minimize.md`. Pinning now protects only tab-level user movement and LRU/cap eviction: pinned tabs cannot be user-dragged across panes or evicted, but they no longer hide, refuse, or alter pane minimize.
 - Generic minimize transfers every source tab (pinned included) through the existing capacity owner; one-column and Vertical Side Pane minimize retain their normal pane-action behavior. Full target capacity still protects pinned target residents through the shared capacity rules.
 - Verification: focused Node layout and three Dockview browser cases passed; `python3 tools/static_build.py --check` passed; final `python3 tools/check.py` passed all eight lanes in 419.84s. Restarted only 8881; its single fresh listener returned expected `/api/ping` 401.
+
+### Finder Sync session cursor memory
+
+- Completed `DOIT.finder-sync-remember-cursor-per-session.md`. Finder Sync now stores each `(session, root)` target's expanded/collapsed state, selected paths, keyboard lead cursor, and selection anchor together. Returning to that session restores the visible cursor through the existing active-descendant/scroll helper without taking terminal or browser focus; collapsed or missing rows fall back to a visible ancestor.
+- Same-root sessions remain independent, and restore uses the cache-first sync path without a blocking filesystem request. The behavior is covered by the committed Node/browser regressions in `d311d528` and `cffa2070`; this completion adds the explicit GUI contract and archive record.
