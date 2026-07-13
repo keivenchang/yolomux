@@ -1641,3 +1641,9 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - Completed `DOIT.finder-sync-switch-instant-cache.md`. A warm Finder Sync target reconciles its remembered tree synchronously from the bounded shared listing LRU, preserving mounted rows and session-specific disclosure state. The next frame revalidates visible directories in the background; a cold path uses bounded parallel workers.
 - `tests/layout_async.test.js` covers zero blocking warm requests, changed/unchanged revalidation behavior, mounted-node preservation, bounded cold batches, and LRU eviction.
+
+### Mobile terminal keyboard bottom modifiers and Backspace
+
+- Completed and removed `DOIT.keyboard-alt-cmd-bottom-left-add-backspace.md`. The popup keyboard's shared side stack is now Esc, Ctrl, Shift, Ctrl-C, Alt, Cmd, placing Alt/Cmd at the bottom. Its compact primary row exposes the existing one-shot Backspace definition beside Tab and Ctrl-B without duplicating the `\x7f` transport path.
+- The flexible primary grid uses three `minmax(0, 1fr)` tracks. Node contracts and the real coarse-pointer Selenium case pin the order, payload, compact/overflow behavior, and 320x240 containment in both themes.
+- Verification: generated assets and `static_build.py --check` passed; Node layout reported 48/0; focused Selenium reported 2/0; the bounded browser matrix reported 447 passed and 5 skipped. The other canonical lanes passed before the first browser launcher orphaned; that exact lane was stopped and rerun under a 600-second watchdog. Port 8881 restarted as one listener, `/api/ping` returned 401, and the served JS/CSS contain the tested arrays and relative grid.
