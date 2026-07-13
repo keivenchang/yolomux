@@ -1623,3 +1623,8 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - Completed `DOIT.fix-yostats-history-slow-sporadic-abort.md`. Stats history reads remain independent of slow sampler/control work, use bounded indexed range reads and byte-bounded browser uploads, and no longer replay a timed-out current RPC through the legacy transport.
 - Browser requests use an 8-second short-range timeout scaled to a 30-second 24-hour cap. A genuine timeout reports its named duration and enters the existing exponential retry/backoff path; empty complete history and real server errors remain distinct states.
 - Measured production/copy-DB reads were well below the timeout budget (24-hour full history median about 351ms); existing statsd, Node, and browser regressions cover slow-owner responsiveness, coverage, and timeout/readiness behavior.
+
+### Cost Summary detail report tables
+
+- Completed `DOIT.cost-details-agent-model-tables.md`. Cost `More Info` uses a responsive wide report with semantic By Agent and Model Usages tables: each class pairs token quantity with cost, each row has accessible detail, and each table ends in a reconciling grand total.
+- Agent/source attribution carries only safe canonical transcript metadata; absolute `.jsonl`/`.ndjson` sources open through the shared Preview action, while missing or unsafe paths remain plain text. The GUI contract and focused Node/browser tests cover modal containment, exact arithmetic, table columns, and Preview navigation.
