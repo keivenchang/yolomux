@@ -149,10 +149,11 @@ def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypat
     service.store.open()
     calls = []
     monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "owner.sock"})
+    owner_timeouts = []
     monkeypatch.setattr(
         statsd,
         "send_yolomux_control_request",
-        lambda *_args, **_kwargs: calls.append(time.time()) or {"ok": True},
+        lambda *_args, **kwargs: owner_timeouts.append(kwargs["timeout"]) or calls.append(time.time()) or {"ok": True},
     )
 
     class BoundedWake:
@@ -173,6 +174,7 @@ def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypat
 
     assert thread.is_alive() is False
     assert len(calls) == 2
+    assert owner_timeouts == [statsd.STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS] * 2
     assert service.last_sampler_success_at > 0
     service.store.close()
 
