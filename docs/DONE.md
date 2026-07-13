@@ -1617,3 +1617,9 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - Completed `DOIT.finder-sync-remember-cursor-per-session.md`. Finder Sync now stores each `(session, root)` target's expanded/collapsed state, selected paths, keyboard lead cursor, and selection anchor together. Returning to that session restores the visible cursor through the existing active-descendant/scroll helper without taking terminal or browser focus; collapsed or missing rows fall back to a visible ancestor.
 - Same-root sessions remain independent, and restore uses the cache-first sync path without a blocking filesystem request. The behavior is covered by the committed Node/browser regressions in `d311d528` and `cffa2070`; this completion adds the explicit GUI contract and archive record.
+
+### YO!stats history latency and timeout honesty
+
+- Completed `DOIT.fix-yostats-history-slow-sporadic-abort.md`. Stats history reads remain independent of slow sampler/control work, use bounded indexed range reads and byte-bounded browser uploads, and no longer replay a timed-out current RPC through the legacy transport.
+- Browser requests use an 8-second short-range timeout scaled to a 30-second 24-hour cap. A genuine timeout reports its named duration and enters the existing exponential retry/backoff path; empty complete history and real server errors remain distinct states.
+- Measured production/copy-DB reads were well below the timeout budget (24-hour full history median about 351ms); existing statsd, Node, and browser regressions cover slow-owner responsiveness, coverage, and timeout/readiness behavior.
