@@ -483,12 +483,12 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
 
 
 def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(browser, tmp_path):
-    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,yo7772&layout=left&tabs=left:1,yo7772", sessions=["1", "yo7772"])
     wait_for_dockview(browser, min_tabs=2)
     result = browser.execute_script(
         """
         activatePaneTab('left', '1');
-        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="yo7772"]');
         const rect = tab.getBoundingClientRect();
         const event = new MouseEvent('contextmenu', {
           bubbles: true,
@@ -503,6 +503,15 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         const initial = Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim());
         const description = menu?.querySelector('.tab-action-description')?.textContent.trim() || '';
         const descriptionNode = menu?.querySelector('.tab-action-description');
+        const actionLineCounts = Object.fromEntries(
+          Array.from(menu?.querySelectorAll('button:not(.tab-action-description):not(.tab-split-action)') || []).map(button => {
+            const label = button.querySelector('.context-menu-label') || button;
+            const range = document.createRange();
+            range.selectNodeContents(label);
+            const lines = new Set(Array.from(range.getClientRects()).filter(rect => rect.width > 0).map(rect => Math.round(rect.top)));
+            return [button.textContent.trim(), lines.size];
+          })
+        );
         const descriptionStyle = descriptionNode ? (() => {
           const style = getComputedStyle(descriptionNode);
           return {whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow};
@@ -515,7 +524,7 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           && detailPopover?.classList.contains('popover-open')
           && detailPopover?.textContent?.trim()
         );
-        focusTerminalFromUserAction('2');
+        focusTerminalFromUserAction('yo7772');
         const detailClosesOnTerminalEngagement = !tab.classList.contains('popover-open')
           && !detailPopover?.classList.contains('popover-open');
         const keyEvent = new KeyboardEvent('keydown', {bubbles: true, cancelable: true, key: 'F10', shiftKey: true});
@@ -528,6 +537,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           initial,
           menuWidth,
           menuCapacity,
+          viewportSafeWidth: innerWidth - (2 * rootCssLengthPx('--popover-edge-gap')),
+          actionLineCounts,
           description,
           descriptionStyle,
           descriptionTag: descriptionNode?.tagName || '',
@@ -557,10 +568,12 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         """
     )
     assert result["prevented"] is True, result
-    assert result["keyboardPrevented"] is True and result["keyboardDescription"].startswith("More desc: 2"), result
+    assert result["keyboardPrevented"] is True and result["keyboardDescription"].startswith("More desc: yo7772"), result
     assert result["active"] == "1", result
-    assert result["description"].startswith("More desc: 2"), result
-    assert 0 < result["menuWidth"] <= result["menuCapacity"] + 1, result
+    assert result["description"].startswith("More desc: yo7772"), result
+    assert result["menuCapacity"] <= result["menuWidth"] <= result["viewportSafeWidth"] + 1, result
+    assert result["actionLineCounts"]["Enable YOLO (auto-approve) for Tmux Session 'yo7772'"] == 1, result
+    assert result["actionLineCounts"]["YO!summary for session 'yo7772'"] == 1, result
     assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
     assert result["detailClosesOnTerminalEngagement"] is True, result
     assert result["descriptionStyle"] == {"whiteSpace": "nowrap", "textOverflow": "ellipsis", "overflow": "hidden"}, result
@@ -577,6 +590,59 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
             assert geometry[zone]["paneBorderRadius"] == "2px", geometry
         assert max(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
         assert geometry["left"]["left"] < geometry["right"]["left"] < geometry["top"]["left"] < geometry["bottom"]["left"], geometry
+
+
+def test_dockview_tab_action_labels_wrap_only_under_real_width_pressure(browser, tmp_path):
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 320, "height": 700, "deviceScaleFactor": 1, "mobile": False},
+    )
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,yo7772&layout=left&tabs=left:1,yo7772",
+            sessions=["1", "yo7772"],
+            grid_width=320,
+            grid_height=650,
+        )
+        wait_for_dockview(browser, min_tabs=2)
+        result = browser.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="yo7772"]');
+            const rect = tab.getBoundingClientRect();
+            tab.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              clientX: Math.round(rect.left + rect.width / 2),
+              clientY: Math.round(rect.bottom),
+            }));
+            const menu = document.querySelector('.session-context-menu');
+            const menuRect = menu.getBoundingClientRect();
+            const lineCount = label => {
+              const range = document.createRange();
+              range.selectNodeContents(label);
+              return new Set(Array.from(range.getClientRects()).filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size;
+            };
+            const buttons = Array.from(menu.querySelectorAll('button:not(.tab-action-description):not(.tab-split-action)'));
+            return {
+              left: menuRect.left,
+              right: menuRect.right,
+              width: menuRect.width,
+              viewportWidth: innerWidth,
+              edgeGap: rootCssLengthPx('--popover-edge-gap'),
+              scrollWidth: menu.scrollWidth,
+              actionLineCounts: Object.fromEntries(buttons.map(button => [button.textContent.trim(), lineCount(button.querySelector('.context-menu-label') || button)])),
+            };
+            """
+        )
+        assert result["left"] >= result["edgeGap"] - 1, result
+        assert result["right"] <= result["viewportWidth"] - result["edgeGap"] + 1, result
+        assert result["scrollWidth"] <= result["width"] + 1, result
+        assert 1 < result["actionLineCounts"]["Enable YOLO (auto-approve) for Tmux Session 'yo7772'"] <= 2, result
+        assert result["actionLineCounts"]["YO!summary for session 'yo7772'"] <= 2, result
+    finally:
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
 
 
 def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, tmp_path):

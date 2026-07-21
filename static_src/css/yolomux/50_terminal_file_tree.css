@@ -522,6 +522,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu:not(.repo-chip-menu) {
   max-width: var(--context-menu-compact-inline-size);
 }
+.terminal-context-menu.session-context-menu:not(.tab-action-sheet) {
+  width: max-content;
+  min-width: var(--context-menu-compact-inline-size);
+  max-width: var(--popover-max-inline-size);
+}
 .terminal-context-menu.tab-action-sheet {
   width: var(--context-menu-compact-inline-size);
   max-width: var(--popover-max-inline-size);

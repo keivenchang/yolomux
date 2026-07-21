@@ -1280,15 +1280,56 @@ def test_current_stats_zoom_reset_uses_completed_click_not_pointerdown(browser, 
         const now = Date.now();
         jsDebugGraphZoomDomain = {startMs: now - 240000, endMs: now - 60000};
         refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
+        const graph = panel.querySelector('[data-js-debug-graph]');
         const reset = panel.querySelector('[data-js-debug-zoom-reset]');
         if (!reset) { done(false); return; }
+        const zoomedBodyMarker = document.createElement('span');
+        zoomedBodyMarker.hidden = true;
+        graph.querySelector('[data-js-debug-graph-body]').append(zoomedBodyMarker);
+        const hiddenCost = document.createElement('article');
+        hiddenCost.className = 'js-yocost-panel';
+        hiddenCost.hidden = true;
+        hiddenCost.innerHTML = '<div class="js-yocost-body"><span data-reset-cost-sentinel>keep</span></div>';
+        document.body.append(hiddenCost);
+        const costSentinel = hiddenCost.querySelector('[data-reset-cost-sentinel]');
+        reset.focus();
         reset.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
         const remainsZoomedAfterDown = jsDebugGraphZoomDomain !== null;
         reset.click();
-        setTimeout(() => done({remainsZoomedAfterDown, cleared: jsDebugGraphZoomDomain === null}), 0);
+        const slider = panel.querySelector('[data-js-debug-range-slider]');
+        const immediate = {
+          cleared: jsDebugGraphZoomDomain === null,
+          resetRemovedWithoutFocusChange: !panel.querySelector('[data-js-debug-zoom-reset]'),
+          sliderEnabled: slider?.disabled === false,
+          heavyGraphPaintDeferred: zoomedBodyMarker.isConnected,
+          hiddenCostUntouched: costSentinel.isConnected,
+        };
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const result = {
+            remainsZoomedAfterDown,
+            immediate,
+            graphPaintedUnzoomed: !graph.classList.contains('js-debug-graph--zoomed') && !graph.querySelector('[data-js-debug-zoomed="true"]'),
+            graphBodyRepainted: !zoomedBodyMarker.isConnected,
+            hiddenCostUntouched: costSentinel.isConnected,
+          };
+          hiddenCost.remove();
+          done(result);
+        }));
         """
     )
-    assert result == {"remainsZoomedAfterDown": True, "cleared": True}
+    assert result == {
+        "remainsZoomedAfterDown": True,
+        "immediate": {
+            "cleared": True,
+            "resetRemovedWithoutFocusChange": True,
+            "sliderEnabled": True,
+            "heavyGraphPaintDeferred": True,
+            "hiddenCostUntouched": True,
+        },
+        "graphPaintedUnzoomed": True,
+        "graphBodyRepainted": True,
+        "hiddenCostUntouched": True,
+    }
 
 
 def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoom(browser, tmp_path):
@@ -14266,6 +14307,59 @@ def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_p
     assert metrics["moved"] == {"activeIndex": 1, "overviewActiveIndex": 1, "count": "2/2"}
     assert metrics["refreshed"] == {"selection": "second", "matches": 2, "active": 1, "count": "2/2", "activeBackground": "rgb(255, 234, 0)"}, metrics
     assert metrics["closed"] == {"hidden": True, "matches": 0, "overviewHidden": True, "startsWith": True, "endsWith": True}
+
+
+def test_rendered_preview_find_passive_refresh_preserves_manual_scroll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const path = '/tmp/2026.md';
+        const text = '# 2026\\n\\nLegal review\\n\\n' + 'later notes\\n\\n'.repeat(80) + 'Legal follow-up\\n\\n' + 'more notes\\n\\n'.repeat(80);
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.style.cssText = 'width:600px;height:180px';
+        host.innerHTML = `
+          <div class="file-editor-content" style="height:180px">
+            <div class="file-editor-preview-pane-panel" style="height:150px;overflow:auto"></div>
+            <div class="file-editor-find-overview" hidden></div>
+            <form class="file-editor-preview-find-panel" role="search">
+              <input type="search" value="Legal"><span class="file-editor-preview-find-count"></span>
+            </form>
+          </div>`;
+        document.body.append(host);
+        const preview = host.querySelector('.file-editor-preview-pane-panel');
+        renderFileEditorPreviewSurface(host, preview, path, text, {context: 'preview'});
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          previewFindApplyQuery(host, 'Legal');
+          const selectedTop = preview.scrollTop;
+          preview.scrollTop = preview.scrollHeight;
+          const manualTop = preview.scrollTop;
+          setTimeout(() => renderFileEditorPreviewSurface(host, preview, path, text, {context: 'preview'}), 900);
+          setTimeout(() => renderFileEditorPreviewSurface(host, preview, path, text, {context: 'preview'}), 2600);
+          setTimeout(() => {
+            const afterPassiveRefreshTop = preview.scrollTop;
+            previewFindSelectMatch(host, 1);
+            const result = {
+              selectedTop,
+              manualTop,
+              afterPassiveRefreshTop,
+              afterExplicitNextTop: preview.scrollTop,
+              maxTop: preview.scrollHeight - preview.clientHeight,
+              active: host.querySelectorAll('.file-editor-preview-find-match.active').length,
+              count: host.querySelector('.file-editor-preview-find-count').textContent,
+            };
+            host.remove();
+            done(result);
+          }, 3300);
+        }));
+        """
+    )
+    assert metrics["manualTop"] > metrics["selectedTop"] + 100, metrics
+    assert abs(metrics["afterPassiveRefreshTop"] - metrics["manualTop"]) <= 1, metrics
+    assert abs(metrics["maxTop"] - metrics["manualTop"]) <= 1, metrics
+    assert metrics["afterExplicitNextTop"] < metrics["manualTop"] - 40, metrics
+    assert metrics["active"] == 1 and metrics["count"] == "2/2", metrics
 
 
 def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tmp_path):

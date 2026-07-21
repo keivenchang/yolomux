@@ -1076,6 +1076,20 @@ function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
   return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs - startMs >= 1000;
 }
 
+function scheduleDebugGraphZoomResetPaint() {
+  const graphs = [...document.querySelectorAll('[data-js-debug-graph]')];
+  // A completed click acknowledges immediately without paying for every SVG in the event handler.
+  // The graph body follows on the next paint; YO!cost is unrelated to browser-local zoom state.
+  graphs.forEach(graph => syncDebugGraphControls(graph));
+  const paint = () => {
+    graphs.forEach(graph => {
+      if (graph.isConnected) refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+    });
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(paint);
+  else setTimeout(paint, 0);
+}
+
 function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
@@ -1083,7 +1097,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  refreshDebugGraphSurfaces();
+  scheduleDebugGraphZoomResetPaint();
 }
 
 function debugEventCounts() {

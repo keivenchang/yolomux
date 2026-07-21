@@ -25999,12 +25999,12 @@ function previewFindUpdatePanel(host = null) {
   panel.querySelectorAll('[data-preview-find-move]').forEach(button => { button.disabled = count === 0; });
 }
 
-function previewFindSelectMatch(host = null, index = 0) {
+function previewFindSelectMatch(host = null, index = 0, options = {}) {
   const state = previewFindStateForHost(host);
   if (!state?.matches.length) return false;
   state.index = (index + state.matches.length) % state.matches.length;
   state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
-  state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  if (options.reveal !== false) state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
   previewFindUpdateOverview(host);
   previewFindUpdatePanel(host);
   return true;
@@ -26054,7 +26054,7 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       node.replaceWith(fragment);
     }
   }
-  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0);
+  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0, {reveal: options.reveal !== false});
   else previewFindUpdatePanel(host);
   return true;
 }
@@ -26088,7 +26088,7 @@ function closePreviewFind(host = null) {
 
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
-  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true, reveal: false});
 }
 
 function fileEditorPreviewSelectionOffsets(pane = null) {
@@ -45744,6 +45744,20 @@ function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
   return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs - startMs >= 1000;
 }
 
+function scheduleDebugGraphZoomResetPaint() {
+  const graphs = [...document.querySelectorAll('[data-js-debug-graph]')];
+  // A completed click acknowledges immediately without paying for every SVG in the event handler.
+  // The graph body follows on the next paint; YO!cost is unrelated to browser-local zoom state.
+  graphs.forEach(graph => syncDebugGraphControls(graph));
+  const paint = () => {
+    graphs.forEach(graph => {
+      if (graph.isConnected) refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+    });
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(paint);
+  else setTimeout(paint, 0);
+}
+
 function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
@@ -45751,7 +45765,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  refreshDebugGraphSurfaces();
+  scheduleDebugGraphZoomResetPaint();
 }
 
 function debugEventCounts() {
