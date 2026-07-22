@@ -73695,14 +73695,18 @@ function renderAutoApproveStatusSurfaces(result = {}) {
 function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const previousActive = activeSessions.slice();
-  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+  // Session metadata owns the live tmux roster. Auto-approve is a status snapshot and may be
+  // served by a separate status worker, so its session_order must not replace the visible tabs.
+  const sessionsChanged = false;
   if (payload.rules) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
   const snapshotRevision = agentWindowSnapshotRevision(payload);
   for (const session of sessions) {
-    const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
+    const snapshot = payload.sessions?.[session];
+    if (!snapshot || typeof snapshot !== 'object') continue;
+    const state = autoApproveStateWithSnapshotRevision(snapshot, snapshotRevision);
     autoApproveStates.set(session, state);
     reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
