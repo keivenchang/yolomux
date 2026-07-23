@@ -833,7 +833,30 @@ function invalidateMarkdownPreviewArtifacts(container) {
   return generation;
 }
 
+function markdownDisclosureState(container) {
+  const occurrences = new Map();
+  return Array.from(container?.querySelectorAll?.('details') || []).map(details => {
+    const summary = String(details.querySelector(':scope > summary')?.textContent || '').trim();
+    const occurrence = occurrences.get(summary) || 0;
+    occurrences.set(summary, occurrence + 1);
+    return {summary, occurrence, open: details.open};
+  });
+}
+
+function restoreMarkdownDisclosureState(container, state) {
+  const occurrences = new Map();
+  const saved = new Map((state || []).map(entry => [`${entry.summary}\u0000${entry.occurrence}`, entry.open]));
+  for (const details of Array.from(container?.querySelectorAll?.('details') || [])) {
+    const summary = String(details.querySelector(':scope > summary')?.textContent || '').trim();
+    const occurrence = occurrences.get(summary) || 0;
+    occurrences.set(summary, occurrence + 1);
+    const open = saved.get(`${summary}\u0000${occurrence}`);
+    if (open !== undefined) details.open = open;
+  }
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  const disclosureState = options.preserveDisclosureState ? markdownDisclosureState(container) : [];
   const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
@@ -844,6 +867,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   linkifyBareUrls(frag);
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
+  restoreMarkdownDisclosureState(container, disclosureState);
   applyMarkdownSourceLines(container, text);
   container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
     context: options.context || '',

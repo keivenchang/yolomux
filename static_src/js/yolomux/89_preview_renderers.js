@@ -1104,11 +1104,12 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
     // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
     // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
     if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
+      const preserveDisclosureState = container._previewPath === path;
       container._previewPath = path;
       container._previewText = text;
       container._previewDisplayMode = fileEditorPreviewDisplayMode;
       container._previewContext = previewContext;
-      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
+      renderMarkdownPreviewInto(container, text, path, {context: previewContext, preserveDisclosureState});
     }
   } else if (previewKind === 'mermaid') {
     // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds

@@ -7314,7 +7314,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
     assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
     // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
-    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context: previewContext\}\)/.test(src), '#133: the file-editor preview threads the owning path and preview context; yoagent bodies pass no path');
+    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context: previewContext, preserveDisclosureState\}\)/.test(src), '#133: the file-editor preview threads the owning path, preview context, and same-file disclosure state; yoagent bodies pass no path');
   });
 
   test('theme preference radios localize and select one value', () => {

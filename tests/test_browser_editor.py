@@ -1928,6 +1928,90 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_preview_keeps_disclosure_state_after_source_refresh(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        try {
+          window.marked = {parse(markdown) { return String(markdown || ''); }};
+          const path = '/home/test/repo/docs/refresh.md';
+          const preview = document.createElement('article');
+          preview.className = 'file-editor-preview-pane-panel markdown-body';
+          document.body.append(preview);
+          const initial = [
+            '<details><summary>Repeated section</summary><p>First old content</p></details>',
+            '<details><summary>Repeated section</summary><p>Second old content</p></details>',
+          ].join('');
+          const updated = [
+            '<details><summary>Repeated section</summary><p>First new content</p></details>',
+            '<details><summary>Repeated section</summary><p>Second new content</p></details>',
+          ].join('');
+          setFileState(path, {kind: 'text', content: initial, original: initial, dirty: false, language: 'markdown'});
+          renderEditorPreviewPane(preview, path, initial, {context: 'preview'});
+          const before = Array.from(preview.querySelectorAll('details'));
+          before[1].open = true;
+          setFileState(path, {kind: 'text', content: updated, original: initial, dirty: true, language: 'markdown'});
+          renderEditorPreviewPane(preview, path, updated, {context: 'preview'});
+          done({
+            open: Array.from(preview.querySelectorAll('details')).map(details => details.open),
+            text: preview.textContent,
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        } catch (error) {
+          done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+        }
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["open"] == [False, True], metrics
+    assert "Second new content" in metrics["text"], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_open_file_missing_refresh_waits_for_replacement(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/repo/docs/new_hire_onboarding.md';
+            const state = {kind: 'text', content: '# before\\n', original: '# before\\n', dirty: false, mtime: 10, size: 9};
+            setFileState(path, state);
+            await refreshOpenFileFromFetchedStatus(path, state, {entry: null, missing: true});
+            const provisional = {
+              missing: fileState.get(path)?.externalMissing === true,
+              pending: fileState.get(path)?.externalMissingPending === true,
+            };
+            await new Promise(resolve => setTimeout(resolve, 120));
+            await refreshOpenFileFromFetchedStatus(path, state, {entry: {name: 'new_hire_onboarding.md', mtime: 10, size: 9}, missing: false});
+            await new Promise(resolve => setTimeout(resolve, 40));
+            done({
+              provisional,
+              final: {
+                missing: fileState.get(path)?.externalMissing === true,
+                pending: fileState.get(path)?.externalMissingPending === true,
+                kind: fileState.get(path)?.kind || '',
+              },
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["provisional"] == {"missing": False, "pending": True}, metrics
+    assert metrics["final"] == {"missing": False, "pending": False, "kind": "text"}, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=920, grid_height=620)
     metrics = browser.execute_async_script(

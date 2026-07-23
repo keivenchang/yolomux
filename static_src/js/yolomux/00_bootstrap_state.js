@@ -615,6 +615,7 @@ let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
 const openFileBackgroundReloadDeferMs = 2000;
+const openFileMissingConfirmationDelayMs = 1000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let mermaidApiPromise = null;

@@ -2136,6 +2136,35 @@ function markOpenFileMissing(path) {
   renderOpenFilePath(path);
 }
 
+const openFileMissingConfirmationTimers = new Map();
+
+function cancelOpenFileMissingConfirmation(path, state = fileState.get(path)) {
+  const timer = openFileMissingConfirmationTimers.get(path);
+  if (timer) clearTimeout(timer);
+  openFileMissingConfirmationTimers.delete(path);
+  if (state) delete state.externalMissingPending;
+}
+
+function scheduleOpenFileMissingConfirmation(path, state) {
+  if (!state || state.externalMissing || openFileMissingConfirmationTimers.has(path)) return;
+  state.externalMissingPending = true;
+  const timer = setTimeout(async () => {
+    openFileMissingConfirmationTimers.delete(path);
+    const current = fileState.get(path);
+    if (current !== state) return;
+    delete current.externalMissingPending;
+    const fetched = await fetchFileEntryStatus(path);
+    if (fetched.entry) {
+      await refreshOpenFileFromFetchedStatus(path, current, fetched);
+    } else if (fetched.missing) {
+      markOpenFileMissing(path);
+    } else {
+      markOpenFileExternalError(path, fetched.error);
+    }
+  }, openFileMissingConfirmationDelayMs);
+  openFileMissingConfirmationTimers.set(path, timer);
+}
+
 async function recoverOpenFileAfterMissing(path, entry = null) {
   const state = fileState.get(path);
   if (!state?.externalMissing) return false;
@@ -2235,13 +2264,13 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   if (!entry) {
     if (fetched.missing) {
       if (state.externalMissing) return;
-      clearFileAutosaveTimer(path);
-      markOpenFileMissing(path);
+      scheduleOpenFileMissingConfirmation(path, state);
     } else {
       markOpenFileExternalError(path, fetched.error);
     }
     return;
   }
+  cancelOpenFileMissingConfirmation(path, state);
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
       clearOpenFileMissingState(state);
