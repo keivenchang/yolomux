@@ -13,17 +13,19 @@ from tests.tmux_runtime import stop_isolated_tmux_runtime
 
 
 def test_probe_fails_zero_or_multiple_listeners(monkeypatch, tmp_path):
-    # Zero or unrelated multiple owners remain hard setup failures.
     for pids in ([], [1, 2]):
-        monkeypatch.setattr(probe, "listener_pids", lambda _port, pids=pids: pids)
-        assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(tmp_path / "out.json")]) == 2
-    # A fork-before-exec child momentarily retains the parent's close-on-exec socket and command.
-    # Only that exact ancestor/command relationship collapses; an unrelated listener stays visible.
-    # This exercises the canonical owner without retrying the listener observation.
+        with monkeypatch.context() as listener_patch:
+            listener_patch.setattr(probe, "listener_pids", lambda _port, pids=pids: pids)
+            assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(tmp_path / "out.json")]) == 2
+    # Only an exact fork-before-exec ancestor/command relationship collapses.
     parents = {101: 1, 202: 101, 303: 1}
     commands = {101: "python yolomux.py --port 49152", 202: "python yolomux.py --port 49152", 303: "foreign"}
     assert probe.canonical_listener_pids([101, 202], parent_reader=parents.get, command_reader=commands.get) == [101]
     assert probe.canonical_listener_pids([101, 303], parent_reader=parents.get, command_reader=commands.get) == [101, 303]
+    snapshot = "p101\nR1\ncpython3.12\nf5\np202\nR101\ncpython3.12\nf5\n"
+    monkeypatch.setattr(probe.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(probe.subprocess, "run", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, snapshot, ""))
+    assert probe.listener_pids(49152) == [101]
 
 
 def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
@@ -100,13 +102,7 @@ def test_standalone_probe_drives_an_ephemeral_authenticated_daemon(monkeypatch, 
                 raise AssertionError(f"ephemeral server snapshot did not publish: {status} {body}")
         output = tmp_path / "latency.json"
         arguments = [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"), "--port", str(server.port), "--scheme", "http", "--output", str(output)]
-        completed = subprocess.run(
-            arguments,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        completed = subprocess.run(arguments, capture_output=True, text=True, timeout=60, check=False)
         # The host decides whether the fixed 20 ms product budget passes; either acceptance result
         # must still be a valid completed run. Probe/setup errors are exit 2 and are never accepted.
         assert completed.returncode in {0, 1}, (completed.stdout, completed.stderr, server.output[-20:])

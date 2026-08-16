@@ -2174,7 +2174,7 @@
     "tests/test_statusd.py": 1558,
     "tests/test_statusd_protocol.py": 86,
     "tests/test_system_status_latency_probe.py": 580,
-    "tests/test_system_status_latency_tool.py": 122,
+    "tests/test_system_status_latency_tool.py": 118,
     "tests/test_system_status_snapshot.py": 458,
     "tests/test_terminal_state_guard.py": 90,
     "tests/test_test_isolation.py": 176,

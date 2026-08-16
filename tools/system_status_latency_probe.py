@@ -105,17 +105,40 @@ def canonical_listener_pids(
     return canonical
 
 
+def darwin_listener_snapshot(output: str) -> tuple[list[int], dict[int, int], dict[int, str]]:
+    """Parse one lsof process-field snapshot without racing later ps reads."""
+
+    pids: list[int] = []
+    parents: dict[int, int] = {}
+    commands: dict[int, str] = {}
+    current_pid = 0
+    for field in output.splitlines():
+        prefix, value = field[:1], field[1:]
+        if prefix == "p" and value.isdigit():
+            current_pid = int(value)
+            pids.append(current_pid)
+        elif current_pid and prefix == "R" and value.isdigit():
+            parents[current_pid] = int(value)
+        elif current_pid and prefix == "c":
+            commands[current_pid] = value
+    return sorted(set(pids)), parents, commands
+
+
 def listener_pids(port: int) -> list[int]:
     if platform.system() == "Darwin":
         completed = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pcR"],
             capture_output=True,
             text=True,
             timeout=3,
             check=False,
         )
-        pids = sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
-        return canonical_listener_pids(pids)
+        pids, parents, commands = darwin_listener_snapshot(completed.stdout)
+        return canonical_listener_pids(
+            pids,
+            parent_reader=lambda pid: parents.get(pid, 0),
+            command_reader=lambda pid: commands.get(pid, ""),
+        )
     inodes = set()
     for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
