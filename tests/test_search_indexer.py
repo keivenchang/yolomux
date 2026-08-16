@@ -11,6 +11,13 @@ from yolomux_lib.local_services.registry import LocalServiceSpec
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
 
 
+def _wait_until_healthy(client: search_indexer.SearchIndexerClient, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.healthy() is True
+
+
 def test_persistent_indexer_coalesces_paths_then_refreshes_one_root(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -36,11 +43,8 @@ def test_persistent_indexer_unix_socket_protocol(tmp_path):
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until_healthy(client)
 
-    assert client.healthy() is True
     assert client.request({"action": "status"})["ok"] is True
     assert client.request({"action": "shutdown"}) == {"ok": True}
     worker.join(timeout=2.0)
@@ -54,11 +58,8 @@ def test_losing_indexer_does_not_unlink_the_owners_socket(tmp_path):
     owner_worker = threading.Thread(target=owner.run, daemon=True)
     owner_worker.start()
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until_healthy(client)
 
-    assert client.healthy() is True
     contender = search_indexer.PersistentSearchIndexer(socket_path)
     assert contender.run() == 0
     assert owner.socket_path.exists() is True
@@ -149,11 +150,8 @@ def test_search_client_replaces_legacy_peer_that_lacks_search_capability(tmp_pat
     worker.start()
     monkeypatch.setattr(search_indexer.SearchIndexerClient, "ensure_started", SEARCH_INDEXER_ENSURE_STARTED)
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until_healthy(client)
 
-    assert client.healthy() is True
     assert client.supports("search") is False
     assert client._stop_legacy_indexer() is True
     assert client._start_until(lambda: client.supports("search")) is True
@@ -180,9 +178,7 @@ def test_indexer_service_leases_prevent_idle_exit_then_allow_shutdown(tmp_path):
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until_healthy(client)
 
     lease = client.registry.acquire_lease()
     assert lease["ok"] is True
@@ -201,10 +197,7 @@ def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tm
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert client.healthy() is True
+    _wait_until_healthy(client)
     spec = LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
     first = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
     second = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
@@ -277,9 +270,7 @@ def test_indexd_common_status_has_bounded_worker_schema(tmp_path):
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
     client = search_indexer.SearchIndexerClient(socket_path)
-    deadline = time.monotonic() + 2.0
-    while not client.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until_healthy(client)
 
     status = client.request({"action": "status"})
     profile = client.request({"action": "profile"})

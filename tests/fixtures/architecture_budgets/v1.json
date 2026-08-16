@@ -2136,7 +2136,7 @@
     "tests/test_refresh_outcome.py": 106,
     "tests/test_runtime_root.py": 134,
     "tests/test_search_index_tombstone_fence.py": 1675,
-    "tests/test_search_indexer.py": 288,
+    "tests/test_search_indexer.py": 285,
     "tests/test_search_indexer_bfs_cutover.py": 906,
     "tests/test_search_progress_notifier_isolation.py": 127,
     "tests/test_server_lease.py": 64,
