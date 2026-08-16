@@ -12,11 +12,18 @@ from typing import Any
 from typing import Callable
 import uuid
 
-from ..infra.host_identity import process_start_identity
+from ..infra.host_identity import process_identity_snapshot
 
 
 PROCESS_GROUP_DEPLOYMENT_ID = uuid.uuid4().hex
 PROCESS_GROUP_IDENTITY_ATTRIBUTE = "_yolomux_process_group_identity"
+
+
+def process_group_leader_start_identity(pid: int) -> str | None:
+    """Read a group leader's birth identity even after the leader becomes a zombie."""
+
+    snapshot = process_identity_snapshot(pid)
+    return snapshot.start_identity if snapshot is not None else None
 
 
 @dataclass(frozen=True)
@@ -42,7 +49,7 @@ def record_owned_process_group(
     if process.poll() is not None:
         return None
     read_pgid = pgid_reader or os.getpgid
-    read_start_identity = start_identity_reader or process_start_identity
+    read_start_identity = start_identity_reader or process_group_leader_start_identity
     try:
         pgid = int(read_pgid(leader_pid))
     except (OSError, ValueError):
@@ -82,7 +89,7 @@ def signal_owned_process_group(
         return {"signalled": False, "reason": "process_group_owned_by_another_deployment"}
 
     read_pgid = pgid_reader or os.getpgid
-    read_start_identity = start_identity_reader or process_start_identity
+    read_start_identity = start_identity_reader or process_group_leader_start_identity
     send_group_signal = killpg or os.killpg
     try:
         live_pgid = int(read_pgid(identity.leader_pid))

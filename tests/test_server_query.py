@@ -55,7 +55,7 @@ def valid_settings_payload() -> dict:
 
 def _record_fixture_process_group(monkeypatch, process):
     monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(process_group_ownership, "process_start_identity", lambda pid: "fixture-start")
+    monkeypatch.setattr(process_group_ownership, "process_group_leader_start_identity", lambda pid: "fixture-start")
     identity = process_group_ownership.record_owned_process_group(process)
     assert identity is not None
 

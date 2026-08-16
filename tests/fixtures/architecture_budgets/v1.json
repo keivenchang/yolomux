@@ -2022,7 +2022,7 @@
     "tests/test_check_runner.py": 2477,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_events.py": 410,
-    "tests/test_common.py": 229,
+    "tests/test_common.py": 227,
     "tests/test_control.py": 152,
     "tests/test_cross_layer_matrix.py": 146,
     "tests/test_dev_backend_watcher.py": 49,

@@ -13,6 +13,7 @@ from yolomux_lib import common
 from yolomux_lib import session_files
 from yolomux_lib import web
 from yolomux_lib.filesystem import git_ops
+from yolomux_lib.host_identity import ProcessIdentitySnapshot
 from yolomux_lib.tmux import process_group_ownership
 from yolomux_lib.yoagent import conversation
 
@@ -196,12 +197,13 @@ def test_backend_primitive_implementation_bodies_have_one_owner():
         assert matches == [f"{owner_path.relative_to(root)}:{owner_name}"]
 
 
-def test_terminate_process_group_waits_after_sigkill(monkeypatch):
+def test_terminate_process_group_signals_zombie_leader_and_waits_after_sigkill(monkeypatch):
     calls = []
 
     class FakeProcess:
         pid = 12345
         waits = 0
+        state = "S"
 
         def poll(self):
             return None
@@ -216,14 +218,10 @@ def test_terminate_process_group_waits_after_sigkill(monkeypatch):
     process = FakeProcess()
     monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(process_group_ownership.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
-    monkeypatch.setattr(process_group_ownership, "process_start_identity", lambda pid: "fixture-start")
+    monkeypatch.setattr(process_group_ownership, "process_identity_snapshot", lambda _pid: ProcessIdentitySnapshot(process.state, "fixture-start"))
     process_group_ownership.record_owned_process_group(process)
 
+    process.state = "Z"
     common.terminate_process_group(process)
 
-    assert calls == [
-        ("killpg", 12345, signal.SIGTERM),
-        ("wait", 2.0),
-        ("killpg", 12345, signal.SIGKILL),
-        ("wait", 2.0),
-    ]
+    assert calls == [("killpg", 12345, signal.SIGTERM), ("wait", 2.0), ("killpg", 12345, signal.SIGKILL), ("wait", 2.0)]
