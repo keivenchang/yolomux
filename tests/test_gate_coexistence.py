@@ -1095,20 +1095,20 @@ def test_o6_process_table_uses_portable_session_column_for_darwin_capture(
 
     class Completed:
         returncode = 0
-        stdout = "43201 43200 43201 43201 0:00.01 python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock\n"
+        stdout = "43201 43200 43200 0 0:00.01 python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock\n"
 
     def run(command: list[str], **_kwargs: object) -> Completed:
         commands.append(command)
         return Completed()
 
     monkeypatch.setattr(local_services_registry.subprocess, "run", run)
-    monkeypatch.setattr(local_services_registry, "process_state", lambda _pid: "")
-    monkeypatch.setattr(local_services_registry, "process_start_time", lambda _pid: 0)
+    monkeypatch.setattr(local_services_registry.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(local_services_registry.os, "getsid", lambda pid: pid)
 
     table = local_services_registry.bounded_process_table(require_complete=True)
 
     assert commands == [["ps", "-axww", "-o", "pid=,ppid=,pgid=,sess=,time=,command="]]
-    assert table[43201].session_id == 43201
+    assert table[43201].pgid == table[43201].session_id == 43201
     assert table[43201].command.endswith("--socket /tmp/exact.sock")
 
 

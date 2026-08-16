@@ -391,9 +391,13 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             pid, ppid, pgid, session_id = int(fields[0]), int(fields[1]), int(fields[2]), int(fields[3])
         except ValueError:
             continue
-        if platform.system() == "Darwin" and session_id <= 0:
+        if platform.system() == "Darwin":
             try:
+                live_pgid = os.getpgid(pid)
                 session_id = os.getsid(pid)
+                if session_id == pid and live_pgid != pid:
+                    live_pgid = os.getpgid(pid)
+                pgid = live_pgid
             except OSError:
                 continue
         cpu_seconds = parse_ps_cpu_seconds(fields[4])
