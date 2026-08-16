@@ -117,34 +117,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dev",
         action="store_true",
-        help="dev mode: backend re-execs on yolomux_lib/*.py change and the page auto-reloads when the "
+        help="dev mode: backend re-execs on any yolomux_lib Python change and the page auto-reloads when the "
         "static bundle changes (off by default; never enable for production)",
     )
     return parser.parse_args()
+
+
+def dev_backend_source_paths(repo_root: Path) -> tuple[Path, ...]:
+    """Return every Python source whose live behavior belongs to the server process."""
+    root = Path(repo_root).resolve(strict=False)
+    fixed = (root / "yolomux.py", root / "tools" / "tmux_wall.py")
+    package_sources = tuple(sorted((root / "yolomux_lib").rglob("*.py")))
+    return tuple(dict.fromkeys((*fixed, *package_sources)))
+
+
+def dev_backend_source_snapshot(repo_root: Path) -> dict[str, int]:
+    """Capture a dynamic source-tree fingerprint so additions and removals trigger a re-exec."""
+    stamps: dict[str, int] = {}
+    for path in dev_backend_source_paths(repo_root):
+        try:
+            stamps[str(path)] = path.stat().st_mtime_ns
+        except OSError:
+            stamps[str(path)] = 0
+    return stamps
 
 
 def start_dev_backend_watcher() -> None:
     """Dev-velocity #1c: re-exec the server when a backend source file changes, so a Python edit takes
     effect without the manual systemd-run restart dance. Daemon thread; only started under --dev."""
     repo_root = Path(__file__).resolve().parents[1]
-    watched = [repo_root / "yolomux.py", repo_root / "tools" / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
-
-    def snapshot() -> dict[str, int]:
-        stamps: dict[str, int] = {}
-        for path in watched:
-            try:
-                stamps[str(path)] = path.stat().st_mtime_ns
-            except OSError:
-                stamps[str(path)] = 0
-        return stamps
 
     def loop() -> None:
-        last = snapshot()
+        last = dev_backend_source_snapshot(repo_root)
         while True:
             _time.sleep(0.5)
-            now = snapshot()
+            now = dev_backend_source_snapshot(repo_root)
             if now != last:
-                changed = sorted(k for k in now if now.get(k) != last.get(k))
+                changed = sorted(path for path in set(last) | set(now) if now.get(path) != last.get(path))
                 print(f"[dev] backend change ({len(changed)} file(s)) — re-execing", flush=True)
                 os.execv(sys.executable, [sys.executable, *sys.argv])
 

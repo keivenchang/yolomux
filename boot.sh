@@ -441,6 +441,22 @@ verify_port_stable() {
   done
 }
 
+verify_port_identity() {
+  local port="$1"
+  local listener_pids=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && listener_pids+=("$pid")
+  done < <(port_listener_pids "$port")
+  if [[ "${#listener_pids[@]}" -ne 1 ]]; then
+    printf 'port %s expected exactly one listener for identity verification; found: %s\n' \
+      "$port" "${listener_pids[*]:-none}" >&2
+    return 1
+  fi
+  "$python_bin" "$repo_root/tools/launcher_probe.py" --scheme https identity \
+    --port "$port" --listener-pid "${listener_pids[0]}"
+}
+
 launch_server() {
   local log_path="$1"
   local shell_command
@@ -490,6 +506,7 @@ restart_port() {
   printf 'restarted port %s from %s; log: %s\n' "$port" "$repo_root" "$log_path"
   wait_for_port "$port"
   verify_port_stable "$port"
+  verify_port_identity "$port"
   release_port_restart_lock "$port"
 }
 

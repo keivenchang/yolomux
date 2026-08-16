@@ -140,7 +140,7 @@ def test_boot_restart_waits_for_stable_listener_after_ready():
 
     assert "verify_port_stable()" in source
     assert "became unstable after readiness" in source
-    assert "wait_for_port \"$port\"\n  verify_port_stable \"$port\"" in source
+    assert 'wait_for_port "$port"\n  verify_port_stable "$port"\n  verify_port_identity "$port"' in source and 'launcher_probe.py" --scheme https identity' in source and "expected exactly one listener for identity verification" in source
 
 
 def test_boot_restart_requires_old_listener_to_stop_before_launch():

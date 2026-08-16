@@ -1,5 +1,6 @@
-"""W1: pure, mode-aware ownership validation for the launcher probe."""
+"""W1: pure, mode-aware ownership and listener-identity validation."""
 
+from tools.launcher_probe import validate_identity_payload
 from tools.launcher_probe import validate_owner_payload
 
 
@@ -59,3 +60,65 @@ def test_shared_default_row_uses_election_contract():
 def test_malformed_payload_fails_closed():
     ok, reason = validate_owner_payload("not-an-object", port=7771, listener_pid=1, managed=True)
     assert not ok
+
+
+def test_listener_identity_accepts_the_exact_process_checkout_and_build():
+    payload = {
+        "ok": True,
+        "pid": 77882,
+        "repo_root": "/repo/yolomux.dev8882",
+        "version": "0.7.7",
+        "client_revision": "123-456",
+    }
+
+    ok, reason = validate_identity_payload(
+        payload,
+        listener_pid=77882,
+        expected_repo_root="/repo/yolomux.dev8882",
+        expected_version="0.7.7",
+        expected_client_revision="123-456",
+    )
+
+    assert ok, reason
+
+
+def test_listener_identity_rejects_a_healthy_response_from_the_wrong_checkout():
+    payload = {
+        "ok": True,
+        "pid": 77882,
+        "repo_root": "/repo/unrelated",
+        "version": "0.7.7",
+        "client_revision": "123-456",
+    }
+
+    ok, reason = validate_identity_payload(
+        payload,
+        listener_pid=77882,
+        expected_repo_root="/repo/yolomux.dev8882",
+        expected_version="0.7.7",
+        expected_client_revision="123-456",
+    )
+
+    assert not ok
+    assert "repo_root" in reason
+
+
+def test_listener_identity_rejects_stale_backend_or_bundle_identity():
+    expected = {
+        "ok": True,
+        "pid": 77882,
+        "repo_root": "/repo/yolomux.dev8882",
+        "version": "0.7.7",
+        "client_revision": "123-456",
+    }
+    for field, stale in (("pid", 1), ("version", "0.7.6"), ("client_revision", "old-bundle")):
+        payload = {**expected, field: stale}
+        ok, reason = validate_identity_payload(
+            payload,
+            listener_pid=77882,
+            expected_repo_root="/repo/yolomux.dev8882",
+            expected_version="0.7.7",
+            expected_client_revision="123-456",
+        )
+        assert not ok
+        assert field in reason

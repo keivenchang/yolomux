@@ -430,6 +430,71 @@ def page_identity_view_state(url: str) -> dict[str, Any]:
     }
 
 
+def terminal_sessions_for_soak_url(url: str) -> list[str]:
+    """Return explicitly visible tmux sessions whose terminal output the soak must prove."""
+    view = page_identity_view_state(url)
+    declared = set(view["sessions"])
+    return list(dict.fromkeys(
+        item
+        for slot_items in view["tabs"].values()
+        for item in slot_items
+        if item in declared
+    ))
+
+
+TERMINAL_READINESS_SCRIPT = """
+    const sessions = arguments[0];
+    return sessions.map(session => {
+      const item = typeof terminals !== 'undefined' ? terminals.get(session) : null;
+      const buffer = item?.term?.buffer?.active;
+      const length = Number(buffer?.length || 0);
+      let nonEmptyLines = 0;
+      for (let index = Math.max(0, length - 200); index < length; index += 1) {
+        if ((buffer.getLine(index)?.translateToString(true) || '').trim()) nonEmptyLines += 1;
+      }
+      return {
+        session,
+        socketReadyState: item?.socket?.readyState ?? null,
+        terminalOutputSeen: item?.terminalOutputSeen === true,
+        rows: Number(item?.term?.rows || 0),
+        cols: Number(item?.term?.cols || 0),
+        bufferLength: length,
+        nonEmptyLines,
+      };
+    });
+"""
+
+
+def terminal_readiness_complete(evidence: Any, sessions: Sequence[str]) -> bool:
+    if not isinstance(evidence, list) or len(evidence) != len(sessions):
+        return False
+    for expected, row in zip(sessions, evidence, strict=True):
+        if (
+            not isinstance(row, Mapping)
+            or row.get("session") != expected
+            or row.get("socketReadyState") != 1
+            or row.get("terminalOutputSeen") is not True
+            or int(row.get("rows") or 0) <= 0
+            or int(row.get("cols") or 0) <= 0
+            or int(row.get("bufferLength") or 0) <= 0
+            or int(row.get("nonEmptyLines") or 0) <= 0
+        ):
+            return False
+    return True
+
+
+def wait_for_terminal_readiness(driver: Any, sessions: Sequence[str], timeout: float = 30.0) -> list[dict[str, Any]]:
+    expected = tuple(str(session) for session in sessions if str(session))
+    if not expected:
+        return []
+
+    def probe(current: Any) -> Any:
+        evidence = current.execute_script(TERMINAL_READINESS_SCRIPT, list(expected))
+        return evidence if terminal_readiness_complete(evidence, expected) else False
+
+    return WebDriverWait(driver, timeout, poll_frequency=0.1).until(probe)
+
+
 def classify_page_identity(actual: Any, *, expected_url: str, expected_journey_id: str | None = None) -> dict[str, Any]:
     """Return typed identity-substitution reasons and the allowed app-owned drift, never silence."""
 
@@ -2229,6 +2294,9 @@ def run_soak(driver: Any, *, url: str, duration: int, expected_head: str, expect
     if bundle_sha256 != expected_bundle_sha256:
         raise RuntimeError("served bundle SHA256 mismatch")
     WebDriverWait(driver, 30).until(lambda current: current.execute_script("return document.getElementById('grid') !== null && typeof jsDebugFailureEvents === 'function' && typeof jsDebugCurrentObservationReceiptBarrier === 'function'"))
+    expected_terminal_sessions = terminal_sessions_for_soak_url(url)
+    if expected_terminal_sessions:
+        artifact["terminalReadiness"] = wait_for_terminal_readiness(driver, expected_terminal_sessions)
     drift_record = new_page_identity_drift_record()
     artifact["pageIdentityDrift"] = drift_record
     expected_journey_id = ""

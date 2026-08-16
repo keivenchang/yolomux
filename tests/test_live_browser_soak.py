@@ -358,6 +358,36 @@ def test_main_persists_cleanup_exception_and_returns_nonzero(tmp_path, monkeypat
     assert artifact["cleanup_failure"]["terminal"] == "RuntimeError"
 
 
+def test_terminal_readiness_targets_only_declared_sessions_visible_in_tabs():
+    url = "https://localhost:8882/?sessions=yo8881,calvin&layout=row@30(left,right)&tabs=left:finder;right:yo8881,stats"
+
+    assert soak.terminal_sessions_for_soak_url(url) == ["yo8881"]
+    assert soak.terminal_sessions_for_soak_url("https://localhost:8882/") == []
+
+
+def test_terminal_readiness_requires_open_socket_real_output_and_nonempty_buffer():
+    ready = [{
+        "session": "yo8881",
+        "socketReadyState": 1,
+        "terminalOutputSeen": True,
+        "rows": 23,
+        "cols": 56,
+        "bufferLength": 23,
+        "nonEmptyLines": 12,
+    }]
+
+    assert soak.terminal_readiness_complete(ready, ["yo8881"]) is True
+    for field, bad in (
+        ("socketReadyState", 0),
+        ("terminalOutputSeen", False),
+        ("rows", 0),
+        ("cols", 0),
+        ("bufferLength", 0),
+        ("nonEmptyLines", 0),
+    ):
+        assert soak.terminal_readiness_complete([{**ready[0], field: bad}], ["yo8881"]) is False
+
+
 @pytest.mark.parametrize("phase", ["preflight", "runtime"])
 def test_terminal_exception_artifacts_are_typed_mode_0600_and_redacted(tmp_path, phase):
     output = tmp_path / f"{phase}.json"

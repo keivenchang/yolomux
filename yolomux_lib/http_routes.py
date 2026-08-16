@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,10 +19,13 @@ from .infra.common import ACTIVITY_MAX_HOURS
 from .infra.common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .infra.common import MAX_EVENT_TAIL_LINES
 from .infra.common import MAX_TRANSCRIPT_TAIL_LINES
+from .infra.common import PROJECT_ROOT
+from .infra.common import YOLOMUX_VERSION
 from .infra.common import auth_setup_required
 from .infra.common import error_payload
 from .infra.common import inline_json_product_metadata
 from .infra.common import parse_bool
+from .infra.common import yolomux_client_revision
 from .chat.chat_service import ChatServiceError
 from .chat.chat_store import ChatStoreValidationError
 from .workspace.locales import resolve_locale_preference
@@ -342,7 +346,14 @@ def get_healthz(request: Any, parsed: Any, route: Route) -> None:
 
 def get_ping(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    request.write_json({"ok": True, "time": time.time()})
+    request.write_json({
+        "ok": True,
+        "time": time.time(),
+        "pid": os.getpid(),
+        "repo_root": str(PROJECT_ROOT),
+        "version": YOLOMUX_VERSION,
+        "client_revision": yolomux_client_revision(),
+    })
 
 
 def get_stats_snapshot(request: Any, parsed: Any, route: Route) -> None:

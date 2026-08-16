@@ -304,6 +304,27 @@ def test_healthz_answers_two_hundred_unauthenticated_and_consults_no_subsystem(p
     assert authentication_failure_rows(log_ring.payload()["logs"]) == []
 
 
+def test_authenticated_ping_identifies_the_listener_checkout_and_browser_build(plain_server):
+    status, body = request(
+        plain_server.port,
+        "GET",
+        PROTECTED_PROBE_PATH,
+        headers={**basic_auth_header(VALID_USER, VALID_PASSWORD), "Accept": "application/json"},
+    )
+
+    assert status == HTTPStatus.OK
+    envelope = json.loads(body)
+    payload = envelope["data"]
+    assert payload == {
+        "ok": True,
+        "time": payload["time"],
+        "pid": http_routes.os.getpid(),
+        "repo_root": str(common.PROJECT_ROOT),
+        "version": common.YOLOMUX_VERSION,
+        "client_revision": common.yolomux_client_revision(),
+    }
+
+
 def test_only_exact_get_healthz_is_public(plain_server, log_ring):
     assert http_routes.route_for_request("POST", LIVENESS_PATH) is None
     assert http_routes.route_for_request("GET", f"{LIVENESS_PATH}/anything") is None

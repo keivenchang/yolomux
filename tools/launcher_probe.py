@@ -13,9 +13,11 @@ subcommands used by the supported launcher after a server is up:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -33,6 +35,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from yolomux_lib.common import auth_cookie_value
 from yolomux_lib.common import current_auth_users
+from yolomux_lib.common import PROJECT_ROOT
+from yolomux_lib.common import YOLOMUX_VERSION
+from yolomux_lib.common import yolomux_client_revision
 from tools.instance_isolation import is_managed_instance_port
 
 
@@ -84,6 +89,34 @@ def validate_owner_payload(payload: Mapping[str, Any], *, port: int, listener_pi
     return True, "ok"
 
 
+def validate_identity_payload(
+    payload: Mapping[str, Any],
+    *,
+    listener_pid: int,
+    expected_repo_root: str,
+    expected_version: str,
+    expected_client_revision: str,
+) -> tuple[bool, str]:
+    """Require the protected ping to identify the exact listener checkout and browser build."""
+    if not isinstance(payload, Mapping):
+        return False, "identity payload must be an object"
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+    checks = (
+        (data.get("ok") is True, "ok must be true"),
+        (_int(data.get("pid")) == listener_pid, f"pid must equal the unique listener pid {listener_pid}"),
+        (str(data.get("repo_root") or "") == expected_repo_root, f"repo_root must be {expected_repo_root}"),
+        (str(data.get("version") or "") == expected_version, f"version must be {expected_version}"),
+        (
+            str(data.get("client_revision") or "") == expected_client_revision,
+            f"client_revision must be {expected_client_revision}",
+        ),
+    )
+    for ok, reason in checks:
+        if not ok:
+            return False, reason
+    return True, "ok"
+
+
 def _row_cookie_header(port: int) -> dict[str, str]:
     """Mint an admin cookie from THIS row's own auth config (the one inside the
     resolved root the exec step applied). When the row runs with the test auth
@@ -103,6 +136,51 @@ def _get_json(scheme: str, host: str, port: int, path: str, headers: Mapping[str
     context = ssl._create_unverified_context() if scheme == "https" else None
     with urllib.request.urlopen(request, context=context, timeout=timeout) as response:
         return json.load(response)
+
+
+def _get_bytes(scheme: str, host: str, port: int, path: str, headers: Mapping[str, str], *, timeout: float = 5.0) -> bytes:
+    url = f"{scheme}://{host}:{port}{path}"
+    request = urllib.request.Request(url, headers=dict(headers))
+    context = ssl._create_unverified_context() if scheme == "https" else None
+    with urllib.request.urlopen(request, context=context, timeout=timeout) as response:
+        return response.read()
+
+
+def _probe_identity(args: argparse.Namespace) -> int:
+    """Prove the unique listener is this checkout and serves this checkout's browser bundle."""
+    headers = _row_cookie_header(args.port)
+    expected_bundle = (_REPO_ROOT / "static" / "yolomux.js").read_bytes()
+    try:
+        served_bundle = _get_bytes(args.scheme, args.host, args.port, "/static/yolomux.js", headers)
+    except OSError as error:
+        print(f"identity {args.port} bundle read failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    if hashlib.sha256(served_bundle).digest() != hashlib.sha256(expected_bundle).digest():
+        print(f"identity {args.port} rejected: served bundle does not match {_REPO_ROOT}", file=sys.stderr)
+        return 1
+    try:
+        payload = _get_json(args.scheme, args.host, args.port, "/api/ping", headers)
+    except urllib.error.HTTPError as error:
+        if error.code == 401 and not headers:
+            print(f"identity {args.port}: bundle verified; protected identity pending auth setup")
+            return 0
+        print(f"identity {args.port} ping failed: HTTP {error.code}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as error:
+        print(f"identity {args.port} ping failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    ok, reason = validate_identity_payload(
+        payload,
+        listener_pid=args.listener_pid,
+        expected_repo_root=str(PROJECT_ROOT),
+        expected_version=YOLOMUX_VERSION,
+        expected_client_revision=yolomux_client_revision(),
+    )
+    if not ok:
+        print(f"identity {args.port} rejected: {reason}", file=sys.stderr)
+        return 1
+    print(f"identity {args.port}: pid {args.listener_pid}, version {YOLOMUX_VERSION}, checkout and bundle verified")
+    return 0
 
 
 def _probe_owner(args: argparse.Namespace) -> int:
@@ -181,6 +259,11 @@ def main(argv: list[str]) -> int:
     owner.add_argument("--listener-pid", type=int, required=True)
     owner.add_argument("--primary-port", type=int, default=None)
     owner.set_defaults(handler=_probe_owner)
+
+    identity = subparsers.add_parser("identity", help="verify the listener checkout, version, and served bundle")
+    identity.add_argument("--port", type=int, required=True)
+    identity.add_argument("--listener-pid", type=int, required=True)
+    identity.set_defaults(handler=_probe_identity)
 
     sessions = subparsers.add_parser("sessions", help="authenticated tmux-session discovery")
     sessions.add_argument("--port", type=int, required=True)
