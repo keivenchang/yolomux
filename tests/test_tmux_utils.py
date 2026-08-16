@@ -95,7 +95,6 @@ def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
     monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/declared.sock")
     assert tmux_utils.tmux_command(argv) == ["tmux", "-S", "/tmp/declared.sock", *argv]
 
-
 @pytest.mark.parametrize(
     ("argv", "verb"),
     [

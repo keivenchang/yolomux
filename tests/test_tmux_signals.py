@@ -25,6 +25,19 @@ from yolomux_lib.tmux_signals import tmux_control_event_type
 from yolomux_lib.tmux_signals import window_record_key
 
 
+def wait_for_control_client_rows(runtime):
+    deadline = time.monotonic() + 4.0
+    attempt = 0
+    while time.monotonic() < deadline:
+        result = run_isolated_tmux(runtime, "list-clients", "-F", "#{client_control_mode}\\t#{client_session}")
+        rows = [line for line in result.stdout.splitlines() if line.startswith("1\\t")]
+        if rows:
+            return rows
+        time.sleep(adaptive_tmux_poll_interval(attempt))
+        attempt += 1
+    return []
+
+
 def test_tmux_signal_watcher_status_preserves_typed_absence_states():
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda event: None)
 
@@ -94,7 +107,6 @@ def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
     server_thread.start()
     first_connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     second_connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-    rows = []
     try:
         first_connection.request("GET", "/api/client-events?channels=status")
         first_response = first_connection.getresponse()
@@ -112,15 +124,7 @@ def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
         assert second_response.status == 200
         assert second_response.readline().decode("utf-8") == "event: ready\n"
         assert app.tmux_signal_event_watcher is not stopped_watcher
-        deadline = time.monotonic() + 4.0
-        attempt = 0
-        while time.monotonic() < deadline:
-            result = run_isolated_tmux(runtime, "list-clients", "-F", "#{client_control_mode}\\t#{client_session}")
-            rows = [line for line in result.stdout.splitlines() if line.startswith("1\\t")]
-            if rows:
-                break
-            time.sleep(adaptive_tmux_poll_interval(attempt))
-            attempt += 1
+        rows = wait_for_control_client_rows(runtime)
         assert rows == [f"1\\t{runtime.sessions[0]}"]
         assert app.tmux_signal_event_watcher_healthy() is True
     finally:
@@ -133,25 +137,18 @@ def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
         stop_isolated_tmux_runtime(runtime)
 
 
-def test_readonly_control_attach_starts_on_fixture_default_server(monkeypatch, tmp_path):
-    """The normal no-socket configuration must create an observable control client."""
+def test_control_attach_keeps_external_commands_writable_on_fixture_default_server(monkeypatch, tmp_path):
+    """The signal monitor must not make unrelated tmux command clients read-only."""
 
     runtime = start_isolated_default_tmux_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, "1")
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: list(runtime.sessions), on_event=lambda _event: None)
-    rows = []
     try:
         assert watcher.start() is True
-        deadline = time.monotonic() + 4.0
-        attempt = 0
-        while time.monotonic() < deadline:
-            result = run_isolated_tmux(runtime, "list-clients", "-F", "#{client_control_mode}\\t#{client_session}")
-            rows = [line for line in result.stdout.splitlines() if line.startswith("1\\t")]
-            if rows:
-                break
-            time.sleep(adaptive_tmux_poll_interval(attempt))
-            attempt += 1
+        rows = wait_for_control_client_rows(runtime)
         assert rows == [f"1\\t{runtime.sessions[0]}"]
         assert watcher.status_payload()["state"] == "attached"
+        assert (sent := run_isolated_tmux(runtime, "send-keys", "-t", f"{runtime.sessions[0]}:", "printf 'writable-after-monitor\\n'", "Enter")).returncode == 0, sent.stderr or sent.stdout
     finally:
         watcher.stop()
         assert watcher.thread is not None
@@ -256,7 +253,7 @@ def test_parse_tmux_signal_snapshot_reports_bad_rows():
     assert payload["errors"] == ["invalid tmux sub-window signal row", "invalid tmux pane signal row"]
 
 
-def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
+def test_tmux_control_attach_command_ignores_size_without_blocking_command_clients(monkeypatch):
     monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", "/tmp/yolomux-test.sock")
 
     command = tmux_control_attach_command("alpha")
@@ -268,7 +265,7 @@ def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
         "-C",
         "attach-session",
         "-f",
-        "read-only,ignore-size",
+        "ignore-size",
         "-t",
         "alpha:",
     ]
@@ -276,7 +273,7 @@ def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
 
 def test_control_client_parent_death_signal_requests_sigterm(monkeypatch):
     # The control client must die with the yolomux parent so a hard SIGKILL/crash does not orphan
-    # a read-only ignore-size tmux client on the shared socket. The preexec hook asks the kernel
+    # an ignore-size tmux control client on the shared socket. The preexec hook asks the kernel
     # for PR_SET_PDEATHSIG=SIGTERM; it must be a no-op (not raise) when libc/prctl is unavailable.
     calls = []
 
@@ -307,6 +304,7 @@ def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
+                "100 1 tmux -C attach-session -f ignore-size -t 1:\n"
                 "101 1 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
                 "102 999 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
                 "103 1 tmux attach-session -t 1:\n"
@@ -315,8 +313,8 @@ def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
     )
     monkeypatch.setattr(tmux_signals.os, "kill", lambda pid, sig: calls.append((pid, sig)))
 
-    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == [101]
-    assert calls == [(101, signal.SIGTERM)]
+    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == [100, 101]
+    assert calls == [(100, signal.SIGTERM), (101, signal.SIGTERM)]
 
 
 def test_run_control_client_uses_parent_death_preexec_only_when_supported(monkeypatch):

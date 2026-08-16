@@ -150,7 +150,7 @@ def tmux_control_attach_command(session: str) -> list[str]:
         "-C",
         "attach-session",
         "-f",
-        "read-only,ignore-size",
+        "ignore-size",
         "-t",
         tmux_session_target(session),
     ])
@@ -170,7 +170,7 @@ def set_control_client_parent_death_signal() -> None:
     The tmux control-mode signal client is a child of the yolomux server. A graceful SIGTERM
     lets run_control_client's finally terminate it, but a hard SIGKILL or crash skips that
     teardown, orphaning the `tmux -C attach-session` client on the shared socket where it lingers
-    forever — one leaked read-only/ignore-size client per hard kill. PR_SET_PDEATHSIG makes the
+    forever — one leaked ignore-size control client per hard kill. PR_SET_PDEATHSIG makes the
     kernel reap it together with the parent. Runs in the forked child before exec, so it does
     nothing but one prctl syscall on the pre-loaded libc to stay fork-safe; Linux-only and
     best-effort (no-op when libc/prctl is unavailable).
@@ -183,7 +183,7 @@ def reap_macos_orphaned_tmux_control_clients() -> list[int]:
     """Terminate monitor clients left behind by a crashed macOS YOLOmux process.
 
     Linux uses PR_SET_PDEATHSIG above, but macOS has no equivalent. Limit the
-    sweep to orphaned (PPID 1) read-only, ignore-size control clients so it
+    sweep to orphaned (PPID 1) ignore-size control clients so it
     cannot affect an interactive tmux attach or another live server's monitor.
     """
     if sys.platform != "darwin":
@@ -215,7 +215,7 @@ def reap_macos_orphaned_tmux_control_clients() -> list[int]:
         args = fields[2].split()
         if not args or os.path.basename(args[0]) != "tmux":
             continue
-        if "-C" not in args or "attach-session" not in args or "read-only,ignore-size" not in args:
+        if "-C" not in args or "attach-session" not in args or not {"ignore-size", "read-only,ignore-size"}.intersection(args):
             continue
         try:
             os.kill(pid, signal.SIGTERM)

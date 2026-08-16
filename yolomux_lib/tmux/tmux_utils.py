@@ -62,9 +62,8 @@ def tmux_guarded_verb(args: Sequence[str]) -> str:
     missing, malformed, or false-ish value stays denied.
 
     A read-only control-mode attach is observational, so it remains available
-    on the shared default server for the normal watcher configuration. A
-    writable control-mode attach can mutate through tmux commands and remains
-    guarded.
+    on the shared default server. A writable control-mode attach requires the
+    same deliberate deployment opt-in as a session kill.
     """
 
     values = [str(item) for item in args]
@@ -76,6 +75,7 @@ def tmux_guarded_verb(args: Sequence[str]) -> str:
         TMUX_CONTROL_MODE_FLAG in values
         and TMUX_CLIENT_ATTACH_VERB in values
         and not tmux_readonly_control_attach(values)
+        and os.environ.get(YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV) != "1"
     ):
         return f"{TMUX_CONTROL_MODE_FLAG} {TMUX_CLIENT_ATTACH_VERB}"
     return ""
