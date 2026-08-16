@@ -4022,12 +4022,13 @@ class WatchBridge:
             worker = record.status_generation_worker
             lease_id = record.status_generation_lease_id
             record.status_generation_stop_event.set()
-            record.status_generation_worker = None
             record.status_generation_lease_id = ""
-        if lease_id:
-            app.status_client.release_generation_lease(lease_id)
+        if lease_id: app.status_client.release_generation_lease(lease_id)
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=2.0)
+            if worker.is_alive(): raise RuntimeError("status generation watcher did not stop")
+        with self.state.lock:
+            if record.status_generation_worker is worker: record.status_generation_worker = None
 
     def status_generation_wait_loop(self, app, record: ClientEventWatcherRecord) -> None:
         worker = threading.current_thread()
@@ -4098,9 +4099,7 @@ class WatchBridge:
             previous_payload = copy.deepcopy(self.state.tmux_signal_payload) if self.state.tmux_signal_payload is not None else None
             self.state.tmux_signal_signature = signature
             self.state.tmux_signal_payload = copy.deepcopy(payload)
-        if not previous:
-            return []
-        if previous == signature:
+        if not previous or previous == signature:
             return []
         event_payload = app.tmux_signal_patch_payload(previous_payload, payload)
         app.publish_client_event(
@@ -4263,15 +4262,15 @@ class WatchBridge:
             with app.activity_transcript_service.transcripts_payload_cache_lock:
                 cache_record = app.activity_transcript_service.transcripts_payload_cache_record
                 snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
-            if snapshot_generation:
-                app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
+            if snapshot_generation: app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=10.0)
+            if thread.is_alive(): raise RuntimeError("client event watcher did not stop")
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
             watchd_worker.join(timeout=5.0)
+            if watchd_worker.is_alive(): raise RuntimeError("watchd revision watcher did not stop")
         with self.state.lock:
-            if self.state.event_watcher_record is record:
-                self.state.event_watcher_record = ClientEventWatcherRecord()
+            if self.state.event_watcher_record is record: self.state.event_watcher_record = ClientEventWatcherRecord()
 
     def stop_client_event_watcher_if_idle(self, app) -> bool:
         with app.client_events.lock:
@@ -4316,6 +4315,7 @@ class WatchBridge:
                         app.drain_and_publish_search_progress()
                         current.next_search_progress_poll_at = now + SEARCH_PROGRESS_DRAIN_POLL_SECONDS
                 except (OSError, RuntimeError, ValueError) as exc:
+                    if current.stop_event.is_set(): break
                     app.log_event(
                         None,
                         "client_event_watch_error",

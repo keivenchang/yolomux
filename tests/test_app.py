@@ -3449,9 +3449,8 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
         def start(self):
             started.append(self.name)
 
-        def join(self, timeout=None):
-            return None
-
+        def join(self, timeout=None): return None
+        def is_alive(self): return False
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
     monkeypatch.setattr(webapp, "server_attention_ack_event_poll_seconds", lambda: 12.0)

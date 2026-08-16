@@ -986,7 +986,10 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   }
   const listings = await Promise.all(Array.from(directories).map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory, options),
+    entries: await fetchDirectory(directory, {
+      ...options,
+      enrichRoot: normalizeDirectoryPath(directory) === normalizedRoot,
+    }),
   })));
   for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
@@ -1003,7 +1006,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   if (!rootEntries) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   if (fileExplorerTree) {
-    setFileExplorerPathDisplay(root);
+    setFileExplorerPathDisplay(root, {deferRepoInfo: true});
     renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {entriesByDir});
   }
   await refreshFileExplorerPanelTrees({

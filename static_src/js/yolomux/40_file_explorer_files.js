@@ -573,6 +573,11 @@ async function flushFileExplorerFsBatch() {
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
+  let refreshRepoInfo = options.fresh === true;
+  const scheduleRepoInfo = entries => {
+    scheduleFileExplorerRepoInfoEnrichment(root, entries, {includeRoot: options.enrichRoot === true, refresh: refreshRepoInfo});
+    refreshRepoInfo = false;
+  };
   return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
       // `fresh` bypasses the completed-value TTL; it must not multiply an
@@ -584,10 +589,7 @@ async function fetchDirectory(path, options = {}) {
     }, {
       onReuse: entries => {
         clearFileExplorerListError(root);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
-          includeRoot: options.enrichRoot === true,
-          refresh: options.fresh === true,
-        });
+        scheduleRepoInfo(entries);
       },
       coalesceFresh: true,
       skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
@@ -598,10 +600,7 @@ async function fetchDirectory(path, options = {}) {
         cacheFileExplorerRepoInfoEntries(root, entries);
         markNewDirectoryEntries(root, entries);
         if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
-          includeRoot: options.enrichRoot === true,
-          refresh: options.fresh === true,
-        });
+        scheduleRepoInfo(entries);
       },
       onError: err => {
         const status = Number(err?.status) || 0;
