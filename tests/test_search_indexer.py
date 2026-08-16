@@ -200,6 +200,11 @@ def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tm
     service = search_indexer.PersistentSearchIndexer(socket_path)
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
+    client = search_indexer.SearchIndexerClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.healthy() is True
     spec = LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
     first = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
     second = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
@@ -209,8 +214,9 @@ def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tm
     for starter in starters:
         starter.start()
     for starter in starters:
-        starter.join(timeout=1.0)
+        starter.join(timeout=spec.start_timeout_seconds)
 
+    assert all(not starter.is_alive() for starter in starters)
     assert results == [True, True]
     assert first.status()["healthy"] is True
     assert second.status()["healthy"] is True
