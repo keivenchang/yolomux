@@ -1870,6 +1870,9 @@ globalThis.__layoutTestApi = {
     terminals.set(session, item);
     return item;
   },
+  terminalItemForTest(session) { return terminals.get(session) || null; },
+  closeTerminalItemForTest: closeTerminalItem,
+  estimateTerminalSizeForTest: estimateTerminalSize,
   scheduleRemoteResizeForTest: scheduleRemoteResize,
   scheduleTerminalBlankScreenRefreshForTest: scheduleTerminalBlankScreenRefresh,
   queueTmuxScrollForTest: queueTmuxScroll,
@@ -2442,6 +2445,7 @@ globalThis.__layoutTestApi = {
   setFileExplorerRepoInfoForTest(path, repo) {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
   },
+  cacheFileExplorerRepoInfoForTest: cacheFileExplorerRepoInfo,
   repoInfoPopoverHtml,
   fileTreeRepoSyncMeta,
   fileTreeDisplayParts,
@@ -2503,6 +2507,7 @@ globalThis.__layoutTestApi = {
   },
   preferenceItemMatches,
   preferenceSectionMatches,
+  quickOpenExclusionSettingPatchForTest: quickOpenExclusionSettingPatch,
   settingsLoadedAgeText,
   preferencesPanelHtmlForTest(query, collapsed = []) {
     preferencesSearchText = query || '';

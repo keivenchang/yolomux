@@ -996,6 +996,17 @@ def test_instrumented_pytest_step_records_every_phase_beyond_ten_rows(tmp_path):
     assert len({row["nodeid"] for row in rows}) == 12
 
 
+def test_run_lane_exports_its_identity_to_every_step(monkeypatch):
+    check = load_check_module()
+    environments = []
+    monkeypatch.setattr(check.subprocess, "run", lambda *_args, **kwargs: environments.append(kwargs["env"]) or subprocess.CompletedProcess([], 0, "", ""))
+
+    result = check.run_lane(check.Lane("pytest-e2e", "e2e", (check.Step("probe", ["probe"]),)))
+
+    assert result.ok
+    assert environments[0][check.CHECK_LANE_ENV] == "pytest-e2e"
+
+
 def test_collection_assigns_class_specific_timeout_ceilings(tmp_path):
     test_config = sys.modules["conftest"]
 

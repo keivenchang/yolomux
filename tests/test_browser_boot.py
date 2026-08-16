@@ -321,6 +321,48 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
             ),
             message=f"real xterm never rendered {marker!r}",
         )
+        browser.set_window_size(1292, 1800)
+        tall_fit = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                metrics
+                if (metrics := driver.execute_script(
+                    """
+                    const session = arguments[0];
+                    const item = terminals.get(session);
+                    const pane = document.querySelector(`#terminal-pane-${session}`);
+                    const screen = pane?.querySelector('.xterm-screen');
+                    const rowNodes = Array.from(screen?.querySelectorAll('.xterm-rows > div') || []);
+                    const paneRect = pane?.getBoundingClientRect();
+                    const screenRect = screen?.getBoundingClientRect();
+                    const lastRowRect = rowNodes.at(-1)?.getBoundingClientRect();
+                    const estimate = pane && item?.term ? estimateTerminalSize(pane, item.term) : null;
+                    if (!paneRect || !screenRect || !lastRowRect || !estimate) return null;
+                    return {
+                      connected: item.socket?.readyState === WebSocket.OPEN,
+                      paneHeight: paneRect.height,
+                      paneBottom: paneRect.bottom,
+                      screenHeight: screenRect.height,
+                      screenBottom: screenRect.bottom,
+                      lastRowBottom: lastRowRect.bottom,
+                      lastRowOverflow: lastRowRect.bottom - paneRect.bottom,
+                      renderedRows: rowNodes.length,
+                      terminalRows: item.term.rows,
+                      estimatedRows: estimate.rows,
+                      measuredCell: estimate.measuredCell,
+                      cellHeight: estimate.cellHeight,
+                    };
+                    """,
+                    session,
+                )) and metrics["connected"] and metrics["renderedRows"] == metrics["terminalRows"] == metrics["estimatedRows"]
+                else False
+            ),
+            message="real xterm did not converge to its measured tall-pane row count",
+        )
+        assert tall_fit["measuredCell"] == "renderer", tall_fit
+        assert tall_fit["cellHeight"] > 0 and tall_fit["paneHeight"] > 1000, tall_fit
+        assert tall_fit["screenHeight"] <= tall_fit["paneHeight"] + 1, tall_fit
+        assert tall_fit["screenBottom"] <= tall_fit["paneBottom"] + 1, tall_fit
+        assert tall_fit["lastRowOverflow"] <= 1, tall_fit
         browser.set_window_size(1320, 820)
         after = WebDriverWait(browser, 8).until(
             lambda driver: (
@@ -349,6 +391,8 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         )
         assert glyphs["rows"] > 0 and glyphs["cols"] > 0 and glyphs["terminalRows"] > 0, glyphs
         assert glyphs["screenRect"] and glyphs["screenRect"]["width"] > 0 and glyphs["screenRect"]["height"] > 0, glyphs
+        repeated = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", f"printf '{marker}\\n'", "Enter")
+        assert repeated.returncode == 0, repeated.stderr or repeated.stdout
         touch_trace = WebDriverWait(browser, 8).until(
             lambda driver: (
                 trace
@@ -362,15 +406,16 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
                     const term = item?.term;
                     const buffer = term?.buffer?.active;
                     const lineIndex = buffer
-                      ? Array.from({length: buffer.length}, (_, index) => index).filter(index => buffer.getLine(index)?.translateToString(true).includes(marker)).at(-1)
+                      ? (Array.from({length: buffer.length}, (_, index) => index).filter(index => buffer.getLine(index)?.translateToString(true).trim() === marker).at(-1) ?? -1)
                       : -1;
                     const line = lineIndex >= 0 ? buffer.getLine(lineIndex).translateToString(true) : '';
                     const markerColumn = line.indexOf(marker);
                     const cell = terminalCellDimensions(term, container);
                     const rect = screen?.getBoundingClientRect();
+                    if (lineIndex < 0 || markerColumn < 0 || !rect || !(cell.width > 0) || !(cell.height > 0)) return null;
                     const viewportY = buffer?.viewportY || 0;
-                    const x = rect ? rect.left + (markerColumn + 0.5) * cell.width : 0;
-                    const y = rect ? rect.top + (lineIndex - viewportY + 0.5) * cell.height : 0;
+                    const x = rect.left + (markerColumn + 0.5) * cell.width;
+                    const y = rect.top + (lineIndex - viewportY + 0.5) * cell.height;
                     const trace = [];
                     const selected = [];
                     const originalSelect = term?.select?.bind(term);

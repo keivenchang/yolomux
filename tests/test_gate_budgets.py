@@ -53,6 +53,7 @@ from tests.gate_harness import run_when_browser_ready
 from tests.helpers.browser_contracts import send_native_key as _send_native_key
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from tests.tmux_runtime import run_isolated_tmux
+from tools.test_plan import PYTEST_LANE_NAMES
 
 
 ENDPOINT_COMPUTE_BUDGET_MS = 750.0
@@ -126,9 +127,9 @@ def test_gate_http_port_is_reserved_until_release(gate_http_port):
 
 
 def test_gate_http_port_candidates_are_partitioned_by_xdist_worker():
-    worker_zero = gate_http_port_candidates(worker="gw0", worker_count=3)
-    worker_one = gate_http_port_candidates(worker="gw1", worker_count=3)
-    worker_two = gate_http_port_candidates(worker="gw2", worker_count=3)
+    worker_zero = gate_http_port_candidates(worker="gw0", worker_count=3, lane="")
+    worker_one = gate_http_port_candidates(worker="gw1", worker_count=3, lane="")
+    worker_two = gate_http_port_candidates(worker="gw2", worker_count=3, lane="")
 
     assert worker_zero
     assert worker_one
@@ -137,7 +138,19 @@ def test_gate_http_port_candidates_are_partitioned_by_xdist_worker():
     assert set(worker_zero).isdisjoint(worker_two)
     assert set(worker_one).isdisjoint(worker_two)
     assert tuple(sorted((*worker_zero, *worker_one, *worker_two))) == tuple(range(7900, 8000))
-    assert gate_http_port_candidates(worker="gw1", worker_count=3) == worker_one
+    assert gate_http_port_candidates(worker="gw1", worker_count=3, lane="") == worker_one
+
+
+def test_gate_http_port_candidates_are_partitioned_across_parallel_check_lanes_and_workers():
+    owners = {
+        (lane, worker): set(gate_http_port_candidates(worker=f"gw{worker}", worker_count=3, lane=lane))
+        for lane in PYTEST_LANE_NAMES
+        for worker in range(3)
+    }
+    assert all(owners.values())
+    for owner, ports in owners.items():
+        assert all(ports.isdisjoint(other_ports) for other, other_ports in owners.items() if other != owner), owner
+    assert set().union(*owners.values()) == set(range(7900, 8000))
 
 
 def test_gate_tmux_uses_private_socket_and_fixture_session_name(gate_tmux):

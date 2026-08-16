@@ -78,6 +78,7 @@ from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner c
 from tools.test_catalog import focused_phase_target_args
 from tools.test_catalog import pytest_files
 from tools.test_plan import LANE_SPECS
+from tools.test_plan import CHECK_LANE_ENV
 from tools.test_plan import StepId
 from tools.test_plan import resolved_lane_step_ids
 from tools.test_plan import validate_lane_specs
@@ -514,7 +515,7 @@ def run_lane(lane: Lane) -> LaneResult:
     for step in lane.steps:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
-        environment = {**os.environ, **dict(step.env)} if step.env else None
+        environment = {**os.environ, CHECK_LANE_ENV: lane.name, **dict(step.env)}
         result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True, env=environment)
         step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:

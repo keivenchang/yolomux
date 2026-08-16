@@ -2471,7 +2471,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/data-setting-reset="yoagent\.intro"(?! disabled)/.test(preferencesHtml), 'YO!agent intro row Reset is visible and enabled at defaults');
     assert.ok(/data-setting-reset="yoagent\.format"(?! disabled)/.test(preferencesHtml), 'YO!agent answer format row Reset is visible and enabled at defaults');
     assert.equal(preferencesHtml.includes('file_explorer.quick_access_paths'), false, 'unused Quick paths is absent from Preferences');
-    assert.ok(/data-setting-path="file_explorer\.index_exclude_dir_names"[\s\S]*data-setting-autosize="true"[\s\S]*rows="20"/.test(preferencesHtml), 'directory-name exclusions grow through 20 lines before using their own scrollbar');
+    assert.ok(/data-setting-path="file_explorer\.index_exclude_paths"[\s\S]*data-setting-autosize="true"[\s\S]*rows="20"/.test(preferencesHtml), 'combined Quick Open exclusions grow through 20 lines before using their own scrollbar');
     assert.ok(/const rows = Number\.isFinite\(Number\(item\.rows\)\) \? Math\.max\(1, Math\.min\(20, Math\.floor\(Number\(item\.rows\)\)\)\) : 3;/.test(diffBundle), 'shared list controls permit a 20-line display ceiling without changing their item validation limit');
     assert.ok(/data-setting-path="uploads\.image_action_order"[\s\S]*data-setting-autosize="true"[\s\S]*data-setting-max-items="9"[\s\S]*rows="7"/.test(preferencesHtml), 'image paste action order autosizes from its readable list and caps shortcut-backed items at 9');
     api.setClientSettingsPatchForTest({uploads: {image_action_order: ['Extract the text (OCR): ; do OCR on this image and extract all of the text.']}});
@@ -4719,6 +4719,22 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('cross-surface host state 27: terminal fit uses the full 720px pane width, not a half-width transient box', () => {
+    const liveRenderService = {_renderer: null};
+    Object.defineProperty(liveRenderService, 'dimensions', {
+      value: {css: {cell: {width: 9, height: 19}}},
+    });
+    stableTerminalPane.clientHeight = 1554;
+    const liveSize = api.estimateTerminalSizeForTest(stableTerminalPane, {_core: {_renderService: liveRenderService}});
+    assert.equal(liveSize.rows, 81, 'an active xterm render-service dimension keeps every 19px row inside a 1554px pane');
+    assert.equal(liveSize.cellHeight, 19, 'terminal fit does not replace an active 19px xterm cell with the smaller font probe');
+    assert.equal(liveSize.measuredCell, 'renderer', 'active render-service dimensions are treated as measured xterm dimensions');
+    const disposedRenderService = {_renderer: null};
+    Object.defineProperty(disposedRenderService, 'dimensions', {
+      get() { throw new TypeError('renderer disposed'); },
+    });
+    assert.doesNotThrow(() => api.estimateTerminalSizeForTest(stableTerminalPane, {_core: {_renderService: disposedRenderService}}),
+      'a resize racing with xterm disposal falls back to the DOM probe');
+    stableTerminalPane.clientHeight = 260;
     api.fitTerminalForTest('stable');
     assert.deepEqual(stableFits, [{cols: 79, rows: 14}], 'terminal fit uses the full 720px pane width, not a half-width transient box');
     api.fitTerminalForTest('stable');
@@ -4731,6 +4747,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = browserClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
     assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
     assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
+    assert.ok(/window\.addEventListener\('pointerdown', \(\) => claimVisibleTerminalResizeAuthority\('pointerdown', \{force: true\}\)/.test(source), 'pointer activation bypasses the browser-local size cache because another server can change tmux ownership');
     assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
     const authorityApi = loadYolomux('', ['1', '2', '3']);
     const authoritySlots = authorityApi.emptyLayoutSlots();
@@ -4752,6 +4769,7 @@ async function runCrossSurfaceStateSuite() {
           this.cols = cols;
           this.rows = rows;
         },
+        write() {},
         refresh() {},
       }, {readyState: WebSocket.OPEN, send(message) { authoritySends.push({session, message: JSON.parse(message)}); }});
     }
@@ -4760,6 +4778,11 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(authoritySends.every(item => item.message.type === 'resize' && item.message.foreground === true && item.message.activate === true && item.message.client), true, 'activation resize frames carry foreground authority, activation, and browser id');
     authorityApi.claimVisibleTerminalResizeAuthorityForTest('test');
     assert.equal(authoritySends.length, 2, 'same browser surface does not keep re-sending unchanged visible terminal authority');
+    authorityApi.processTerminalSocketFrameForTest('1', 'first attached frame');
+    assert.equal(authoritySends.length, 3, 'first PTY output repeats authority after tmux has registered the attach client');
+    assert.equal(authoritySends[2].message.activate, true, 'post-attach authority claim is explicit');
+    authorityApi.processTerminalSocketFrameForTest('1', 'second attached frame');
+    assert.equal(authoritySends.length, 3, 'post-attach authority claim runs once per socket');
     const terminalPane = api.testElementForId('terminal-pane-1');
     terminalPane.classList.add('active');
     terminalPane.clientWidth = 720;

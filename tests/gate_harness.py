@@ -77,6 +77,8 @@ from tests.gate_helpers import RepeatFailure
 from tests.gate_helpers import assert_counter_delta
 from tests.gate_helpers import repeat
 from tests.gate_helpers import sample_counter_delta
+from tools.test_plan import CHECK_LANE_ENV
+from tools.test_plan import PYTEST_LANE_NAMES
 
 
 UNIX_SOCKET_PATH_LIMIT_BYTES = 107
@@ -89,12 +91,19 @@ def gate_http_port_candidates(
     *,
     worker: str | None = None,
     worker_count: int | None = None,
+    lane: str | None = None,
 ) -> tuple[int, ...]:
-    """Return the 7900s ports owned by one xdist worker."""
+    """Return the 7900s ports owned by one check lane and xdist worker."""
 
+    active_lane = os.environ.get(CHECK_LANE_ENV) if lane is None else lane
+    candidates = tuple(GATE_HTTP_PORT_RANGE)
+    if active_lane:
+        if active_lane not in PYTEST_LANE_NAMES:
+            raise ValueError(f"invalid YOLOmux check lane: {active_lane!r}")
+        candidates = candidates[PYTEST_LANE_NAMES.index(active_lane)::len(PYTEST_LANE_NAMES)]
     active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
     if active_worker is None:
-        return tuple(GATE_HTTP_PORT_RANGE)
+        return candidates
     if not active_worker.startswith("gw") or not active_worker[2:].isdigit():
         raise ValueError(f"invalid pytest-xdist worker id: {active_worker!r}")
     worker_index = int(active_worker[2:])
@@ -109,7 +118,7 @@ def gate_http_port_candidates(
         raise ValueError(
             f"pytest-xdist worker {active_worker!r} is outside worker count {worker_count}"
         )
-    candidates = tuple(GATE_HTTP_PORT_RANGE)[worker_index::worker_count]
+    candidates = candidates[worker_index::worker_count]
     if not candidates:
         raise ValueError(
             f"pytest-xdist worker count {worker_count} exceeds the {len(GATE_HTTP_PORT_RANGE)}-port gate range"

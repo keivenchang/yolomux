@@ -7140,10 +7140,23 @@ function installTerminalLinkProvider(session, term) {
   });
 }
 
+function terminalRenderCellDimensions(term) {
+  const renderService = term?._core?._renderService;
+  const rendererCell = renderService?._renderer?.dimensions?.css?.cell;
+  if (rendererCell?.width > 0 && rendererCell?.height > 0) return rendererCell;
+  try {
+    const serviceCell = renderService?.dimensions?.css?.cell;
+    return serviceCell?.width > 0 && serviceCell?.height > 0 ? serviceCell : null;
+  } catch (error) {
+    // xterm's getter dereferences the renderer after dispose. An absent renderer identifies that
+    // teardown race; other getter failures still surface instead of being hidden.
+    if (error?.name !== 'TypeError' || renderService?._renderer) throw error;
+    return null;
+  }
+}
+
 function terminalCellDimensions(term, container) {
-  const cell = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || {};
+  const cell = terminalRenderCellDimensions(term) || {};
   const width = Number(cell.width || 0);
   const height = Number(cell.height || 0);
   if (width > 0 && height > 0) return {width, height};
@@ -20432,11 +20445,13 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
   if (!repo || typeof repo !== 'object') return null;
   const root = normalizeDirectoryPath(repo.root || fallbackRoot);
   if (!root) return null;
+  const cachePath = normalizeDirectoryPath(repo.cache_path || fallbackRoot || root);
   const dirtyCount = Number(repo.dirty_count);
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
   return {
     root,
+    cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
@@ -20461,7 +20476,7 @@ function hydrateFileExplorerRepoInfoCache() {
 function persistFileExplorerRepoInfoCache() {
   try {
     const repos = Array.from(fileExplorerRepoInfoCache.entries())
-      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.cache_path || repo.root) === path)
       .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
       .slice(-200)
       .map(([path, repo]) => ({path, repo}));
@@ -20475,8 +20490,12 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
-  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
+  // Finder preserves the path the user opened while macOS APIs can return its physical alias
+  // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) {
+    setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
+  }
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -20487,7 +20506,9 @@ function clearFileExplorerRepoInfo(path, options = {}) {
   if (!normalized) return false;
   let changed = false;
   for (const [cachedPath, repo] of Array.from(fileExplorerRepoInfoCache.entries())) {
-    if (cachedPath !== normalized && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
+    if (cachedPath !== normalized
+        && normalizeDirectoryPath(repo?.cache_path || '') !== normalized
+        && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
     fileExplorerRepoInfoCache.delete(cachedPath);
     changed = true;
   }
@@ -20499,7 +20520,7 @@ function exactFileExplorerRepoInfo(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  return normalizeDirectoryPath(repo?.root || '') === normalized ? repo : null;
+  return normalizeDirectoryPath(repo?.cache_path || repo?.root || '') === normalized ? repo : null;
 }
 
 function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
@@ -22133,7 +22154,7 @@ function fileTreeRepoBranch(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return '';
   return repoBranchDisplayText(repo);
 }
 
@@ -22142,7 +22163,7 @@ function fileTreeRepoSyncMeta(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return [];
   const parts = [];
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
@@ -35201,6 +35222,7 @@ function rekeyMap(map, oldKey, newKey) {
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
+  terminalFrameRecoveryAttempts.delete(session);
   terminalMobileAccessoryStates.delete(session);
   altScreenWheelRemainder.delete(session);
   clearAgentWindowActivityRecordsForSession(session);
@@ -35561,7 +35583,10 @@ function installTerminalResizeAuthorityHandlers() {
   if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
   window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
-  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
+  // Another YOLOmux server can change tmux's shared ignore-size flags without changing this
+  // browser's local dimensions. Every foreground pointer transition must therefore cross the
+  // socket instead of trusting lastTerminalResizeAuthoritySignature.
+  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}), {capture: true});
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
   });
@@ -36546,6 +36571,7 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
+  if (terminals.get(session) === item) terminals.delete(session);
   if (item.reconnectTimer) {
     clearTimeout(item.reconnectTimer);
     tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.reconnectTimer);
@@ -36566,11 +36592,13 @@ function closeTerminalItem(session, item) {
   }
   if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
+  item.containerBindingDispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
   item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
+  item.containerBindingDispose = null;
   tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
   const observer = resizeObservers.get(session);
   if (observer) {
@@ -36688,9 +36716,7 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
 
 function estimateTerminalSize(container, term = null) {
   const content = terminalContentSize(container);
-  const measured = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || null;
+  const measured = terminalRenderCellDimensions(term);
   if (measured?.width && measured?.height) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),
@@ -46331,8 +46357,7 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
-      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true, rows: 20, autosize: true}),
-      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
+      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 20, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
       preferenceSettingItem('file_explorer.companion_dirs', {type: 'list'}),
@@ -46406,11 +46431,43 @@ function preferenceItemByPath(path) {
 }
 
 function preferenceValue(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettings);
   return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, ''));
 }
 
 function preferenceDefault(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettingsDefaults);
   return nestedSetting(clientSettingsDefaults, path, '');
+}
+
+function quickOpenExclusionEntries(settings) {
+  const names = nestedSetting(settings, 'file_explorer.index_exclude_dir_names', []);
+  const rules = nestedSetting(settings, 'file_explorer.index_exclude_paths', []);
+  return Array.from(new Set([
+    ...(Array.isArray(names) ? names : []),
+    ...(Array.isArray(rules) ? rules : []),
+  ].map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function quickOpenExclusionSettingPatch(entries) {
+  const names = [];
+  const rules = [];
+  for (const rawEntry of Array.isArray(entries) ? entries : []) {
+    const entry = String(rawEntry || '').trim();
+    if (!entry) continue;
+    const isDirectoryName = !entry.startsWith('glob:')
+      && !entry.startsWith('regex:')
+      && !entry.startsWith('~')
+      && !entry.includes('/')
+      && !entry.includes('\\')
+      && entry !== '.'
+      && entry !== '..';
+    (isDirectoryName ? names : rules).push(entry);
+  }
+  return {file_explorer: {
+    index_exclude_dir_names: Array.from(new Set(names)),
+    index_exclude_paths: Array.from(new Set(rules)),
+  }};
 }
 
 function preferenceStatusText() {
@@ -46512,8 +46569,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('cost.')) add(['cost', 'price', 'pricing', 'api', 'list', 'subscription', 'marginal', 'codex', 'claude', 'openai', 'anthropic', 'tokens']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
-  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
-  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
+  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
   if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'frontend-crates']);
@@ -48803,7 +48859,8 @@ function bindPreferencesPanel(panel) {
   }
 
   function currentCostAttributionTable(title, rows, kind) {
-    const body = rows.map(row => {
+    const displayedRows = kind === 'agent' ? currentCostConsolidatedAgentRows(rows) : rows;
+    const body = displayedRows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
         : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
@@ -48819,6 +48876,35 @@ function bindPreferencesPanel(panel) {
         : '<p>No attributed usage in this range.</p>',
       '</section>',
     ].join('');
+  }
+
+  function currentCostConsolidatedAgentRows(rows) {
+    const consolidated = new Map();
+    for (const row of rows) {
+      const label = currentStatsCanonicalAgentLabel(row.label || row.source);
+      const existing = consolidated.get(label);
+      if (!existing) {
+        consolidated.set(label, {
+          ...row,
+          label,
+          dimensions: Object.fromEntries(CURRENT_COST_DIMENSIONS.map(dimension => [dimension, {...row.dimensions[dimension]}])),
+          priced: {...row.priced},
+          unpriced: {...row.unpriced},
+        });
+        continue;
+      }
+      for (const field of ['total_tokens', 'total_micro_usd', 'total_api_list_micro_usd']) existing[field] += row[field];
+      for (const dimension of CURRENT_COST_DIMENSIONS) {
+        for (const field of ['tokens', 'micro_usd', 'api_list_micro_usd']) {
+          existing.dimensions[dimension][field] += row.dimensions[dimension][field];
+        }
+      }
+      for (const coverage of ['priced', 'unpriced']) {
+        existing[coverage].atoms += row[coverage].atoms;
+        existing[coverage].tokens += row[coverage].tokens;
+      }
+    }
+    return [...consolidated.values()];
   }
 
   function currentCostDimensionCell(value) {
@@ -48864,8 +48950,12 @@ function bindPreferencesPanel(panel) {
         if (!groupId) continue;
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
-        if (!series.has(name)) series.set(name, []);
-        series.get(name).push(Object.freeze({
+        const seriesName = groupId === 'agent-tokens'
+          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          : name;
+        if (!series.has(seriesName)) series.set(seriesName, []);
+        const points = series.get(seriesName);
+        const point = {
           start: bucket.start,
           duration: bucket.duration,
           value: item.value,
@@ -48873,7 +48963,19 @@ function bindPreferencesPanel(panel) {
           source_count: item.source_count,
           first_timestamp: item.first_timestamp,
           last_timestamp: item.last_timestamp,
-        }));
+        };
+        const existing = points.at(-1);
+        if (existing?.start === point.start && existing.duration === point.duration && existing.unit === point.unit) {
+          points[points.length - 1] = Object.freeze({
+            ...existing,
+            value: existing.value + point.value,
+            source_count: existing.source_count + point.source_count,
+            first_timestamp: Math.min(existing.first_timestamp, point.first_timestamp),
+            last_timestamp: Math.max(existing.last_timestamp, point.last_timestamp),
+          });
+        } else {
+          points.push(Object.freeze(point));
+        }
       }
     }
     for (const series of groups.values()) {
@@ -63166,6 +63268,7 @@ function codexModelDefaultEffort(model) {
 }
 
 function settingPatchForPath(path, value) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
@@ -63281,7 +63384,7 @@ function savePreferenceControl(control) {
 function resetPreference(path) {
   const item = preferenceItemByPath(path);
   if (!item) return;
-  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+  saveSettingsPatch(settingPatchForPath(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
@@ -75687,8 +75790,8 @@ function connectTerminalSocket(session, item) {
     if (!socketIsCurrent() || !item.term) return;
     try {
       processTerminalSocketFrame(session, item, event.data);
-    } catch (_) {
-      if (terminals.get(session) === item) closeTerminalItem(session, item);
+    } catch (error) {
+      recoverTerminalAfterFrameFailure(session, item, error);
     }
   };
   socket.onclose = event => {
@@ -75708,6 +75811,30 @@ function connectTerminalSocket(session, item) {
     updateStatus();
     refreshTrackedSessionChrome(session);
   };
+}
+
+const terminalFrameRecoveryAttempts = new Map();
+
+function recoverTerminalAfterFrameFailure(session, item, error) {
+  recordJsDebugEvent('client_failure', {
+    ...jsDebugFailureDetails('client_failure', error),
+    component: 'terminal-websocket-frame',
+    session,
+  });
+  if (terminals.get(session) !== item) return false;
+  const attempt = Math.max(1, Number(terminalFrameRecoveryAttempts.get(session) || 0) + 1);
+  terminalFrameRecoveryAttempts.set(session, attempt);
+  closeTerminalItem(session, item);
+  if (!activeSessions.includes(session)) return false;
+  const delay = Math.min(2000, 100 * 2 ** Math.min(4, attempt - 1));
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {
+    seconds: Math.max(1, Math.round(delay / 1000)),
+  }));
+  setTimeout(() => {
+    if (terminals.has(session) || !activeSessions.includes(session) || !document.getElementById(terminalDomId(session))) return;
+    startTerminal(session);
+  }, delay);
+  return true;
 }
 
 // One frame-processing owner for the terminal WebSocket. PTY output stays raw binary; small
@@ -75732,10 +75859,16 @@ function processTerminalSocketFrame(session, item, data) {
     item.term.write(String(data));
   }
   clientPerfEnd(writePerf, {bytes: dataBytes});
+  terminalFrameRecoveryAttempts.delete(session);
   if (consumedControl) return;
   const firstOutput = item.terminalOutputSeen !== true;
   item.terminalOutputSeen = true;
   clearTerminalConnectionState(session);
+  // The first resize frame can reach the server before tmux has registered its new attach client.
+  // First PTY output proves the attach exists, so repeat the visible surface's authority claim once.
+  if (firstOutput && terminalIsVisible(session, item.container)) {
+    sendRemoteResize(session, {activate: true});
+  }
   item.fileUnderlineController?.schedule?.({reason: 'output'});
   if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
   scheduleTerminalAttentionHighlight(session);
@@ -75858,10 +75991,11 @@ function startTerminal(session) {
     attentionHighlightFrame: 0,
     terminalOutputSeen: false,
     fileUnderlineController: null,
+    containerBindingDispose: null,
   };
   terminals.set(session, item);
   item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
-  bindTerminalContainerForSession(session, term, container);
+  item.containerBindingDispose = bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);
   });

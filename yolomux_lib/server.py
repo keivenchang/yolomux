@@ -291,20 +291,18 @@ def refresh_tmux_session_clients_after_attach(session: str) -> bool:
     return refreshed
 
 
-def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int | None = None) -> bool:
-    """Make `client_name` the column authority for `session`: silence every WIDER client.
+def claim_tmux_resize_authority(
+    session: str,
+    client_name: str,
+    active_cols: int | None = None,
+    active_rows: int | None = None,
+) -> bool:
+    """Make `client_name` the size authority for `session`.
 
     Called when a browser surface activates a pane. Under `window-size largest` the shared window
-    is as wide as the widest non-`ignore-size` client, so a wider sibling (a second browser surface
-    OR a hand-attached terminal) makes the focused surface's content overflow its viewport. Flag
-    those wider clients `ignore-size` so they stop voting and the window collapses to the active
-    width; `active_cols` is the width the surface is asking for, preferred over its last-reported
-    width since the pty resize for this same message lands just after this call.
-
-    Width-only by design (per the column-overflow symptom): clients at or below the active width
-    don't inflate it and are left untouched, so the blast radius is exactly the clients that would
-    break the active surface. Idempotent -- when nothing is wider and the active client already
-    counts, it issues no tmux calls (the "current width already == active width" fast path).
+    follows the largest non-`ignore-size` client. A wider OR taller sibling therefore makes the
+    focused surface overflow or leaves a short screen inside a tall viewport. Flag clients that
+    exceed either active dimension so the window converges to the foreground surface.
     """
     clean_client_name = str(client_name or "").strip()
     if not clean_client_name:
@@ -315,19 +313,20 @@ def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int
         # The active client is not listed yet (just attached); best-effort make it count.
         return refresh_tmux_client_ignore_size(clean_client_name, False)
     width = active_cols if isinstance(active_cols, int) and active_cols > 0 else int(current.get("width") or 0)
+    height = active_rows if isinstance(active_rows, int) and active_rows > 0 else int(current.get("height") or 0)
     active_ignored = tmux_client_has_flag(current, "ignore-size")
-    wider = [
+    conflicting = [
         row for row in rows
         if str(row.get("name") or "") != clean_client_name
         and not tmux_client_has_flag(row, "ignore-size")
-        and int(row.get("width") or 0) > width
+        and (int(row.get("width") or 0) > width or int(row.get("height") or 0) > height)
     ]
-    if not active_ignored and not wider:
+    if not active_ignored and not conflicting:
         return False
     changed = False
     if active_ignored:
         changed = refresh_tmux_client_ignore_size(clean_client_name, False) or changed
-    for row in wider:
+    for row in conflicting:
         changed = refresh_tmux_client_ignore_size(str(row.get("name") or ""), True) or changed
     return changed
 
@@ -2720,6 +2719,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         master_fd: int | None = None
         slave_fd: int | None = None
         process: subprocess.Popen[Any] | None = None
+        authority_claim_pending = not readonly and saw_initial_resize
 
         def session_exists() -> bool:
             return tmux(["has-session", "-t", target]).returncode == 0
@@ -2751,7 +2751,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             attach_args.extend(["-t", target])
             process = attach_tmux()
             if not readonly and saw_initial_resize:
-                self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
+                self.server.claim_resize_authority(
+                    session, tmux_client_name, resize_client_id, initial_cols, initial_rows,
+                )
             for payload in pending_payloads:
                 self.handle_ws_payload(
                     session,
@@ -2771,6 +2773,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     readers = [master_fd] if connection_ready else [master_fd, self.connection]
                     readable, _, _ = select.select(readers, [], [], 0.1)
                     if master_fd in readable:
+                        # Popen can return before tmux exposes the new client in list-clients, so the
+                        # eager claim above may miss. Readable PTY output proves the attach exists;
+                        # claim once more at that transition before forwarding its first frame.
+                        if authority_claim_pending:
+                            self.server.claim_resize_authority(
+                                session,
+                                tmux_client_name,
+                                resize_client_id,
+                                resize_state["cols"],
+                                resize_state["rows"],
+                            )
+                            authority_claim_pending = False
                         data = os.read(master_fd, 65536)
                         if not data:
                             break
@@ -2801,6 +2815,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 returncode = process.poll()
                 if returncode == 0 and session_exists():
                     process = attach_tmux()
+                    authority_claim_pending = not readonly
                     continue
                 break
         except OSError:
@@ -2914,7 +2929,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if message.get("foreground") is True or message.get("activate") is True:
                     claimer = getattr(self.server, "claim_resize_authority", None)
                     if callable(claimer):
-                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols))
+                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols, rows))
                 previous = (
                     resize_state.get("rows"),
                     resize_state.get("cols"),
@@ -3033,9 +3048,16 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         with self.host_pty_dimensions_lock:
             return self.host_pty_dimensions.get(str(session or ""), (DEFAULT_ROWS, DEFAULT_COLS))
 
-    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "", active_cols: int | None = None) -> bool:
+    def claim_resize_authority(
+        self,
+        session: str,
+        tmux_client_name: str,
+        resize_client_id: str = "",
+        active_cols: int | None = None,
+        active_rows: int | None = None,
+    ) -> bool:
         del resize_client_id
-        return claim_tmux_resize_authority(session, tmux_client_name, active_cols)
+        return claim_tmux_resize_authority(session, tmux_client_name, active_cols, active_rows)
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         return self.socket.accept()

@@ -1974,7 +1974,7 @@ class LocalServiceRegistry:
         return self._request("release", {"lease_id": lease_id}, timeout=0.25)
 
     def status(self) -> dict[str, Any]:
-        status = (
+        status: dict[str, Any] = (
             {
                 "ok": False,
                 "error": f"{self.spec.name} client upgrade required",

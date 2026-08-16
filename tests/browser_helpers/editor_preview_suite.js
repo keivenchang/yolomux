@@ -8319,6 +8319,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux('', ['1']);
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     api.setActiveLocaleForTest('en');
+    api.setClientSettingsPatchForTest({file_explorer: {index_exclude_dir_names: ['node_modules', 'backup'], index_exclude_paths: ['glob:**/.uploads/**']}});
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
     const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
@@ -8345,8 +8346,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(costHtml.includes('API list prices') && costHtml.includes('Subscription ($0 marginal)'), 'YO!cost offers localized API-list and subscription choices');
     const fileExplorerHtml = sectionHtml('file_explorer');
     assert.ok(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_paths"'), 'Finder Preferences exposes explicit Quick Open exclusions');
+    assert.equal(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_dir_names"'), false, 'Finder Preferences combines directory names and advanced rules into one control');
+    assert.ok(fileExplorerHtml.includes('node_modules\nbackup\nglob:**/.uploads/**'), 'the combined Quick Open control renders directory names and advanced rules in one list');
     assert.ok(/data-setting-path="file_explorer\.index_exclude_paths"[^>]*data-setting-type="list"/.test(fileExplorerHtml), 'Quick Open exclusions use the shared multiline list control');
-    assert.ok(fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents glob and regex rule syntax');
+    assert.ok(fileExplorerHtml.includes('bare directory name') && fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents bare directory names plus glob and regex rules');
+    assert.deepStrictEqual(canonical(api.quickOpenExclusionSettingPatchForTest(['node_modules', 'backup', '/tmp/generated', 'glob:**/.uploads/**', 'regex:(^|/)target(?:/|$)', 'backup'])), {
+      file_explorer: {
+        index_exclude_dir_names: ['node_modules', 'backup'],
+        index_exclude_paths: ['/tmp/generated', 'glob:**/.uploads/**', 'regex:(^|/)target(?:/|$)'],
+      },
+    }, 'the combined Quick Open control splits exact directory names from advanced path rules without duplicates');
     const excludeItem = {path: 'file_explorer.index_exclude_paths', label: 'Quick Open exclusions', help: 'Exclude generated files with glob or regex patterns.'};
     assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
     const appearanceHtml = sectionHtml('appearance');

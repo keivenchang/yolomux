@@ -939,11 +939,13 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
   if (!repo || typeof repo !== 'object') return null;
   const root = normalizeDirectoryPath(repo.root || fallbackRoot);
   if (!root) return null;
+  const cachePath = normalizeDirectoryPath(repo.cache_path || fallbackRoot || root);
   const dirtyCount = Number(repo.dirty_count);
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
   return {
     root,
+    cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
@@ -968,7 +970,7 @@ function hydrateFileExplorerRepoInfoCache() {
 function persistFileExplorerRepoInfoCache() {
   try {
     const repos = Array.from(fileExplorerRepoInfoCache.entries())
-      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.cache_path || repo.root) === path)
       .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
       .slice(-200)
       .map(([path, repo]) => ({path, repo}));
@@ -982,8 +984,12 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
-  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
+  // Finder preserves the path the user opened while macOS APIs can return its physical alias
+  // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) {
+    setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
+  }
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -994,7 +1000,9 @@ function clearFileExplorerRepoInfo(path, options = {}) {
   if (!normalized) return false;
   let changed = false;
   for (const [cachedPath, repo] of Array.from(fileExplorerRepoInfoCache.entries())) {
-    if (cachedPath !== normalized && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
+    if (cachedPath !== normalized
+        && normalizeDirectoryPath(repo?.cache_path || '') !== normalized
+        && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
     fileExplorerRepoInfoCache.delete(cachedPath);
     changed = true;
   }
@@ -1006,7 +1014,7 @@ function exactFileExplorerRepoInfo(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  return normalizeDirectoryPath(repo?.root || '') === normalized ? repo : null;
+  return normalizeDirectoryPath(repo?.cache_path || repo?.root || '') === normalized ? repo : null;
 }
 
 function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
@@ -2640,7 +2648,7 @@ function fileTreeRepoBranch(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return '';
   return repoBranchDisplayText(repo);
 }
 
@@ -2649,7 +2657,7 @@ function fileTreeRepoSyncMeta(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return [];
   const parts = [];
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);

@@ -4760,10 +4760,23 @@ function installTerminalLinkProvider(session, term) {
   });
 }
 
+function terminalRenderCellDimensions(term) {
+  const renderService = term?._core?._renderService;
+  const rendererCell = renderService?._renderer?.dimensions?.css?.cell;
+  if (rendererCell?.width > 0 && rendererCell?.height > 0) return rendererCell;
+  try {
+    const serviceCell = renderService?.dimensions?.css?.cell;
+    return serviceCell?.width > 0 && serviceCell?.height > 0 ? serviceCell : null;
+  } catch (error) {
+    // xterm's getter dereferences the renderer after dispose. An absent renderer identifies that
+    // teardown race; other getter failures still surface instead of being hidden.
+    if (error?.name !== 'TypeError' || renderService?._renderer) throw error;
+    return null;
+  }
+}
+
 function terminalCellDimensions(term, container) {
-  const cell = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || {};
+  const cell = terminalRenderCellDimensions(term) || {};
   const width = Number(cell.width || 0);
   const height = Number(cell.height || 0);
   if (width > 0 && height > 0) return {width, height};

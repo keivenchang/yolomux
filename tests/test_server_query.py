@@ -803,6 +803,50 @@ def test_websocket_bridge_treats_close_before_initial_resize_as_normal_disconnec
     Handler.bridge_tmux(handler, "1")
 
 
+def test_websocket_bridge_reclaims_resize_authority_on_first_attached_pty_frame(monkeypatch):
+    """The initial browser resize can precede tmux client registration; first PTY output retries it."""
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    master_fd, slave_fd = os.pipe()
+    process = FakeProcess()
+    claims = []
+    connection = SimpleNamespace(sendall=lambda _data: None)
+    selections = iter([([master_fd], [], []), ([connection], [], [])])
+    handler = object.__new__(Handler)
+    handler.connection = connection
+    handler.rfile = object()
+    handler.server = SimpleNamespace(
+        host_pty_dimensions_for_session=lambda _session: (24, 80),
+        record_host_pty_dimensions=lambda *_args: None,
+        claim_resize_authority=lambda *args: claims.append(args) or False,
+    )
+    handler.read_initial_ws_payloads = lambda: (84, 110, True, [])
+    handler.read_ws_frame_with_timeout = lambda: (8, b"")
+    monkeypatch.setattr(server_module.pty, "openpty", lambda: (master_fd, slave_fd))
+    monkeypatch.setattr(server_module, "set_pty_size", lambda *_args: None)
+    monkeypatch.setattr(server_module, "tmux_client_name_for_fd", lambda _fd: "/dev/pts/fixture")
+    monkeypatch.setattr(server_module, "configure_session_tmux_options", lambda _session: None)
+    monkeypatch.setattr(server_module, "tmux_attach_command", lambda *, readonly: ["tmux", "attach-session"])
+    monkeypatch.setattr(server_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(server_module, "record_owned_process_group", lambda _process: None)
+    monkeypatch.setattr(server_module, "refresh_tmux_session_clients_after_attach", lambda _session: None)
+    monkeypatch.setattr(server_module, "wait_for_ws_frame", lambda *_args: False)
+    monkeypatch.setattr(server_module.select, "select", lambda *_args: next(selections))
+    monkeypatch.setattr(server_module.os, "read", lambda *_args: b"attached frame")
+    monkeypatch.setattr(server_module, "make_ws_frame", lambda data, opcode: data)
+    monkeypatch.setattr(server_module, "terminate_process_group", lambda *_args: None)
+
+    Handler.bridge_tmux(handler, "1", resize_client_id="browser-1")
+
+    assert claims == [
+        ("1", "/dev/pts/fixture", "browser-1", 110, 84),
+        ("1", "/dev/pts/fixture", "browser-1", 110, 84),
+    ]
+
+
 def test_websocket_frame_reads_are_timeout_wrapped():
     # A blocked WS frame read must not hang the handler thread forever, so the read is bounded by a
     # timeout constant and goes through the timeout-wrapped helper.
@@ -888,7 +932,7 @@ def test_configure_session_tmux_options_skips_newer_window_size_option_on_legacy
 
 
 def _client_list_runner(stdout, calls):
-    # `#{client_name}\t#{client_session}\t#{client_width}\t#{client_flags}` per row.
+    # `#{client_name}\t#{client_session}\t#{client_width}\t#{client_height}\t#{client_flags}` per row.
     def fake_run(cmd, **kwargs):
         if "list-clients" in cmd:
             return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
@@ -898,45 +942,40 @@ def _client_list_runner(stdout, calls):
     return fake_run
 
 
-def test_claim_tmux_resize_authority_silences_wider_clients(monkeypatch):
-    # The active surface owns the column width: every WIDER client on its session is flagged
-    # ignore-size so `window-size largest` collapses to the active width — including a foreign,
-    # hand-attached terminal, not just sibling browser surfaces. Clients at/below the active width
-    # never overflow it and are left untouched.
+def test_claim_tmux_resize_authority_silences_clients_exceeding_either_dimension(monkeypatch):
+    # A 110x84 browser must take ownership back from a 112x34 sibling in both dimensions. Width-only
+    # ownership left the larger browser displaying a 33-row shared screen until page reload.
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     stdout = (
-        "/dev/pts/1\t6\t100\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
-        "/dev/pts/2\t6\t120\tattached,UTF-8\n"              # wider browser surface -> silence
-        "/dev/pts/3\t6\t90\tattached,UTF-8\n"               # narrower co-viewer -> leave alone
-        "/dev/pts/4\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silent -> no call
-        "/dev/pts/5\t7\t200\tattached,UTF-8\n"              # other session -> not our concern
+        "/dev/pts/1\t6\t110\t84\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
+        "/dev/pts/2\t6\t112\t34\tattached,UTF-8\n"              # wider -> silence
+        "/dev/pts/3\t6\t90\t90\tattached,UTF-8\n"               # taller -> silence
+        "/dev/pts/4\t6\t100\t60\tattached,UTF-8\n"              # smaller in both -> harmless
+        "/dev/pts/5\t7\t200\t100\tattached,UTF-8\n"             # other session -> not our concern
     )
     monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
 
-    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 100) is True
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 110, 84) is True
 
     assert ["tmux", "refresh-client", "-t", "/dev/pts/1", "-f", "!ignore-size"] in calls
     assert ["tmux", "refresh-client", "-t", "/dev/pts/2", "-f", "ignore-size"] in calls
-    assert all("/dev/pts/3" not in call for call in calls)
+    assert ["tmux", "refresh-client", "-t", "/dev/pts/3", "-f", "ignore-size"] in calls
     assert all("/dev/pts/4" not in call for call in calls)
     assert all("/dev/pts/5" not in call for call in calls)
 
 
-def test_claim_tmux_resize_authority_noop_when_active_is_widest(monkeypatch):
-    # The "current width already == active width" fast path: when no other voting client is wider
-    # and the active surface already counts, claiming makes zero tmux calls so frequent focus/resize
-    # events stay cheap.
+def test_claim_tmux_resize_authority_noop_when_active_dominates_both_dimensions(monkeypatch):
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     stdout = (
-        "/dev/pts/1\t6\t120\tattached,UTF-8\n"              # active surface, already widest
-        "/dev/pts/2\t6\t100\tattached,UTF-8\n"              # narrower -> harmless
-        "/dev/pts/3\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silenced
+        "/dev/pts/1\t6\t120\t80\tattached,UTF-8\n"
+        "/dev/pts/2\t6\t100\t60\tattached,UTF-8\n"
+        "/dev/pts/3\t6\t130\t90\tattached,ignore-size,UTF-8\n"
     )
     monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
 
-    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 120) is False
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 120, 80) is False
     assert calls == []
 
 
@@ -2552,7 +2591,7 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     assert "saw_initial_resize" in bridge_body
     assert "host_pty_dimensions_for_session(session)" in bridge_body
     assert "record_host_pty_dimensions(session, initial_rows, initial_cols)" in bridge_body
-    assert "self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)" in bridge_body
+    assert "session, tmux_client_name, resize_client_id, initial_cols, initial_rows" in bridge_body
     assert 'message.get("foreground") is False' in initial_payload_body
     assert "saw_resize = True" in initial_payload_body
     assert 'message.get("foreground") is False' in payload_body

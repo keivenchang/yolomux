@@ -2589,6 +2589,7 @@ function codexModelDefaultEffort(model) {
 }
 
 function settingPatchForPath(path, value) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
@@ -2704,7 +2705,7 @@ function savePreferenceControl(control) {
 function resetPreference(path) {
   const item = preferenceItemByPath(path);
   if (!item) return;
-  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+  saveSettingsPatch(settingPatchForPath(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
