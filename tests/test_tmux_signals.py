@@ -402,15 +402,13 @@ def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_relevant("not a control event") is False
 
 
-def test_tmux_control_watcher_reinstalls_subscriptions_after_control_client_exit(monkeypatch):
+def test_tmux_control_watcher_reinstalls_then_fences_shutdown_during_install(monkeypatch):
     installs = []
     control_clients = []
+    errors = []
 
     class StopAfterRecovery:
         stopped = False
-
-        def clear(self):
-            self.stopped = False
 
         def is_set(self):
             return self.stopped
@@ -421,20 +419,22 @@ def test_tmux_control_watcher_reinstalls_subscriptions_after_control_client_exit
         def wait(self, _timeout=None):
             return self.stopped
 
-    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None, on_error=errors.append)
     watcher.stop_event = StopAfterRecovery()
-    monkeypatch.setattr(tmux_signals, "install_tmux_signal_monitoring", lambda sessions: installs.append(list(sessions)) or [])
 
-    def exited_control_client(session):
-        control_clients.append(session)
-        if len(control_clients) == 2:
+    def install(sessions):
+        installs.append(list(sessions))
+        if len(installs) == 2:
             watcher.stop_event.set()
+        return ["expected shutdown failure"]
 
-    monkeypatch.setattr(watcher, "run_control_client", exited_control_client)
+    monkeypatch.setattr(tmux_signals, "install_tmux_signal_monitoring", install)
+    monkeypatch.setattr(watcher, "run_control_client", control_clients.append)
     watcher.run()
 
     assert installs == [["alpha"], ["alpha"]]
-    assert control_clients == ["alpha", "alpha"]
+    assert control_clients == ["alpha"]
+    assert errors == ["expected shutdown failure"]
 
 
 def test_tmux_pane_exit_hook_never_writes_into_a_terminal():

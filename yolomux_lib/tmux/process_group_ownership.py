@@ -91,16 +91,18 @@ def signal_owned_process_group(
     read_pgid = pgid_reader or os.getpgid
     read_start_identity = start_identity_reader or process_group_leader_start_identity
     send_group_signal = killpg or os.killpg
-    try:
-        live_pgid = int(read_pgid(identity.leader_pid))
-    except ProcessLookupError:
-        return {"signalled": False, "reason": "nothing_to_kill"}
-    except (OSError, ValueError):
-        return {"signalled": False, "reason": "process_group_live_identity_unavailable"}
     live_start_identity = read_start_identity(identity.leader_pid)
     if live_start_identity is None:
         return {"signalled": False, "reason": "process_group_live_identity_unavailable"}
-    if live_pgid != identity.pgid or str(live_start_identity) != identity.leader_start_identity:
+    if str(live_start_identity) != identity.leader_start_identity:
+        return {"signalled": False, "reason": "process_group_identity_recycled"}
+    try:
+        live_pgid = int(read_pgid(identity.leader_pid))
+    except (OSError, ValueError):
+        # Darwin can stop exposing a zombie leader's PGID before its exact birth
+        # identity disappears. That unrecycled PID still owns the equal recorded PGID.
+        live_pgid = identity.leader_pid
+    if live_pgid != identity.pgid:
         return {"signalled": False, "reason": "process_group_identity_recycled"}
     try:
         send_group_signal(identity.pgid, int(signum))

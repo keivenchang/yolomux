@@ -385,7 +385,7 @@ class TmuxSignalEventWatcher:
                 raise RuntimeError("tmux signal watcher did not stop")
 
     def emit_error(self, message: str) -> None:
-        if self.on_error:
+        if not self.stop_event.is_set() and self.on_error:
             self.on_error(message)
 
     def run(self) -> None:
@@ -398,6 +398,8 @@ class TmuxSignalEventWatcher:
             self._set_status("attaching", sessions=sessions)
             for error in install_tmux_signal_monitoring(sessions):
                 self.emit_error(error)
+            if self.stop_event.is_set():
+                return
             self.run_control_client(sessions[0])
             self.stop_event.wait(self.retry_seconds)
 

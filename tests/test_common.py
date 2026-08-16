@@ -197,7 +197,7 @@ def test_backend_primitive_implementation_bodies_have_one_owner():
         assert matches == [f"{owner_path.relative_to(root)}:{owner_name}"]
 
 
-def test_terminate_process_group_signals_zombie_leader_and_waits_after_sigkill(monkeypatch):
+def test_terminate_process_group_signals_zombie_leader_without_live_pgid_and_waits(monkeypatch):
     calls = []
 
     class FakeProcess:
@@ -216,7 +216,7 @@ def test_terminate_process_group_signals_zombie_leader_and_waits_after_sigkill(m
             return 0
 
     process = FakeProcess()
-    monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid if process.state == "S" else (_ for _ in ()).throw(ProcessLookupError()))
     monkeypatch.setattr(process_group_ownership.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
     monkeypatch.setattr(process_group_ownership, "process_identity_snapshot", lambda _pid: ProcessIdentitySnapshot(process.state, "fixture-start"))
     process_group_ownership.record_owned_process_group(process)
