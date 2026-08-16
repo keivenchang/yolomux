@@ -579,6 +579,7 @@ class ClientWatchService:
     """Own watcher snapshots, revisions, and lifecycle records independently of HTTP routes."""
 
     lock: threading.RLock = field(default_factory=threading.RLock)
+    tmux_signal_watcher_lock: threading.RLock = field(default_factory=threading.RLock)
     # Every descriptor is keyed by the browser's existing client-event client_id.
     # Keeping the demand here rather than in route-local globals prevents one tab's
     # Finder state from replacing another tab's watch set.

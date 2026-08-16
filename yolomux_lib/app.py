@@ -4161,22 +4161,21 @@ class WatchBridge:
         )
 
     def start_tmux_signal_event_watcher(self, app) -> bool:
-        with self.state.lock:
-            current = app.tmux_signal_event_watcher
-            if current is not None and current.thread is not None and current.thread.is_alive():
-                return False
+        with self.state.tmux_signal_watcher_lock:
+            with self.state.lock:
+                current = app.tmux_signal_event_watcher
+                if current is not None and current.thread is not None and current.thread.is_alive(): return False
+            if current is not None: current.stop()
             watcher = TmuxSignalEventWatcher(lambda: list(app.sessions), app.handle_tmux_signal_event, app.log_tmux_signal_event_error)
-            app.tmux_signal_event_watcher = watcher
-        if current is not None:
-            current.stop()
-        return watcher.start()
+            with self.state.lock: app.tmux_signal_event_watcher = watcher
+            return watcher.start()
 
     def stop_tmux_signal_event_watcher(self, app) -> None:
-        with self.state.lock:
-            watcher = app.tmux_signal_event_watcher
-            app.tmux_signal_event_watcher = None
-        if watcher is not None:
-            watcher.stop()
+        with self.state.tmux_signal_watcher_lock:
+            with self.state.lock:
+                watcher = app.tmux_signal_event_watcher
+                app.tmux_signal_event_watcher = None
+            if watcher is not None: watcher.stop()
 
     def poll_watched_prs_client_event_once(self, app) -> list[str]:
         started = time.perf_counter()

@@ -13,6 +13,7 @@ from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yolomux_lib import tmux_signals
 from yolomux_lib import tmux_utils
+from yolomux_lib import app as app_module
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
@@ -353,13 +354,14 @@ def test_run_control_client_uses_parent_death_preexec_only_when_supported(monkey
 
 
 def test_tmux_signal_watcher_stop_joins_its_owned_thread():
-    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda _event: None)
+    errors = []
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda _event: None, on_error=errors.append)
     watcher.thread = threading.Thread(target=watcher.stop_event.wait, name="owned-tmux-signal-test")
     watcher.thread.start()
 
     watcher.stop()
-
-    assert watcher.thread.is_alive() is False
+    watcher.emit_error("expected shutdown failure")
+    assert watcher.thread.is_alive() is False and watcher.start() is False and errors == []
 
 
 @pytest.mark.parametrize(
@@ -402,39 +404,36 @@ def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_relevant("not a control event") is False
 
 
-def test_tmux_control_watcher_reinstalls_then_fences_shutdown_during_install(monkeypatch):
-    installs = []
-    control_clients = []
-    errors = []
+def test_tmux_signal_watcher_transition_never_starts_a_replaced_owner(monkeypatch):
+    started, results, first_entered, release_first = [], [], threading.Event(), threading.Event()
+    class Watcher:
+        def __init__(self, *_args):
+            self.thread, self.stopped = None, False
 
-    class StopAfterRecovery:
-        stopped = False
+        def start(self):
+            started.append(self)
+            if len(started) == 1:
+                first_entered.set()
+                assert release_first.wait(1.0)
+            self.thread = SimpleNamespace(is_alive=lambda: not self.stopped)
+            return True
 
-        def is_set(self):
-            return self.stopped
-
-        def set(self):
+        def stop(self):
             self.stopped = True
-
-        def wait(self, _timeout=None):
-            return self.stopped
-
-    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None, on_error=errors.append)
-    watcher.stop_event = StopAfterRecovery()
-
-    def install(sessions):
-        installs.append(list(sessions))
-        if len(installs) == 2:
-            watcher.stop_event.set()
-        return ["expected shutdown failure"]
-
-    monkeypatch.setattr(tmux_signals, "install_tmux_signal_monitoring", install)
-    monkeypatch.setattr(watcher, "run_control_client", control_clients.append)
-    watcher.run()
-
-    assert installs == [["alpha"], ["alpha"]]
-    assert control_clients == ["alpha"]
-    assert errors == ["expected shutdown failure"]
+    app = SimpleNamespace(tmux_signal_event_watcher=None, sessions=[], handle_tmux_signal_event=lambda _event: None, log_tmux_signal_event_error=lambda _error: None)
+    bridge = object.__new__(app_module.WatchBridge)
+    bridge.state = app_module.ClientWatchService()
+    monkeypatch.setattr(app_module, "TmuxSignalEventWatcher", Watcher)
+    first = threading.Thread(target=lambda: results.append(bridge.start_tmux_signal_event_watcher(app)))
+    second = threading.Thread(target=lambda: results.append(bridge.start_tmux_signal_event_watcher(app)))
+    first.start()
+    assert first_entered.wait(1.0)
+    second.start()
+    assert second.is_alive()
+    release_first.set()
+    for thread in (first, second): thread.join(timeout=1.0)
+    bridge.stop_tmux_signal_event_watcher(app)
+    assert len(started) == 1 and sorted(results) == [False, True]
 
 
 def test_tmux_pane_exit_hook_never_writes_into_a_terminal():

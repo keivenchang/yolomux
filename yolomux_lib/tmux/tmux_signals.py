@@ -358,10 +358,9 @@ class TmuxSignalEventWatcher:
 
     def start(self) -> bool:
         with self.lock:
-            if self.thread is not None and self.thread.is_alive():
+            if self.stop_event.is_set() or self.thread is not None and self.thread.is_alive():
                 return False
             reap_macos_orphaned_tmux_control_clients()
-            self.stop_event.clear()
             self._set_status("attaching")
             self.thread = threading.Thread(target=self.run, name="tmux-signal-events", daemon=True)
             self.thread.start()
