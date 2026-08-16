@@ -1208,8 +1208,7 @@ def notify_background_owner_done(payload: dict[str, Any]) -> None:
 
 
 def _index_disk_path(root: Path) -> Path:
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.sqlite3"
+    return INDEX_DIR / f"{_root_scope_id(root)}.sqlite3"
 
 
 def persisted_index_roots_within(root: Path) -> list[Path]:
@@ -1242,34 +1241,29 @@ def persisted_index_roots_within(root: Path) -> list[Path]:
 
 
 def _legacy_index_json_path(root: Path) -> Path:
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.json"
+    return INDEX_DIR / f"{_root_scope_id(root)}.json"
 
 
 def _index_manifest_path(root: Path) -> Path:
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.manifest.json"
+    return INDEX_DIR / f"{_root_scope_id(root)}.manifest.json"
 
 
 def _build_lock_path(root: Path) -> Path:
     # C11: a per-root file lock so two server processes (e.g. :7770 and :7771 sharing STATE_DIR) don't
     # duplicate the same expensive walk or delete while another build is persisting.
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.lock"
+    return INDEX_DIR / f"{_root_scope_id(root)}.lock"
 
 
 def _producer_heartbeat_path(root: Path) -> Path:
     # M11: the producer's live custody claim for one root. Written by the single
     # writer only, read by followers with a file read instead of an RPC.
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.producer.json"
+    return INDEX_DIR / f"{_root_scope_id(root)}.producer.json"
 
 
 def _tombstone_path(root: Path) -> Path:
     # C11: written on unindex so a SECOND server process (sharing STATE_DIR) that still holds a ready
     # in-memory copy drops it instead of serving deleted-file results indefinitely.
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return INDEX_DIR / f"{digest}.tomb"
+    return INDEX_DIR / f"{_root_scope_id(root)}.tomb"
 
 
 # A tombstone marker that is present on disk but cannot be parsed into a valid ``(identity, time)`` is

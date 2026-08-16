@@ -29,7 +29,8 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import run_when_browser_ready
-from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import create_isolated_tmux_socket_path
+from tests.tmux_runtime import remove_isolated_tmux_socket_dir
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux import tmux_utils
 
@@ -51,7 +52,7 @@ TERMINAL_PRESSURE_DURATION_SECONDS = 12.0
 TERMINAL_PRESSURE_CHUNK_BYTES = 4096
 TERMINAL_PRESSURE_INTERVAL_SECONDS = 0.02
 TERMINAL_PRESSURE_WARMUP_BYTES = 64 * 1024
-TERMINAL_PRESSURE_SAMPLING_MIN_BYTES = 128 * 1024
+TERMINAL_PRESSURE_MIN_CADENCE_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
@@ -104,11 +105,11 @@ def _request(port: int, path: str) -> tuple[int, bytes]:
     return result
 
 
-def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
+def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_one = tmp_path / "socket-one"
-    socket_two = tmp_path / "socket-two"
+    socket_one = create_isolated_tmux_socket_path(prefix="ytd5a")
+    socket_two = create_isolated_tmux_socket_path(prefix="ytd5b")
     session = f"yt-{uuid.uuid4().hex[:12]}"
     for socket_path in (socket_one, socket_two):
         created = _tmux(socket_path, "new-session", "-d", "-s", session)
@@ -130,6 +131,7 @@ def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, t
         thread.join(timeout=2)
         for socket_path in (socket_one, socket_two):
             _tmux(socket_path, "kill-server")
+            remove_isolated_tmux_socket_dir(socket_path.parent)
 
 
 def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
@@ -146,10 +148,10 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
 
 
 @pytest.mark.gate_serial
-def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
+def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_path = tmp_path / "socket"
+    socket_path = create_isolated_tmux_socket_path(prefix="ytd7")
     session = f"yt-{uuid.uuid4().hex[:12]}"
     created = _tmux(socket_path, "new-session", "-d", "-s", session)
     assert created.returncode == 0, created.stderr or created.stdout
@@ -170,9 +172,10 @@ def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(mo
         server.server_close()
         thread.join(timeout=2)
         _tmux(socket_path, "kill-server")
+        remove_isolated_tmux_socket_dir(socket_path.parent)
 
 
-def _start_terminal_output_pressure(runtime, session: str, *, duration_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS) -> None:
+def _start_terminal_output_pressure(browser, session: str, *, duration_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS) -> None:
     code = (
         "import sys,time;"
         f"payload=('latency-pressure-'*{TERMINAL_PRESSURE_CHUNK_BYTES})[:{TERMINAL_PRESSURE_CHUNK_BYTES}];"
@@ -182,13 +185,18 @@ def _start_terminal_output_pressure(runtime, session: str, *, duration_seconds: 
         "\n sys.stdout.write(payload+'\\n');sys.stdout.flush();time.sleep(interval)"
     )
     command = shlex.join((sys.executable, "-u", "-c", code))
-    # An earlier round leaves its typed characters on the shell's input line. Without this the
-    # pressure command is appended to that prefix, never runs, and the warmup wait times out 8 s
-    # later with no explanation.
-    interrupted = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", "C-c", timeout=5)
-    assert interrupted.returncode == 0, interrupted.stderr or interrupted.stdout
-    result = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", command, "Enter", timeout=5)
-    assert result.returncode == 0, result.stderr or result.stdout
+    submitted = browser.execute_script(
+        """
+        const terminal = terminals.get(arguments[0])?.term;
+        if (!terminal) return false;
+        terminal.input('\u0003', true);
+        terminal.input(`${arguments[1]}\r`, true);
+        return true;
+        """,
+        session,
+        command,
+    )
+    assert submitted is True
 
 
 def _establish_terminal_output_pressure(
@@ -201,7 +209,7 @@ def _establish_terminal_output_pressure(
     """Prove the pressure producer reaches xterm before a measured or throttled phase starts."""
 
     browser.execute_script("clearClientPerfCounters();")
-    _start_terminal_output_pressure(runtime, session, duration_seconds=duration_seconds)
+    _start_terminal_output_pressure(browser, session, duration_seconds=duration_seconds)
     pressure_ready = browser.execute_async_script(
         """
         const minimumBytes = arguments[0];
@@ -377,10 +385,20 @@ def _keystroke_delivery_failures(observed: dict[str, object]) -> list[str]:
         )
     if observed["echo_count"] < 1:
         failures.append(f"socket-echo: the session must answer at least one send while typing; echoToTermWrite count={observed['echo_count']}")
-    if observed["pressure"] and int(observed["pressure_bytes_during_sampling"]) < TERMINAL_PRESSURE_SAMPLING_MIN_BYTES:
+    expected_pressure_chunks = max(
+        1,
+        math.floor(
+            float(observed["sampling_seconds"])
+            / TERMINAL_PRESSURE_INTERVAL_SECONDS
+            * TERMINAL_PRESSURE_MIN_CADENCE_FRACTION
+        ),
+    )
+    minimum_pressure_bytes = expected_pressure_chunks * TERMINAL_PRESSURE_CHUNK_BYTES
+    if observed["pressure"] and int(observed["pressure_bytes_during_sampling"]) < minimum_pressure_bytes:
         failures.append(
             f"output-pressure: xterm must keep consuming the streaming session during sampling; "
-            f"expected at least {TERMINAL_PRESSURE_SAMPLING_MIN_BYTES} bytes, observed {observed['pressure_bytes_during_sampling']}"
+            f"expected at least {minimum_pressure_bytes} bytes over {observed['sampling_seconds']} seconds, "
+            f"observed {observed['pressure_bytes_during_sampling']}"
         )
     return failures
 
@@ -712,20 +730,24 @@ def test_s1_negative_control_stalled_websocket_fails_send_completeness(browser, 
 
 
 def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:
+    sampling_seconds = 1.0
+    minimum_pressure_bytes = math.floor(
+        sampling_seconds / TERMINAL_PRESSURE_INTERVAL_SECONDS * TERMINAL_PRESSURE_MIN_CADENCE_FRACTION
+    ) * TERMINAL_PRESSURE_CHUNK_BYTES
     return {
         "label": "synthetic",
         "sample_count": sample_count,
         "pressure": True,
         "counts": list(range(1, sample_count + 1)),
         "samples": [0.1] * sample_count,
-        "sampling_seconds": 1.0,
+        "sampling_seconds": sampling_seconds,
         "focus_set": None,
         "ws_send_count": sample_count,
         "ws_send_bytes": sample_count,
         "term_on_data_count": sample_count,
         "term_on_data_bytes": sample_count,
         "echo_count": sample_count,
-        "pressure_bytes_during_sampling": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES,
+        "pressure_bytes_during_sampling": minimum_pressure_bytes,
         "long_tasks": {"count": 0, "maxMs": 0},
     }
 
@@ -740,7 +762,7 @@ def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:
         ({"term_on_data_count": 3}, "term-on-data"),
         ({"term_on_data_bytes": 3}, "term-on-data"),
         ({"echo_count": 0}, "socket-echo"),
-        ({"pressure_bytes_during_sampling": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES - 1}, "output-pressure"),
+        ({"pressure_bytes_during_sampling": _complete_delivery_observation()["pressure_bytes_during_sampling"] - 1}, "output-pressure"),
     ],
 )
 def test_s1_delivery_report_names_exactly_the_violated_contract(violation, expected_reason):

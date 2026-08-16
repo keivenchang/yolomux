@@ -70,7 +70,8 @@ print(json.dumps({
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["root"] == str(root)
+    resolved_root = root.resolve()
+    assert payload["root"] == str(resolved_root)
     assert {
         "config": payload["config"],
         "state": payload["state"],
@@ -78,14 +79,14 @@ print(json.dumps({
         "codex": payload["codex"],
         "runtime": payload["runtime"],
     } == {
-        "config": str(root / "config"),
-        "state": str(root / "state"),
-        "cache": str(root / "cache"),
+        "config": str(resolved_root / "config"),
+        "state": str(resolved_root / "state"),
+        "cache": str(resolved_root / "cache"),
         "codex": str(Path.home() / ".codex"),
-        "runtime": str(root / "runtime"),
+        "runtime": str(resolved_root / "runtime"),
     }
     assert all(
-        Path(payload[name]).is_relative_to(root)
+        Path(payload[name]).is_relative_to(resolved_root)
         for name in ("config", "state", "cache", "runtime", "longest_socket")
     )
     assert not Path(payload["home"]).is_relative_to(root)
@@ -94,17 +95,18 @@ print(json.dumps({
 
 def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_path: Path):
     root = Path("/tmp/yr")
+    resolved_root = root.resolve()
     paths = common.resolve_yolomux_roots(
         {"YOLOMUX_ROOT": str(root), "XDG_CACHE_HOME": "/outside/cache", "CODEX_HOME": "/outside/codex"},
         identity=_identity(),
     )
 
-    assert paths.config_dir == root / "config"
-    assert paths.state_dir == root / "state"
-    assert paths.cache_dir == root / "cache"
+    assert paths.config_dir == resolved_root / "config"
+    assert paths.state_dir == resolved_root / "state"
+    assert paths.cache_dir == resolved_root / "cache"
     assert paths.codex_home == Path.home() / ".codex"
-    assert paths.runtime_dir.is_relative_to(root / "runtime")
-    assert all(path.is_relative_to(root) for path in paths.writable_paths())
+    assert paths.runtime_dir.is_relative_to(resolved_root / "runtime")
+    assert all(path.is_relative_to(resolved_root) for path in paths.writable_paths())
 
 
 @pytest.mark.parametrize(
@@ -137,7 +139,7 @@ def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Pat
 
 
 def test_socket_budget_accepts_a_realistic_development_root():
-    root = Path("/home/keivenc/dev/yolomux-verify-7771")
+    root = Path.home() / "dev" / "yolomux-verify-7771"
 
     paths = common.resolve_yolomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
 

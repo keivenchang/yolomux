@@ -41,6 +41,7 @@ from tests.gate_harness import assert_computed_style
 from tests.gate_harness import assert_counter_delta
 from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_http_port
+from tests.gate_harness import GATE_HTTP_PORT_LANE_NAMES
 from tests.gate_harness import gate_http_port_candidates
 from tests.gate_harness import gate_live_server
 from tests.gate_harness import gate_runtime_paths
@@ -144,13 +145,20 @@ def test_gate_http_port_candidates_are_partitioned_by_xdist_worker():
 def test_gate_http_port_candidates_are_partitioned_across_parallel_check_lanes_and_workers():
     owners = {
         (lane, worker): set(gate_http_port_candidates(worker=f"gw{worker}", worker_count=3, lane=lane))
-        for lane in PYTEST_LANE_NAMES
+        for lane in GATE_HTTP_PORT_LANE_NAMES
         for worker in range(3)
     }
     assert all(owners.values())
     for owner, ports in owners.items():
         assert all(ports.isdisjoint(other_ports) for other, other_ports in owners.items() if other != owner), owner
     assert set().union(*owners.values()) == set(range(7900, 8000))
+
+
+def test_gate_http_port_candidates_admit_the_exclusive_certification_lane():
+    candidates = gate_http_port_candidates(worker=None, lane="certification")
+
+    assert candidates
+    assert set(candidates).isdisjoint(gate_http_port_candidates(worker=None, lane=PYTEST_LANE_NAMES[0]))
 
 
 def test_gate_tmux_uses_private_socket_and_fixture_session_name(gate_tmux):

@@ -1939,7 +1939,7 @@ def test_search_index_follower_status_uses_manifest_without_full_json_timing_reg
     assert status["ready_elsewhere"] is True
     assert status["count"] >= 1
     assert load_calls == []
-    assert elapsed < 0.2
+    assert elapsed < _warm_index_load_latency_budget_seconds()
 
 
 def test_search_index_follower_large_sqlite_metadata_status_and_streaming_search_regression(monkeypatch, tmp_path):

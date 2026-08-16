@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -98,9 +100,23 @@ def _materializer_cpu_worker(start_event, ready_event, done_event, stop_event, r
     stop_event.wait()
 
 
-def _process_cpu_jiffies(pid: int) -> int:
-    fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-    return int(fields[13]) + int(fields[14])
+def _process_cpu_seconds(pid: int) -> float:
+    if sys.platform != "darwin":
+        fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+        return (int(fields[13]) + int(fields[14])) / os.sysconf("SC_CLK_TCK")
+    result = subprocess.run(
+        ("ps", "-o", "time=", "-p", str(pid)),
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+    assert result.returncode == 0 and result.stdout.strip(), result.stderr
+    fields = result.stdout.strip().split(":")
+    seconds = float(fields.pop())
+    minutes = int(fields.pop()) if fields else 0
+    hours = int(fields.pop()) if fields else 0
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def test_g8_fifteen_thousand_epoch_materializer_stays_under_fixed_cpu_budget(
@@ -122,12 +138,11 @@ def test_g8_fifteen_thousand_epoch_materializer_stays_under_fixed_cpu_budget(
     process.start()
     try:
         assert ready_event.wait(10), "materializer worker did not prepare the 15,000-epoch fixture"
-        ticks_per_second = os.sysconf("SC_CLK_TCK")
-        before = _process_cpu_jiffies(process.pid)
+        before = _process_cpu_seconds(process.pid)
         start_event.set()
         threading.Event().wait(G8_CPU_WINDOW_SECONDS)
-        after = _process_cpu_jiffies(process.pid)
-        cpu_seconds = (after - before) / ticks_per_second
+        after = _process_cpu_seconds(process.pid)
+        cpu_seconds = after - before
         assert done_event.is_set(), {
             "epochs": G8_COVERAGE_EPOCHS,
             "window_seconds": G8_CPU_WINDOW_SECONDS,

@@ -362,7 +362,7 @@ class ProgressiveBuild:
         operation: str = "",
         tombstone_identity: str | None = None,
     ):
-        self.root = root.expanduser()
+        self.root = root.expanduser().resolve(strict=False)
         self.skip_dirs = set(skip_dirs)
         self.exclude_path = file_index._build_exclude_path(exclude_path)
         self.exclude_signature = exclude_signature

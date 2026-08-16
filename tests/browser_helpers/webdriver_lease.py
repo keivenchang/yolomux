@@ -66,7 +66,12 @@ def process_start_key(pid: int | None) -> str | None:
     if completed.returncode != 0:
         return None
     key = completed.stdout.strip()
-    return key or None
+    if not key:
+        return None
+    state = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    if state.returncode != 0 or state.stdout.strip().startswith("Z"):
+        return None
+    return key
 
 
 def chromedriver_pid(driver: Any) -> int | None:

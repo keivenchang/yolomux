@@ -10,6 +10,7 @@ import pytest
 from yolomux_lib import session_files
 from yolomux_lib.pricing_catalog import PricingCatalog
 from yolomux_lib.stats_current import materializer
+from yolomux_lib.stats_current import identity
 from yolomux_lib.stats_current import pricing
 from yolomux_lib.stats_current.storage import DATABASE_FILENAME
 from yolomux_lib.stats_current.storage import Store
@@ -599,17 +600,20 @@ def test_claude_project_sibling_is_independent_and_incremental(tmp_path):
 
     first = scanner.scan(rows)
     outputs = {item.atom.event_id: item for item in _output_items(first)}
-    pane_id = f"claude:{pane}:pane-message"
-    background_id = f"claude:{background}:background-message"
-    subagent_id = f"claude:{background_subagent}:subagent-message"
+    pane_thread = identity.bounded_series_identity(str(pane.resolve()), "thread")
+    background_thread = identity.bounded_series_identity(str(background.resolve()), "thread")
+    subagent_thread = identity.bounded_series_identity(str(background_subagent.resolve()), "thread")
+    pane_id = f"claude:{pane_thread}:pane-message"
+    background_id = f"claude:{background_thread}:background-message"
+    subagent_id = f"claude:{subagent_thread}:subagent-message"
     assert set(outputs) == {pane_id, background_id, subagent_id}
     assert outputs[pane_id].tmux_key == "yo8881|1|claude"
     background_key = scanner._claude_background_agent_key(background)
     assert len(background_key.encode("utf-8")) <= 192
     assert outputs[background_id].tmux_key == background_key
     assert outputs[subagent_id].tmux_key == background_key
-    assert outputs[background_id].atom.root_thread_id == str(background.resolve())
-    assert outputs[subagent_id].atom.root_thread_id == str(background.resolve())
+    assert outputs[background_id].atom.root_thread_id == background_thread
+    assert outputs[subagent_id].atom.root_thread_id == background_thread
     assert all("unrelated-message" not in item.atom.event_id for item in first.items)
     _commit(scanner, first)
 
@@ -621,7 +625,7 @@ def test_claude_project_sibling_is_independent_and_incremental(tmp_path):
     _append_record(background, _claude_usage(5, "background-next", "claude-background", 7, 2))
     appended = scanner.scan(rows)
     assert [(item.atom.event_id, item.atom.quantity, item.tmux_key) for item in _output_items(appended)] == [
-        (f"claude:{background}:background-next", 2, background_key),
+        (f"claude:{background_thread}:background-next", 2, background_key),
     ]
     _commit(scanner, appended)
 
@@ -630,9 +634,26 @@ def test_claude_project_sibling_is_independent_and_incremental(tmp_path):
         "key": "yo8881|2|claude", "kind": "claude", "transcript": str(background),
     }])
     assert [(item.atom.event_id, item.atom.quantity, item.tmux_key) for item in _output_items(direct)] == [
-        (f"claude:{background}:background-direct", 3, "yo8881|2|claude"),
+        (f"claude:{background_thread}:background-direct", 3, "yo8881|2|claude"),
     ]
     _commit(scanner, direct)
+
+
+def test_claude_background_path_identity_is_bounded(tmp_path):
+    project = tmp_path / ("long-project-" + "x" * 180)
+    pane = project / "pane-session.jsonl"
+    background = project / "background-session.jsonl"
+    _write_records(pane, [_claude_usage(1, "pane-message", "claude-pane", 20, 5)])
+    _write_records(background, [_claude_usage(2, "background-message", "claude-background", 40, 9)])
+
+    result = StatsCurrentTranscriptUsageScanner().scan([
+        {"key": "yo8881|1|claude", "kind": "claude", "transcript": str(pane)},
+    ])
+    output = next(item.atom for item in _output_items(result) if item.atom.event_id.endswith("background-message"))
+
+    assert output.root_thread_id.startswith("thread:")
+    assert output.agent_thread_id == output.root_thread_id
+    assert len(output.root_thread_id.encode("utf-8")) <= 192
 
 
 def test_newest_claude_background_session_precedes_large_cold_siblings(tmp_path):

@@ -94,6 +94,7 @@ def test_stop_isolated_tmux_runtime_refuses_live_pane_without_start_identity(mon
 
 
 def test_wait_for_isolated_tmux_pane_exit_refuses_unavailable_identity_for_live_pid(monkeypatch):
+    monkeypatch.setattr(tmux_runtime.sys, "platform", "linux")
     monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
     monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: True)
 

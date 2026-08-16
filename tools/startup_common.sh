@@ -185,9 +185,13 @@ yolomux_submit_macos_server() {
   local primary_port="$7"
   shift 7
   local launcher socket_name session_name
+  local -a session_environment=()
   launcher="$(yolomux_macos_server_launcher)"
   socket_name="$(yolomux_macos_server_tmux_socket)"
   session_name="$(yolomux_macos_server_tmux_session "$port")"
-  tmux -L "$socket_name" new-session -d -s "$session_name" -c "$repo_root" \
+  if [ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]; then
+    session_environment=(-e "YOLOMUX_ROW_PLAN_FILE=$YOLOMUX_ROW_PLAN_FILE")
+  fi
+  tmux -L "$socket_name" new-session -d -s "$session_name" -c "$repo_root" "${session_environment[@]}" \
     /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$primary_port" "$log_path" "$@"
 }

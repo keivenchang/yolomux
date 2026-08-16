@@ -16,6 +16,7 @@ evidence; it never produces a skip that passes and never produces a multiplied c
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -385,12 +386,16 @@ LINUX_ONLY_SIGNALS = frozenset(
     }
 )
 
-# Retained native measurements are the only input allowed to activate Darwin certification. W14
-# will populate this owner with quiet, post-lane and deliberately saturated measurements; keeping
-# the empty dataset here makes today's Darwin release gate fail closed without baking in Linux
-# hardware numbers. Each signal range is [minimum, maximum], matching the Linux population schema.
-DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS: dict[str, dict[str, Any]] = {}
-DARWIN_PROFILE_SIGNALS = frozenset({"cpu_work_median_ms", "storage_work_median_ms"})
+# Retained native measurements are the only input allowed to activate Darwin certification. These
+# are five-probe populations measured on the 14-core Apple host on 2026-08-16: quiet, immediately
+# after the eight-test real browser/tmux launch lane, and under 28 deliberate CPU workers. Each
+# signal range is [minimum, maximum], matching the Linux population schema.
+DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS: dict[str, dict[str, Any]] = {
+    "quiet": {"probes": 5, "darwin_cpu_busy_fraction": [0.397950, 0.425153]},
+    "post_lane": {"probes": 5, "darwin_cpu_busy_fraction": [0.269304, 0.350943]},
+    "saturated": {"probes": 5, "darwin_cpu_busy_fraction": [1.0, 1.0]},
+}
+DARWIN_PROFILE_SIGNALS = frozenset({"darwin_cpu_busy_fraction"})
 
 
 def _darwin_platform_profile(populations: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -594,6 +599,49 @@ def _read_procs_running() -> int | None:
     return None
 
 
+class _DarwinHostCpuLoadInfo(ctypes.Structure):
+    _fields_ = [
+        ("user", ctypes.c_uint32),
+        ("system", ctypes.c_uint32),
+        ("idle", ctypes.c_uint32),
+        ("nice", ctypes.c_uint32),
+    ]
+
+
+def _read_darwin_cpu_ticks() -> tuple[int, int, int, int] | None:
+    """Read native cumulative host CPU ticks without a subprocess or a Linux /proc proxy."""
+
+    if platform.system() != "Darwin":
+        return None
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    info = _DarwinHostCpuLoadInfo()
+    count = ctypes.c_uint32(4)
+    host = library.mach_host_self()
+    result = library.host_statistics(
+        host,
+        3,
+        ctypes.cast(ctypes.byref(info), ctypes.POINTER(ctypes.c_int32)),
+        ctypes.byref(count),
+    )
+    if result != 0 or count.value < 4:
+        return None
+    return info.user, info.system, info.idle, info.nice
+
+
+def _darwin_cpu_busy_fraction(
+    before: tuple[int, int, int, int] | None,
+    after: tuple[int, int, int, int] | None,
+) -> float | None:
+    if before is None or after is None:
+        return None
+    deltas = [((end - start) & 0xFFFFFFFF) for start, end in zip(before, after)]
+    total = sum(deltas)
+    if total <= 0:
+        return None
+    busy = deltas[0] + deltas[1] + deltas[3]
+    return round(busy / total, 6)
+
+
 def _cpu_work_samples_ms() -> list[float]:
     """One fixed integer work unit, independent of core count and of any product code."""
 
@@ -678,6 +726,7 @@ def measure_host_resources(*, evidence_root: Path | None = None, sample_seconds:
     probe_path = host_storage_probe_path(evidence_root)
     pressure_before = _read_pressure_totals()
     disk_before = _read_disk_counters()
+    darwin_cpu_before = _read_darwin_cpu_ticks()
     started_monotonic = time.monotonic()
     procs_running_samples: list[int] = []
     in_flight_samples: list[int] = []
@@ -713,6 +762,7 @@ def measure_host_resources(*, evidence_root: Path | None = None, sample_seconds:
     window_seconds = time.monotonic() - started_monotonic
     pressure_after = _read_pressure_totals()
     disk_after = _read_disk_counters()
+    darwin_cpu_after = _read_darwin_cpu_ticks()
 
     stalls: dict[str, float] | None = None
     if pressure_before is not None and pressure_after is not None:
@@ -751,6 +801,7 @@ def measure_host_resources(*, evidence_root: Path | None = None, sample_seconds:
         "procs_running_max": max(procs_running_samples) if procs_running_samples else None,
         "procs_running_samples": len(procs_running_samples),
         "pressure_available": stalls is not None,
+        "darwin_cpu_busy_fraction": _darwin_cpu_busy_fraction(darwin_cpu_before, darwin_cpu_after),
         "cpu_stall_some_fraction": None if stalls is None else stalls.get("cpu_some"),
         "cpu_stall_full_fraction": None if stalls is None else stalls.get("cpu_full"),
         "io_stall_some_fraction": None if stalls is None else stalls.get("io_some"),

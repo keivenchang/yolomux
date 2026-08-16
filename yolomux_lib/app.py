@@ -3811,7 +3811,13 @@ class WatchBridge:
             generation = app.begin_transcripts_payload_work(worker, replace=True)
         try:
             started = time.perf_counter()
+            previous_sessions = tuple(app.sessions)
             payload = app.build_transcripts_payload()
+            if tuple(app.sessions) != previous_sessions:
+                # statusd keys snapshots by the requested roster. Merely waiting on its old
+                # generation cannot discover a newly added tmux session, so roster discovery must
+                # also demand the matching status snapshot before the browser consumes metadata.
+                app.status_client.snapshot(app.sessions, timeout=1.0)
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
             if not app.commit_transcripts_payload_cache(payload, generation):
@@ -9529,7 +9535,10 @@ class TmuxWebtermApp:
             current,
             collection="sessions",
             ignored_fields=frozenset({"agent_window_snapshot_revision"}),
-            always_fields=frozenset({"agent_window_snapshot_revision"}),
+            # A patch may arrive before the metadata roster that admits its new sessions. Carry the
+            # authoritative order on every emitted patch so a deferred client never expands it
+            # against an older browser roster and then drops the newly added session rows.
+            always_fields=frozenset({"agent_window_snapshot_revision", "session_order"}),
         )
 
     def work_graph_refresh_signature(self, graph: dict[str, Any]) -> str:

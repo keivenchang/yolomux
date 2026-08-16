@@ -3,6 +3,7 @@
 
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -311,7 +312,7 @@ def test_claude_help_explains_model_and_config_defaults():
 
 
 def test_codex_help_cli_does_not_require_server_auth(tmp_path):
-    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    env = {"PATH": "/usr/bin:/usr/sbin:/bin:/sbin", "HOME": str(tmp_path), "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry)}
     result = subprocess.run(
         [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
         cwd=str(ROOT),
@@ -337,7 +338,7 @@ def test_codex_help_cli_does_not_require_server_auth(tmp_path):
 
 
 def test_text_client_help_outputs_share_sections(tmp_path):
-    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    env = {"PATH": "/usr/bin:/usr/sbin:/bin:/sbin", "HOME": str(tmp_path), "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry)}
     codex_result = subprocess.run(
         [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
         cwd=str(ROOT),

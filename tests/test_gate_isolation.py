@@ -4060,8 +4060,11 @@ def test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owne
         assert reason["surviving"][0]["socket_path"].startswith(str(root)), reason
         # The ledger names the limit that refuses the watcher, not only the fd table.
         ledger = reason["ledger"]
-        assert ledger["inotify_max_user_instances"] >= 1, ledger
-        assert ledger["inotify_instances_user"] >= 0, ledger
+        if sys.platform == "linux":
+            assert ledger["inotify_max_user_instances"] >= 1, ledger
+            assert ledger["inotify_instances_user"] >= 0, ledger
+        else:
+            assert ledger["inotify_max_user_instances"] == -1, ledger
         assert ledger["rlimit_nofile_soft"] >= 1, ledger
 
         # The assertion itself must not kill: reclaiming is a separate, named
@@ -4098,6 +4101,7 @@ def test_retired_local_service_root_passes_the_surviving_daemon_invariant(tmp_pa
     assert assert_no_surviving_local_service_daemons(root, label="negative-control") is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="inotify and /proc fd accounting are Linux-only")
 def test_resource_ledger_measures_the_uid_wide_inotify_limit_not_only_the_fd_table(tmp_path):
     """The ledger records the limit that actually refuses a watcher under load."""
 
@@ -4121,6 +4125,7 @@ def test_resource_ledger_measures_the_uid_wide_inotify_limit_not_only_the_fd_tab
     assert snapshot.as_reason()["inotify_max_user_instances"] == snapshot.inotify_max_user_instances
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="inotify is Linux-only")
 def test_worker_inotify_baseline_guard_fires_on_a_real_leaked_instance():
     """Negative control: a genuinely retained inotify instance must fail its fixture."""
 

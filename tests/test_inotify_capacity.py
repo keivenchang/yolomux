@@ -124,7 +124,10 @@ def test_only_fanning_out_lanes_are_gated_on_inotify_capacity(monkeypatch):
     assert heavy_lane_names([_lane("py-compile"), _lane("node-layout")]) == []
     assert admit_inotify_capacity([_lane("py-compile"), _lane("node-layout")]) is None
     assert heavy_lane_names([_lane("py-compile"), _lane("pytest-browser")]) == ["pytest-browser"]
-    refused = admit_inotify_capacity([_lane("py-compile"), _lane("pytest-browser")])
+    refused = admit_inotify_capacity(
+        [_lane("py-compile"), _lane("pytest-browser")],
+        profile={"uses_inotify_capacity": True},
+    )
     assert refused is not None and refused.admitted is False
 
 
@@ -142,7 +145,7 @@ def test_capacity_is_admitted_before_any_lane_runs(monkeypatch):
     monkeypatch.setattr(check_module, "run_parallel", lambda selected: started.append("parallel") or [])
     monkeypatch.setattr(check_module, "run_serial", lambda selected: started.append("serial") or [])
 
-    verdict = admit_inotify_capacity([_lane("pytest-browser")])
+    verdict = admit_inotify_capacity([_lane("pytest-browser")], profile={"uses_inotify_capacity": True})
 
     assert verdict is not None and verdict.admitted is False
     assert started == []

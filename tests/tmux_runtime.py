@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,13 @@ def run_isolated_tmux(runtime, *args: str, timeout: float = 8, declared_socket: 
     )
 
 
+def current_python_command(script: Path, *args: str) -> str:
+    """Run a test helper with pytest's interpreter and import path under an isolated HOME."""
+
+    python_path = os.pathsep.join(entry for entry in sys.path if entry)
+    return f"env PYTHONPATH={shlex.quote(python_path)} {shlex.join([sys.executable, str(script), *args])}"
+
+
 def capture_isolated_tmux_pane_identities(runtime) -> tuple[tuple[int, str], ...]:
     """Capture the exact live pane processes whose exit effects teardown must own."""
 
@@ -61,7 +69,7 @@ def capture_isolated_tmux_pane_identities(runtime) -> tuple[tuple[int, str], ...
         declared_socket=True,
     )
     if result.returncode != 0:
-        if not runtime.socket_path.exists() and "no server running" in str(result.stderr or "").lower():
+        if "no server running" in str(result.stderr or "").lower():
             return ()
         raise AssertionError(f"isolated tmux pane inventory failed: {result.stderr or result.stdout}")
     captured = []
@@ -117,6 +125,14 @@ def remove_isolated_tmux_socket_dir(socket_dir: Path) -> None:
     except FileNotFoundError:
         return
     assert not socket_dir.exists(), f"isolated tmux socket directory remained after cleanup: {socket_dir}"
+
+
+def create_isolated_tmux_socket_path(*, prefix: str = "yts") -> Path:
+    """Create a short private tmux socket path that fits Darwin's AF_UNIX limit."""
+
+    socket_dir = Path("/tmp") / f"{prefix}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    socket_dir.mkdir(mode=0o700)
+    return socket_dir / "s"
 
 
 def capture_isolated_tmux_pane(runtime, session: str, timeout: float = 8, *, join_wrapped_lines: bool = False) -> str:
@@ -175,9 +191,8 @@ def start_isolated_tmux_runtime(
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    socket_dir.mkdir(mode=0o700)
-    socket_path = socket_dir / "s"
+    socket_path = create_isolated_tmux_socket_path()
+    socket_dir = socket_path.parent
     commands = dict(session_commands or {})
     session_names = list(commands) if session_commands is not None else [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
     if not session_names:
@@ -250,10 +265,7 @@ def stop_isolated_tmux_runtime(runtime) -> None:
     pane_identities = capture_isolated_tmux_pane_identities(runtime)
     result = run_isolated_tmux(runtime, "kill-server", timeout=5, declared_socket=True)
     if result.returncode != 0:
-        server_absent = (
-            not runtime.socket_path.exists()
-            and "no server running" in str(result.stderr or "").lower()
-        )
+        server_absent = "no server running" in str(result.stderr or "").lower()
         assert server_absent, f"isolated tmux kill-server failed: {result.stderr or result.stdout}"
     wait_for_isolated_tmux_pane_exit(pane_identities)
     remove_isolated_tmux_socket_dir(runtime.socket_dir)

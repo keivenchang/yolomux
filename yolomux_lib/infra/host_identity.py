@@ -164,7 +164,7 @@ def process_start_identity(
 ) -> str | None:
     """Return a stable kernel/process-table birth identity for one live PID."""
     snapshot = process_identity_snapshot(pid, proc_root=proc_root, runner=runner)
-    return snapshot.start_identity if snapshot is not None else None
+    return snapshot.start_identity if snapshot is not None and snapshot.state != "Z" else None
 
 
 def process_start_ticks(identity: object) -> int | None:

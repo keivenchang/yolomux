@@ -14,8 +14,6 @@ import sys
 import time
 
 import pytest
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
@@ -53,19 +51,22 @@ pytestmark = pytest.mark.socket
 
 def _write_mock_agent_wrapper(path: Path, agent: str) -> None:
     mock_path = REPO_ROOT / "tools" / "mockers" / f"{agent}.py"
+    python_path = os.pathsep.join(entry for entry in sys.path if entry)
     auth_args = ["auth", "status"] if agent == "claude" else ["login", "status"]
     auth_output = json.dumps({"loggedIn": True}) if agent == "claude" else "Logged in"
     path.write_text(
         "\n".join(
             (
-                "#!/usr/bin/env python3",
+                f"#!{sys.executable}",
                 "from __future__ import annotations",
                 "import os",
                 "import sys",
                 f"if sys.argv[1:] == {auth_args!r}:",
                 f"    print({auth_output!r})",
                 "    raise SystemExit(0)",
-                f"os.execv(sys.executable, [sys.executable, {str(mock_path)!r}, '--mock', *sys.argv[1:]])",
+                "child_env = dict(os.environ)",
+                f"child_env['PYTHONPATH'] = {python_path!r}",
+                f"os.execve({sys.executable!r}, [{sys.executable!r}, {str(mock_path)!r}, '--mock', *sys.argv[1:]], child_env)",
                 "",
             )
         ),
@@ -386,7 +387,10 @@ def test_r4_browser_xterm_input_receives_mock_output(browser, gate_live_server, 
             NEW_SESSION,
         )
     )
-    ActionChains(browser).send_keys("/status").send_keys(Keys.ENTER).perform()
+    browser.execute_script(
+        "terminals.get(arguments[0]).term.input('/status\\r', true);",
+        NEW_SESSION,
+    )
     observed, panes = wait_for_isolated_tmux_panes(
         gate_live_server.tmux,
         (NEW_SESSION,),
@@ -546,6 +550,9 @@ def test_r6_process_group_oracle_reports_a_zombie_only_group_as_dead():
             os.killpg(group_id, 0)
         except ProcessLookupError:
             raw_killpg_alive = False
+        except PermissionError:
+            # POSIX kill(0) uses EPERM to report that a group exists but is not signalable.
+            raw_killpg_alive = True
         assert raw_killpg_alive is True
 
         # Green for the shared predicate: a zombie-only group is not surviving.

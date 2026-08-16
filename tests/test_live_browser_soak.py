@@ -119,7 +119,9 @@ def test_main_forwards_and_records_exact_recorded_layout_url(tmp_path, monkeypat
         forwarded.update(kwargs)
         return {"url": kwargs["url"], "samples": []}
 
-    output = tmp_path / "exact-layout-url.json"
+    output_owner = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
+    output = Path("/tmp") / f"yolomux-{output_owner}-exact-layout-url.json"
+    output.unlink(missing_ok=True)
     monkeypatch.setattr(tool, "webdriver", type("WebDriver", (), {"ChromeOptions": Options, "Chrome": lambda *_args, **_kwargs: Driver()})())
     monkeypatch.setattr(tool, "run_soak", run_soak)
     monkeypatch.setattr(tool, "cleanup_driver", lambda _driver: None)
@@ -136,6 +138,7 @@ def test_main_forwards_and_records_exact_recorded_layout_url(tmp_path, monkeypat
     ]) == 0
     assert forwarded["url"] == RECORDED_LAYOUT_URL
     assert json.loads(output.read_text(encoding="utf-8"))["url"] == RECORDED_LAYOUT_URL
+    output.unlink()
 
 
 class CookieJarDriver:

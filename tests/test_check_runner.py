@@ -449,6 +449,7 @@ def test_browser_capability_preflight_names_missing_dependency_browser_and_drive
     browser.write_text("", encoding="utf-8")
     monkeypatch.undo()
     monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(
         check.shutil,
         "which",
@@ -1467,13 +1468,14 @@ def test_every_certification_unit_asks_the_shared_owner_before_it_measures():
     assert factory_modules == set(_certification_unit_modules()), factory_modules
 
 
-def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reason():
+def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reason(monkeypatch):
     """Negative control: an unqualified host reds the node with the literal and its evidence.
 
     A skip is the failure mode this whole phase exists to remove - it is a green a reader cannot
     tell apart from a certification.
     """
 
+    monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Linux")
     limits = latency_calibration.HOST_QUALIFICATION_LIMITS
     loaded = {signal: limit * 4 for signal, limit in limits.items()}
     with pytest.raises(latency_calibration.NotCertifiableError) as refusal:
@@ -1524,6 +1526,7 @@ def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqual
 
     # Asked for on an unqualified host: NOT CERTIFIABLE, never a skip.
     monkeypatch.setenv("YOLOMUX_PROBE_CERTIFICATION", "1")
+    monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Linux")
     limits = latency_calibration.HOST_QUALIFICATION_LIMITS
     monkeypatch.setattr(
         latency_calibration,
@@ -1602,6 +1605,13 @@ def _burn_cpu_and_disk(deadline_monotonic, scratch):
             os.fsync(handle.fileno())
 
 
+def _burn_cpu(deadline_monotonic, _scratch):
+    value = 1
+    while time.monotonic() < deadline_monotonic:
+        for index in range(1_000_000):
+            value = (value ^ index) * 2654435761 & 0xFFFFFFFF
+
+
 certification_phase_only = latency_calibration.certification_phase_fixture()
 
 
@@ -1616,10 +1626,12 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
     """
 
     baseline = certification_phase_only["measurement"]
-    workers = min(4 * (os.cpu_count() or 1), 96)
+    darwin = latency_calibration.platform.system() == "Darwin"
+    workers = min((2 if darwin else 4) * (os.cpu_count() or 1), 32 if darwin else 96)
+    load_target = _burn_cpu if darwin else _burn_cpu_and_disk
     deadline = time.monotonic() + 6.0
     processes = [
-        multiprocessing.Process(target=_burn_cpu_and_disk, args=(deadline, str(tmp_path / f"load-{index}.bin")))
+        multiprocessing.Process(target=load_target, args=(deadline, str(tmp_path / f"load-{index}.bin")))
         for index in range(workers)
     ]
     try:
@@ -1636,7 +1648,7 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
     refusal = latency_calibration.host_qualification(loaded)
     # Both sides carry the evidence-only signals too: a signal that carries no threshold still has
     # to be readable here, or the next reader cannot see why it carries none.
-    reported = [*latency_calibration.HOST_QUALIFICATION_LIMITS, *latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY]
+    reported = [*refusal["limits"], *latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY]
     evidence = {
         "workers": workers,
         "baseline": {signal: baseline.get(signal) for signal in reported},
@@ -1672,7 +1684,8 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
     # from the host volumes /proc/diskstats reports, so host disk busy read 0.303 in one run and
     # 0.918-0.980 in twelve host-side probes of the identical load body.
     over_limit = {reason["signal"] for reason in refusal["reasons"] if reason["reason"] == "over_limit"}
-    assert {"procs_running_p75", "cpu_stall_some_fraction"} <= over_limit, {
+    required_over_limit = {"darwin_cpu_busy_fraction"} if darwin else {"procs_running_p75", "cpu_stall_some_fraction"}
+    assert required_over_limit <= over_limit, {
         **evidence,
         "over_limit": sorted(over_limit),
         "artifact": str(artifact),
@@ -1680,9 +1693,10 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
     assert "disk_in_flight_max" not in over_limit, sorted(over_limit)
     assert "disk_in_flight_max" in latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY
     # And it is still measured on both sides, so the drop cost the artifact nothing.
-    assert baseline["disk_in_flight_max"] is not None and loaded["disk_in_flight_max"] is not None
+    if not darwin:
+        assert baseline["disk_in_flight_max"] is not None and loaded["disk_in_flight_max"] is not None
     # The thresholds are the same in both directions: a busy host is never given a wider limit.
-    assert refusal["limits"] == latency_calibration.host_qualification(baseline)["limits"] == dict(latency_calibration.HOST_QUALIFICATION_LIMITS)
+    assert refusal["limits"] == latency_calibration.host_qualification(baseline)["limits"] == latency_calibration.platform_profile()["limits"]
 
 
 def test_certification_refusal_prints_the_literal_not_certifiable_with_its_evidence(capsys):
@@ -1803,13 +1817,17 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
     """The real probe must return every asserted signal; a decaying average is evidence only."""
 
     measurement = latency_calibration.measure_host_resources(evidence_root=Path("/tmp/yolomux-latency-evidence"))
-    for signal in latency_calibration.HOST_QUALIFICATION_LIMITS:
+    profile = latency_calibration.platform_profile()
+    for signal in profile["limits"]:
         assert signal in measurement, (signal, sorted(measurement))
     assert measurement["window_seconds"] >= latency_calibration.HOST_SAMPLE_SECONDS
     # Never "at least 2": the instantaneous samples are taken in whatever is left of the window
     # after the two work units, which is least when the host is busiest. A 2026-08-08 probe under
     # 96-worker saturation came back with ONE procs_running sample and reported its p75 from it.
-    assert measurement["procs_running_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM, measurement
+    if profile["uses_inotify_capacity"]:
+        assert measurement["procs_running_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM, measurement
+    else:
+        assert measurement["procs_running_p75"] is None and measurement["procs_running_samples"] == 0, measurement
     assert len(measurement["cpu_work_samples_ms"]) == latency_calibration.HOST_CPU_WORK_SAMPLES
     assert len(measurement["storage_work_samples_ms"]) == latency_calibration.HOST_STORAGE_WORK_SAMPLES
     assert measurement["cpu_work_median_ms"] == round(latency_calibration.work_unit_statistic(measurement["cpu_work_samples_ms"]), 3)
@@ -1826,9 +1844,12 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
         assert signal in measurement, (signal, sorted(measurement))
         assert signal not in latency_calibration.HOST_QUALIFICATION_LIMITS, signal
         assert reason and reason.split(":")[0].isidentifier(), (signal, reason)
-    assert measurement["disk_in_flight_p75"] is not None and measurement["disk_in_flight_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM
-    assert measurement["disk_in_flight_p75"] <= measurement["disk_in_flight_max"], measurement
-    assert set(measurement["disk_in_flight_max_per_device"]) == set(measurement["disk_devices"]), measurement
+    if profile["uses_inotify_capacity"]:
+        assert measurement["disk_in_flight_p75"] is not None and measurement["disk_in_flight_samples"] >= latency_calibration.HOST_INSTANT_SAMPLE_MINIMUM
+        assert measurement["disk_in_flight_p75"] <= measurement["disk_in_flight_max"], measurement
+        assert set(measurement["disk_in_flight_max_per_device"]) == set(measurement["disk_devices"]), measurement
+    else:
+        assert measurement["disk_in_flight_p75"] is None and measurement["disk_in_flight_samples"] == 0, measurement
 
     # And a qualification carries the same reasons, so one artifact is enough to audit the drop.
     qualification = latency_calibration.host_qualification(measurement)
@@ -1888,7 +1909,7 @@ def test_the_instantaneous_sample_floor_still_terminates_when_the_kernel_exposes
     measurement = latency_calibration.measure_host_resources(evidence_root=Path("/tmp/yolomux-latency-evidence"), sample_seconds=0.2)
     assert time.monotonic() - started < 60.0
     assert measurement["procs_running_p75"] is None and measurement["procs_running_samples"] == 0, measurement
-    refusal = latency_calibration.host_qualification(measurement)
+    refusal = latency_calibration.host_qualification(measurement, limits=dict(latency_calibration.HOST_QUALIFICATION_LIMITS))
     assert refusal["qualified"] is False
     unavailable_limit = latency_calibration.HOST_QUALIFICATION_LIMITS["procs_running_p75"]
     assert {"signal": "procs_running_p75", "measured": None, "limit": unavailable_limit, "reason": "signal_unavailable"} in refusal["reasons"], refusal["reasons"]
@@ -1909,14 +1930,16 @@ def test_recorded_baseline_samples_qualify_while_recorded_saturated_samples_stil
     elsewhere_at_baseline = {signal: limit / 4 for signal, limit in limits.items()}
 
     fit = latency_calibration.host_qualification(
-        {**elsewhere_at_baseline, "cpu_work_median_ms": latency_calibration.work_unit_statistic(recorded_false_refusal_ms)}
+        {**elsewhere_at_baseline, "cpu_work_median_ms": latency_calibration.work_unit_statistic(recorded_false_refusal_ms)},
+        limits=dict(limits),
     )
     assert fit["qualified"] is True, fit["reasons"]
     # And the retired statistic on the same samples is what refused it.
     assert latency_calibration.nearest_rank(recorded_false_refusal_ms, 0.75) > 20.0
 
     refused = latency_calibration.host_qualification(
-        {**elsewhere_at_baseline, "cpu_work_median_ms": latency_calibration.work_unit_statistic(recorded_saturated_ms)}
+        {**elsewhere_at_baseline, "cpu_work_median_ms": latency_calibration.work_unit_statistic(recorded_saturated_ms)},
+        limits=dict(limits),
     )
     assert refused["qualified"] is False
     assert [reason["signal"] for reason in refused["reasons"]] == ["cpu_work_median_ms"], refused["reasons"]
@@ -1970,13 +1993,13 @@ def test_recorded_post_lane_refusals_now_qualify_while_a_recorded_saturated_prob
         retired = latency_calibration.host_qualification(recorded, limits={**latency_calibration.HOST_QUALIFICATION_LIMITS, "disk_in_flight_max": 8.0, "cpu_stall_some_fraction": 0.030})
         assert retired["qualified"] is False, recorded
         # Green after.
-        qualified = latency_calibration.host_qualification(recorded)
+        qualified = latency_calibration.host_qualification(recorded, limits=dict(latency_calibration.HOST_QUALIFICATION_LIMITS))
         assert qualified["qualified"] is True, qualified["reasons"]
         # The dropped signal is still measured and still reported, with its reason attached.
         assert qualified["measurement"]["disk_in_flight_max"] == recorded["disk_in_flight_max"]
         assert "disk_in_flight_max" in qualified["evidence_only"], qualified["evidence_only"]
 
-    refused = latency_calibration.host_qualification(weakest_saturated_probe)
+    refused = latency_calibration.host_qualification(weakest_saturated_probe, limits=dict(latency_calibration.HOST_QUALIFICATION_LIMITS))
     assert refused["qualified"] is False
     fired = sorted(reason["signal"] for reason in refused["reasons"])
     # Never one signal away from a gate that cannot fail, and never carried by the dropped one.
@@ -2109,8 +2132,15 @@ def test_retirement_counts_live_test_containers_the_process_walk_cannot_see(monk
         return Completed()
 
     monkeypatch.setattr(check.subprocess, "run", fake_run)
-    probe = check.running_test_containers()
-    assert observed_command[0] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"]
+    probe = check.running_test_containers(run_token="")
+    assert observed_command[0] == [
+        "docker",
+        "ps",
+        "--filter",
+        f"ancestor={image}",
+        "--format",
+        "{{.ID}}\t{{.Status}}",
+    ]
     assert probe["available"] is True and probe["image"] == image
     assert [entry["container"] for entry in probe["containers"]] == ["abc123", "def456"]
 
@@ -2265,8 +2295,8 @@ def test_retirement_proves_a_reparented_or_exited_member_gone_without_a_bare_pid
     assert retirement["survivors"] == [], retirement
 
 
-def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
-    """One owner of which signals a platform certifies. Linux keeps them; Darwin omits and refuses."""
+def test_platform_profile_owner_keeps_linux_and_uses_native_darwin_measurements():
+    """One owner of which signals each measured platform certifies."""
 
     linux = latency_calibration.platform_profile("Linux")
     assert linux["certifiable"] is True
@@ -2274,9 +2304,9 @@ def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
     assert linux["uses_inotify_capacity"] is True and linux["omitted_signals"] == []
 
     darwin = latency_calibration.platform_profile("Darwin")
-    assert darwin["certifiable"] is False
-    assert darwin["reason_code"] == "no_recorded_platform_reference_population"
-    assert darwin["limits"] == {}
+    assert darwin["certifiable"] is True
+    assert darwin["reason_code"] == ""
+    assert darwin["limits"] == {"darwin_cpu_busy_fraction": 0.701886}
     # Every Linux-only kernel signal is explicitly omitted, never asserted against an absent surface.
     assert set(darwin["omitted_signals"]) == set(latency_calibration.LINUX_ONLY_SIGNALS)
     assert darwin["uses_inotify_capacity"] is False
@@ -2287,24 +2317,24 @@ def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
 
 def test_darwin_profile_is_admitted_only_by_retained_discriminating_populations(monkeypatch):
     populations = {
-        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
-        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
-        "saturated": {"probes": 20, "cpu_work_median_ms": [20.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+        "quiet": {"probes": 20, "darwin_cpu_busy_fraction": [0.10, 0.20]},
+        "post_lane": {"probes": 20, "darwin_cpu_busy_fraction": [0.20, 0.30]},
+        "saturated": {"probes": 20, "darwin_cpu_busy_fraction": [0.80, 1.0]},
     }
     monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
 
     profile = latency_calibration.platform_profile("Darwin")
     assert profile["certifiable"] is True, profile
-    assert profile["limits"] == {"cpu_work_median_ms": 12.0, "storage_work_median_ms": 8.0}
+    assert profile["limits"] == {"darwin_cpu_busy_fraction": 0.6}
     assert profile["reference_populations"] == ["quiet", "post_lane", "saturated"]
     assert profile["uses_inotify_capacity"] is False
 
 
 def test_darwin_profile_rejects_present_but_non_discriminating_populations(monkeypatch):
     populations = {
-        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
-        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
-        "saturated": {"probes": 20, "cpu_work_median_ms": [10.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+        "quiet": {"probes": 20, "darwin_cpu_busy_fraction": [0.10, 0.20]},
+        "post_lane": {"probes": 20, "darwin_cpu_busy_fraction": [0.30, 0.50]},
+        "saturated": {"probes": 20, "darwin_cpu_busy_fraction": [0.80, 1.0]},
     }
     monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
     profile = latency_calibration.platform_profile("Darwin")
@@ -2316,6 +2346,7 @@ def test_host_qualification_fails_closed_on_an_unprofiled_platform(monkeypatch):
     """An unprofiled platform (no recorded reference population) is NOT CERTIFIABLE, never a silent pass."""
 
     monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", {})
     # Even handed a measurement that would satisfy every Linux limit, an unprofiled platform refuses.
     inside = {signal: limit / 2 for signal, limit in latency_calibration.HOST_QUALIFICATION_LIMITS.items()}
     qualification = latency_calibration.host_qualification(inside)

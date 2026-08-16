@@ -49,3 +49,18 @@ def legacy_identity(
         encoded = str(value).encode("utf-8", errors="surrogatepass")
         digest = hashlib.sha256(encoded).hexdigest()
         return f"retired-{scope}:{digest}", True
+
+
+def bounded_series_identity(
+    value: object,
+    scope: str,
+    *,
+    maximum_bytes: int = MAX_SERIES_COMPONENT_BYTES,
+) -> str:
+    """Preserve a valid current identity or replace an oversized value deterministically."""
+
+    try:
+        return identity_text(value, scope, maximum_bytes=maximum_bytes, strip=True)
+    except IdentityValidationError:
+        digest = hashlib.sha256(str(value).encode("utf-8", errors="surrogatepass")).hexdigest()
+        return f"{scope}:{digest}"

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -291,8 +292,11 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
 
     monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", acquire)
     monkeypatch.setattr(check, "run_serial", lambda _selected: [])
-    report = tmp_path / "check-report.json"
+    report_owner = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
+    report = Path("/tmp") / f"yolomux-{report_owner}-check-report.json"
+    report.unlink(missing_ok=True)
     assert check.main(["--serial", "--lane", "whitespace", "--no-tool-guard", "--performance-report", str(report)]) == 0
+    report.unlink(missing_ok=True)
     assert purposes == ["static-build", "test-gate"]
 
 

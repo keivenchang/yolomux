@@ -15,6 +15,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
@@ -32,7 +33,6 @@ from tests.gate_harness import load_gate_browser
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.helpers.browser_contracts import clean_browser_receipt_barrier
 from tools.tool_guard import hold_host_tool_flock
-from tools.tool_guard import run_reaped_container_command
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.infra.worktree_writer import acquire_worktree_writer
@@ -237,20 +237,36 @@ def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path)
         ),
     ]
 
-    def fire_interrupt():
+    controller_source = textwrap.dedent(
+        f"""
+        import os
+        from pathlib import Path
+        from tools.tool_guard import run_reaped_container_command
+
+        run_reaped_container_command({command!r}, cwd=Path({str(tmp_path)!r}), env=os.environ)
+        """
+    )
+    controller = subprocess.Popen(
+        [sys.executable, "-c", controller_source],
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if grandchild_file.exists() and grandchild_file.read_text().strip():
                 break
+            assert controller.poll() is None, f"interrupt controller exited before its wrapper started: {controller.returncode}"
             time.sleep(0.02)
-        time.sleep(0.1)
-        os.kill(os.getpid(), signal.SIGINT)  # delivered to the main thread blocked in wait()
-
-    interrupter = threading.Thread(target=fire_interrupt, name="f8-interrupt")
-    interrupter.start()
-    with pytest.raises(KeyboardInterrupt):
-        run_reaped_container_command(command, cwd=tmp_path, env=os.environ)
-    interrupter.join(10)
+        assert grandchild_file.exists() and grandchild_file.read_text().strip(), "wrapper did not publish its container pid"
+        controller.send_signal(signal.SIGINT)
+        assert controller.wait(timeout=15) != 0
+    finally:
+        if controller.poll() is None:
+            controller.kill()
+            controller.wait(timeout=10)
 
     grandchild_pid = int(grandchild_file.read_text().strip())
     deadline = time.monotonic() + 5.0

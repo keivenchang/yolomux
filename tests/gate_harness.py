@@ -85,6 +85,7 @@ UNIX_SOCKET_PATH_LIMIT_BYTES = 107
 GATE_UNIX_SOCKET_PATH_BUDGET_BYTES = 100
 GATE_HTTP_PORT_RANGE = range(7900, 8000)
 GATE_LOCAL_SERVICE_IDLE_SECONDS = "60"
+GATE_HTTP_PORT_LANE_NAMES = (*PYTEST_LANE_NAMES, "certification")
 
 
 def gate_http_port_candidates(
@@ -98,9 +99,9 @@ def gate_http_port_candidates(
     active_lane = os.environ.get(CHECK_LANE_ENV) if lane is None else lane
     candidates = tuple(GATE_HTTP_PORT_RANGE)
     if active_lane:
-        if active_lane not in PYTEST_LANE_NAMES:
+        if active_lane not in GATE_HTTP_PORT_LANE_NAMES:
             raise ValueError(f"invalid YOLOmux check lane: {active_lane!r}")
-        candidates = candidates[PYTEST_LANE_NAMES.index(active_lane)::len(PYTEST_LANE_NAMES)]
+        candidates = candidates[GATE_HTTP_PORT_LANE_NAMES.index(active_lane)::len(GATE_HTTP_PORT_LANE_NAMES)]
     active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
     if active_worker is None:
         return candidates
@@ -1157,10 +1158,6 @@ def retire_fixture_http_connections(server: TmuxWebtermHTTPServer, *, timeout: f
             connection.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            connection.close()
-        except OSError:
-            pass
     deadline = time.monotonic() + timeout
     with activity.condition:
         retired = activity.condition.wait_for(lambda: not activity.connections, timeout=timeout)
@@ -1248,7 +1245,7 @@ class FixtureMemberExitBarrier:
 
     @property
     def unanchored_identities(self) -> tuple[tuple[int, str], ...]:
-        anchored = set(self.pidfds.values())
+        anchored = set(self.pidfds.values()) | self.kqueue_pids
         return tuple(sorted(
             (pid, identity)
             for pid, identity in self.identities.items()
@@ -1278,9 +1275,19 @@ class FixtureMemberExitBarrier:
                     continue
                 sent.append(pid)
             return tuple(sorted(sent))
-        # A Darwin kqueue knote can wait for one exact process exit, but it cannot
-        # deliver a signal. Numeric os.kill after a start-identity check would
-        # reintroduce the PID-reuse race this barrier exists to prevent.
+        # Darwin has no pidfd signal API. The kqueue knote keeps the captured process as the exit
+        # authority; re-prove its start identity immediately before the only available signal API,
+        # then use that same knote as the retirement barrier.
+        if self.kqueue is not None:
+            for pid in sorted(self.kqueue_pids):
+                identity = self.identities[pid]
+                if process_start_identity(pid) != identity or not authorize(pid, identity):
+                    continue
+                try:
+                    os.kill(pid, signal_number)
+                except ProcessLookupError:
+                    continue
+                sent.append(pid)
         return tuple(sent)
 
     def wait(self, timeout: float) -> bool:
@@ -1548,8 +1555,11 @@ def stop_fixture_local_service_process(owner: FixtureLocalServiceProcess, *, lab
     term_deadline = time.monotonic() + 2.0
     term_barrier = FixtureMemberExitBarrier(owned_members(ownership, proof))
     if fixture_owned_process_group_exists(ownership, label=label, proof=proof):
-        signal_fixture_process_group(process_group, signal.SIGTERM)
-        term_sent = True
+        try:
+            signal_fixture_process_group(process_group, signal.SIGTERM)
+            term_sent = True
+        except PermissionError:
+            term_sent = bool(term_barrier.signal_exact(signal.SIGTERM, lambda _pid, _identity: True))
     if term_sent:
         with term_barrier:
             term_barrier.wait(max(0.0, term_deadline - time.monotonic()))
@@ -1566,8 +1576,11 @@ def stop_fixture_local_service_process(owner: FixtureLocalServiceProcess, *, lab
     kill_barrier = FixtureMemberExitBarrier(owned_members(ownership, proof))
     ownership, proof = refresh_ownership()
     if fixture_owned_process_group_exists(ownership, label=label, require_proof=False, proof=proof):
-        signal_fixture_process_group(process_group, signal.SIGKILL)
-        kill_sent = True
+        try:
+            signal_fixture_process_group(process_group, signal.SIGKILL)
+            kill_sent = True
+        except PermissionError:
+            kill_sent = bool(kill_barrier.signal_exact(signal.SIGKILL, lambda _pid, _identity: True))
     if kill_sent:
         with kill_barrier:
             kill_barrier.wait(max(0.0, kill_deadline - time.monotonic()))
@@ -1871,33 +1884,40 @@ def retire_local_service_daemons_beneath(root: Path, *, label: str) -> tuple[Loc
         if not _daemon_still_running(daemon):
             continue
         retired.append(daemon)
-        if daemon.process_group == daemon.pid:
-            signal_fixture_process_group(daemon.process_group, signal.SIGTERM)
-        else:
-            try:
-                os.kill(daemon.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                continue
     if not retired:
         return ()
-    barrier = FixtureMemberExitBarrier(
-        tuple(
-            (daemon.pid, process_start_identity(daemon.pid))
-            for daemon in retired
-            if process_start_identity(daemon.pid)
-        )
+    identities = tuple(
+        (daemon.pid, identity)
+        for daemon in retired
+        if (identity := process_start_identity(daemon.pid))
     )
+    barrier = FixtureMemberExitBarrier(identities)
     with barrier:
+        barrier.signal_exact(
+            signal.SIGTERM,
+            lambda pid, identity: any(
+                daemon.pid == pid
+                and _daemon_still_running(daemon)
+                for daemon in retired
+            ),
+        )
         barrier.wait(2.0)
-    for daemon in retired:
-        if _daemon_still_running(daemon):
-            if daemon.process_group == daemon.pid:
-                signal_fixture_process_group(daemon.process_group, signal.SIGKILL)
-            else:
-                try:
-                    os.kill(daemon.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    continue
+    remaining = tuple(
+        (daemon.pid, identity)
+        for daemon in retired
+        if _daemon_still_running(daemon)
+        and (identity := process_start_identity(daemon.pid))
+    )
+    with FixtureMemberExitBarrier(remaining) as kill_barrier:
+        kill_barrier.signal_exact(
+            signal.SIGKILL,
+            lambda pid, identity: any(
+                daemon.pid == pid
+                and _daemon_still_running(daemon)
+                for daemon in retired
+            ),
+        )
+        kill_barrier.wait(1.0)
     return tuple(retired)
 
 

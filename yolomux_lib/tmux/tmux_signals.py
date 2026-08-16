@@ -138,6 +138,7 @@ TMUX_SIGNAL_HOOK_EVENT_PREFIX = "yolomux-tmux-signal-hook:"
 TMUX_SIGNAL_HOOK_INDEX = 7717
 TMUX_SIGNAL_MONITOR_SILENCE_SECONDS = 60
 TMUX_SIGNAL_EVENT_RETRY_SECONDS = 2.003
+TMUX_SIGNAL_STOP_TIMEOUT_SECONDS = 2.0
 
 
 def tmux_signal_format(fields: tuple[str, ...]) -> str:
@@ -370,12 +371,18 @@ class TmuxSignalEventWatcher:
         self.stop_event.set()
         with self.lock:
             process = self.process
+            thread = self.thread
         if process is not None and process.poll() is None:
             process.terminate()
             try:
                 process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=1.0)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=TMUX_SIGNAL_STOP_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                raise RuntimeError("tmux signal watcher did not stop")
 
     def emit_error(self, message: str) -> None:
         if self.on_error:
@@ -414,7 +421,7 @@ class TmuxSignalEventWatcher:
                 text=True,
                 errors="replace",
                 bufsize=1,
-                preexec_fn=set_control_client_parent_death_signal,
+                preexec_fn=set_control_client_parent_death_signal if _LIBC is not None else None,
             )
         except OSError as exc:
             error = f"tmux control-mode start failed: {exc}"

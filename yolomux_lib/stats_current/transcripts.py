@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import session_files
 from ..atomic_file import atomic_write_text
+from . import identity
 
 
 _PREFIX_BYTES = 64 * 1024
@@ -845,7 +846,15 @@ class StatsCurrentTranscriptUsageScanner:
         for view in views:
             for path in view.paths:
                 source = str(path)
-                context = view.context.get(source, (source, source, "", 0))
+                fallback_identity = identity.bounded_series_identity(source, "transcript-path")
+                raw_context = view.context.get(source, (fallback_identity, fallback_identity, "", 0))
+                root_thread_id, agent_thread_id, parent_thread_id, depth = raw_context
+                context = (
+                    identity.bounded_series_identity(root_thread_id, "thread"),
+                    identity.bounded_series_identity(agent_thread_id, "thread"),
+                    identity.bounded_series_identity(parent_thread_id, "thread") if parent_thread_id else "",
+                    depth,
+                )
                 candidates.setdefault(source, []).append((view, context))
 
         choices: dict[str, _FileChoice] = {}
@@ -861,7 +870,7 @@ class StatsCurrentTranscriptUsageScanner:
                     item[0].root_source,
                 ),
             )
-            context_owner, context = min(
+            _context_owner, context = min(
                 (item for item in source_candidates if item[0].kind == owner.kind),
                 key=lambda item: (-len(item[0].paths), item[0].root_source, item[0].key),
             )
@@ -869,7 +878,7 @@ class StatsCurrentTranscriptUsageScanner:
                 path=Path(source),
                 kind=owner.kind,
                 tmux_key=owner.key,
-                context=context_owner.context.get(source, context),
+                context=context,
                 cold_priority=owner.cold_priority,
             )
         return choices

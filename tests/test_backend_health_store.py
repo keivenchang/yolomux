@@ -731,14 +731,12 @@ def test_an_fsync_failure_keeps_the_previous_snapshot_and_leaves_no_temp_file(tm
     durable = store.document_path.read_text(encoding="utf-8")
 
     real_fsync = os.fsync
-    directory = str(store.directory.resolve())
+    failed_once = False
 
     def failing_fsync(descriptor):
-        try:
-            target = os.readlink(f"/proc/self/fd/{int(descriptor)}")
-        except OSError:
-            target = ""
-        if target.startswith(directory):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
             raise OSError("injected fsync failure")
         return real_fsync(descriptor)
 

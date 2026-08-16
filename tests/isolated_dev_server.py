@@ -166,7 +166,7 @@ def build_environment(
             "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "0.2",
             "YOLOMUX_STARTUP_WATCHDOG_SECONDS": "0",
             "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(port),
-            "PYTHONPATH": str(source_root),
+            "PYTHONPATH": os.pathsep.join((str(source_root), *(entry for entry in sys.path if entry))),
             "PYTHONUNBUFFERED": "1",
         }
     )

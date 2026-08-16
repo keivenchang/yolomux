@@ -2780,7 +2780,7 @@ def test_status_generation_waiter_publishes_a_minimal_revision_only_patch(monkey
     assert event_payload["patch"] is True
     assert event_payload["collection"] == "sessions"
     assert event_payload["changes"] == {}
-    assert event_payload["fields"] == {"agent_window_snapshot_revision": 8}
+    assert event_payload["fields"] == {"agent_window_snapshot_revision": 8, "session_order": []}
     # A valid re-measured snapshot means the browser applies the patch directly, never refetches.
     assert event_payload["refresh"] is False
     assert record.status_generation == 8
@@ -2953,7 +2953,8 @@ def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessi
         assert webapp.auto_approve_client_event_patch(same, identical) is None
         # W4: a revision-only advance (rows unchanged, revision 7 -> 8) must still emit a MINIMAL
         # patch so the browser learns the new revision and clears its stale marker without an HTTP
-        # refetch. Empty changes, no row rebuild, one field.
+        # refetch. Empty changes, no row rebuild, and the authoritative roster needed if the patch
+        # is deferred behind metadata.
         revision_only = webapp.auto_approve_client_event_patch(previous, same)
         patch = webapp.auto_approve_client_event_patch(same, changed)
     finally:
@@ -2964,7 +2965,7 @@ def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessi
         "collection": "sessions",
         "changes": {},
         "removed_keys": [],
-        "fields": {"agent_window_snapshot_revision": 8},
+        "fields": {"agent_window_snapshot_revision": 8, "session_order": ["1", "2"]},
         "removed_fields": [],
     }
     assert patch == {
@@ -2972,7 +2973,7 @@ def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessi
         "collection": "sessions",
         "changes": {"2": changed["sessions"]["2"]},
         "removed_keys": [],
-        "fields": {"agent_window_snapshot_revision": 9},
+        "fields": {"agent_window_snapshot_revision": 9, "session_order": ["1", "2"]},
         "removed_fields": [],
     }
     assert len(json.dumps(patch, separators=(",", ":"))) < len(json.dumps({"data": changed}, separators=(",", ":")))

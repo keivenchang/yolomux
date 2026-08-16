@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-import shlex
-import sys
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -22,6 +20,7 @@ from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import wait_for_fixture_client_event_demand
 from tests.gate_harness import gate_tmux  # noqa: F401
+from tests.tmux_runtime import current_python_command
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yolomux_lib.app import TmuxWebtermApp
@@ -170,7 +169,7 @@ def test_f3_goal_blocked_renders_distinctly_from_goal_achieved(browser, tmp_path
 @pytest.mark.browser
 def test_f4_python3_claude_mock_process_is_recognised_as_an_ai_agent(gate_tmux, gate_runtime_paths):
     session = gate_tmux.sessions[0]
-    command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
+    command = current_python_command(REPO_ROOT / "tools" / "mockers" / "claude.py", "--mock")
     launched = run_isolated_tmux(gate_tmux, "send-keys", "-t", f"{session}:", f"exec {command}", "Enter", timeout=5)
     assert launched.returncode == 0, launched.stderr or launched.stdout
     ready, panes = wait_for_isolated_tmux_panes(
@@ -200,7 +199,7 @@ def _wait_for_mock_agents(runtime, sessions: list[str]) -> None:
 
 
 def _launch_mock_agents(runtime, sessions: list[str]) -> None:
-    command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
+    command = current_python_command(REPO_ROOT / "tools" / "mockers" / "claude.py", "--mock")
     for session in sessions:
         launched = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", f"exec {command}", "Enter", timeout=5)
         assert launched.returncode == 0, launched.stderr or launched.stdout
@@ -210,7 +209,7 @@ def _launch_mock_agents(runtime, sessions: list[str]) -> None:
 def _add_mock_agent_sessions(runtime, count: int) -> list[str]:
     stem = runtime.sessions[0].rsplit("-", 1)[0]
     sessions = [f"{stem}-{index}" for index in range(len(runtime.sessions) + 1, len(runtime.sessions) + count + 1)]
-    command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
+    command = current_python_command(REPO_ROOT / "tools" / "mockers" / "claude.py", "--mock")
     for session in sessions:
         created = run_isolated_tmux(
             runtime.tmux,
@@ -456,10 +455,24 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
         if observation["revisions"] and all(revision > result["initialRevision"] for revision in observation["revisions"])
     ]
     assert advanced, result
+    converged = [
+        observation
+        for observation in advanced
+        if (
+            observation["sessionCount"] == observation["metadataCount"] == REALISTIC_SESSION_COUNT
+            and observation["statusRowCount"] == observation["modelRowCount"] == REALISTIC_SESSION_COUNT
+        )
+    ]
+    assert converged, result
+    first_converged = result["observations"].index(converged[0])
+    # tmux roster discovery and process classification are separate external transitions. Once all
+    # four consumers name the same terminal state, no later higher-revision observation may revert
+    # to a partial roster.
     assert all(
         observation["sessionCount"] == observation["metadataCount"] == REALISTIC_SESSION_COUNT
         and observation["statusRowCount"] == observation["modelRowCount"] == REALISTIC_SESSION_COUNT
-        for observation in advanced
+        for observation in result["observations"][first_converged:]
+        if observation["revisions"] and all(revision > result["initialRevision"] for revision in observation["revisions"])
     ), result
     assert not result.get("error"), result
     assert result["final"]["metadataRequestCount"] > metadata_requests_before, result

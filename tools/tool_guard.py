@@ -127,7 +127,11 @@ def run_reaped_container_command(
 
     process = subprocess.Popen(command, cwd=str(cwd), env=dict(env), start_new_session=True)
     try:
-        return process.wait()
+        while True:
+            try:
+                return process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                continue
     except BaseException:
         _terminate_process_session(process, terminate_grace_seconds)
         raise

@@ -16,8 +16,8 @@ from yolomux_lib.search import search_indexer
 
 
 def _clear_registry():
-    with file_index._REGISTRY_LOCK:
-        file_index._REGISTRY.clear()
+    retirement = file_index.clear_memory_indexes()
+    assert retirement.late == [], retirement
 
 
 def _reset_lifecycle_registry():

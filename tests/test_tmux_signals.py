@@ -318,7 +318,7 @@ def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
     assert calls == [(101, signal.SIGTERM)]
 
 
-def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
+def test_run_control_client_uses_parent_death_preexec_only_when_supported(monkeypatch):
     # run_control_client must spawn the control client with the parent-death preexec hook so the
     # leaked-orphan-on-hard-kill path is closed at the source, not mopped up later.
     captured = {}
@@ -348,7 +348,18 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
     watcher.run_control_client("alpha")
 
-    assert captured["kwargs"].get("preexec_fn") is tmux_signals.set_control_client_parent_death_signal
+    expected = tmux_signals.set_control_client_parent_death_signal if tmux_signals._LIBC is not None else None
+    assert captured["kwargs"].get("preexec_fn") is expected
+
+
+def test_tmux_signal_watcher_stop_joins_its_owned_thread():
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda _event: None)
+    watcher.thread = threading.Thread(target=watcher.stop_event.wait, name="owned-tmux-signal-test")
+    watcher.thread.start()
+
+    watcher.stop()
+
+    assert watcher.thread.is_alive() is False
 
 
 @pytest.mark.parametrize(
