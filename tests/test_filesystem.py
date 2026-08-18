@@ -1123,6 +1123,7 @@ def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path,
 
     assert detached["branch"] == ""
     assert detached["detached"] is True
+    assert detached["head_sha"] == git(repo, "rev-parse", "HEAD").stdout.strip()
 
     def failed_git(args, cwd, timeout):
         return subprocess.CompletedProcess(args, 128, "", "Git metadata unavailable")
@@ -1135,6 +1136,7 @@ def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path,
 
     assert unknown["branch"] == ""
     assert unknown["detached"] is False
+    assert unknown["head_sha"] == ""
 
 
 def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
@@ -1181,12 +1183,12 @@ def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation
     first["branch"] = "mutated"
     second = git_ops.git_repo_info(repo, include_status=False)
     assert second["branch"] == "main"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     assert metadata.invalidate_git_metadata_paths([repo / "tracked.txt"]) == set()
     third = git_ops.git_repo_info(repo, include_status=False)
     assert third["branch"] == "main"
-    assert len(calls) == 4, "watcher-owned invalidation must make Finder recompute"
+    assert len(calls) == 6, "watcher-owned invalidation must make Finder recompute"
 
 
 def _reset_repository_generation(root):
@@ -1326,15 +1328,15 @@ def test_git_repo_info_cache_applies_each_repo_ttl_independently(tmp_path, monke
 
     git_ops.git_repo_info(repo_short, include_status=False)
     git_ops.git_repo_info(repo_long, include_status=False)
-    assert len(calls) == 4
+    assert len(calls) == 6
 
     now[0] = 115.0
     git_ops.git_repo_info(repo_short, include_status=False)
     git_ops.git_repo_info(repo_long, include_status=False)
-    assert len(calls) == 6, "only the short-TTL repository should revalidate"
+    assert len(calls) == 9, "only the short-TTL repository should revalidate"
 
 
-@pytest.mark.parametrize(("timeout", "expected_call_count"), [(0.001, 0), (1.0, 3)])
+@pytest.mark.parametrize(("timeout", "expected_call_count"), [(0.001, 0), (1.0, 4)])
 def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, monkeypatch, timeout, expected_call_count):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1355,6 +1357,7 @@ def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, mon
     assert len(calls) == expected_call_count
     assert info["branch"] == ""
     assert info["detached"] is False
+    assert info["head_sha"] == ""
     assert info["upstream"] == ""
     assert info["ahead"] == 0
     assert info["behind"] == 0

@@ -552,12 +552,12 @@ function bindFileExplorerHeaderActions(container = document) {
       clearTabberSessionFilesStates();
       fetchTabberActivity();
       refreshTabberPanels();
-    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    } else if (view === 'differ') fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         // A user-requested refresh must bypass the Finder directory cache; otherwise the control
         // only repaints cached rows and cannot reveal filesystem changes.
         refreshFileExplorerTrees({fresh: true});
-        fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+        fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
@@ -601,8 +601,8 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     await refreshFileExplorerTrees();
-    if (typeof fetchSessionFiles === 'function') {
-      await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+    if (typeof refreshVisibleSessionFilesSurfaces === 'function') {
+      await refreshVisibleSessionFilesSurfaces({silent: true, force: true});
     }
     renderSessionButtons();
     renderPaneTabStrips();
@@ -2534,9 +2534,12 @@ function clientServerWatchRootDescriptor() {
   for (const directory of watchedFileExplorerDirectories()) {
     addClientServerWatchRootSurface(rootSurfaces, directory, 'finder');
   }
-  if (fileExplorerSessionFilesPaneIsVisible()) {
+  if (fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
-    for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
+    const payloads = [];
+    if (fileExplorerTreePaneIsVisible()) payloads.push(fileExplorerFinderSessionFilesState.payload);
+    if (fileExplorerSessionFilesPaneIsVisible()) payloads.push(fileExplorerSessionFilesState.payload);
+    for (const repo of payloads.flatMap(payload => payload?.repos || [])) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
       addClientServerWatchRootSurface(rootSurfaces, path, 'modified-files-repository');
@@ -2544,7 +2547,7 @@ function clientServerWatchRootDescriptor() {
     }
     // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
     // otherwise one Differ result row would redundantly declare one hot directory root.
-    for (const file of fileExplorerSessionFilesState.payload?.files || []) {
+    for (const file of payloads.flatMap(payload => payload?.files || [])) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
       addClientServerWatchRootSurface(rootSurfaces, dirnameOf(path), 'modified-files-parent');
@@ -2602,7 +2605,7 @@ function clientServerWatchState() {
       hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
+  if ((fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
@@ -2785,8 +2788,8 @@ async function refreshWatchedFilesystem(options = {}) {
       }
     }
     await refreshOpenFilesIfChanged();
-    if (fileExplorerSessionFilesPaneIsVisible()) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    if (fileExplorerPaneIsOpen()) {
+      refreshVisibleSessionFilesSurfaces({silent: true});
     }
     syncServerWatchRoots();
   } finally {

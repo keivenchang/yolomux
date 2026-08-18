@@ -1224,6 +1224,109 @@ def test_differ_ref_input_change_uses_its_own_repository_context(browser, tmp_pa
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_differ_ref_change_preserves_finder_worktree_counts(browser, tmp_path):
+    repo = "/repo/app"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,differ;right:1",
+        sessions=["1"],
+        session_files_payload={"session": "1", "loaded": True, "errors": [], "repos": [], "files": []},
+        grid_width=1300,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Boolean(panelNodes.get(finderItemId)?.querySelector('.file-explorer-tree-panel') && panelNodes.get(differItemId))"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const repo = '/repo/app';
+        const finderPanel = panelNodes.get(finderItemId);
+        const differPanel = panelNodes.get(differItemId);
+        const finderTree = finderPanel.querySelector('.file-explorer-tree-panel');
+        const worktreePayload = {
+          session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [],
+          repos: [{repo, count: 1, added: 2, removed: 1}],
+          files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'M', added: 2, removed: 1}],
+        };
+        const initialDifferPayload = {
+          session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [],
+          refs_by_repo: {[repo]: [{ref: 'abc123def456', short: 'abc123d', subject: 'older base'}]},
+          repos: [{repo, count: 1, added: 2, removed: 1}],
+          files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'M', added: 2, removed: 1}],
+        };
+        const repoEntries = [{name: 'app', kind: 'dir', is_repo: true, repo: {root: repo, name: 'app', branch: 'main'}}];
+        setSessionFilesPayloadForDestination('finder', worktreePayload);
+        setSessionFilesPayloadForDestination('differ', initialDifferPayload);
+        renderTreeChildren(finderTree, '/repo', repoEntries);
+        activatePaneTab(slotForItem(differItemId), differItemId, {userInitiated: true});
+        renderFileExplorerChangesPanel(differPanel, {force: true});
+        const finderDiff = () => panelNodes.get(finderItemId)?.querySelector('.file-tree-row[data-path="/repo/app"] > .file-tree-diff')?.textContent.replace(/\\s+/g, ' ').trim() || '';
+        const differTotals = () => panelNodes.get(differItemId)?.querySelector('.changes-repo-totals')?.textContent.replace(/\\s+/g, ' ').trim() || '';
+        const beforeFinder = finderDiff();
+        window.__fixtureSessionFilesPayload = {
+          session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [],
+          refs_by_repo: initialDifferPayload.refs_by_repo,
+          repos: [{repo, from_ref: 'abc123def456', to_ref: 'current', count: 1, added: 200, removed: 100}],
+          files: [{session: '1', repo, path: 'a.py', abs_path: `${repo}/a.py`, status: 'A', added: 200, removed: 100}],
+        };
+        const input = differPanel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]');
+        input.value = 'abc123def456';
+        input.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        const deadline = performance.now() + 2500;
+        let finishing = false;
+        const inspect = () => {
+          const selected = diffRefsByRepo[repo]?.from || '';
+          const differ = differTotals();
+          if (!finishing && selected === 'abc123def456' && differ.includes('+200') && differ.includes('-100')) {
+            finishing = true;
+            activatePaneTab(slotForItem(finderItemId), finderItemId, {userInitiated: true});
+            requestAnimationFrame(() => {
+              const activeFinderTree = panelNodes.get(finderItemId).querySelector('.file-explorer-tree-panel');
+              renderTreeChildren(activeFinderTree, '/repo', repoEntries);
+              requestAnimationFrame(() => done({
+                beforeFinder,
+                afterFinder: finderDiff(),
+                differ,
+                finderFrom: fileExplorerFinderSessionFilesState.payload.from_ref,
+                finderTo: fileExplorerFinderSessionFilesState.payload.to_ref,
+                differFrom: fileExplorerSessionFilesState.payload.repos[0]?.from_ref || '',
+                errors: jsDebugFailureEvents('error'),
+                rejections: jsDebugFailureEvents('rejection'),
+              }));
+            });
+            return;
+          }
+          if (performance.now() >= deadline) {
+            return done({
+              error: 'comparison did not settle',
+              selected,
+              differ,
+              finder: finderDiff(),
+              payload: fileExplorerSessionFilesState.payload,
+              requests: window.__bootFetches.filter(item => item.path === '/api/session-files'),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          }
+          requestAnimationFrame(inspect);
+        };
+        requestAnimationFrame(() => requestAnimationFrame(inspect));
+        """
+    )
+    assert not metrics.get("error"), json.dumps(metrics, sort_keys=True)
+    assert metrics["beforeFinder"] == "+2 -1", metrics
+    assert metrics["afterFinder"] == "+2 -1", metrics
+    assert "+200" in metrics["differ"] and "-100" in metrics["differ"], metrics
+    assert metrics["finderFrom"] == "HEAD" and metrics["finderTo"] == "current", metrics
+    assert metrics["differFrom"] == "abc123def456", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_differ_directory_context_expands_the_target_in_finder(browser, tmp_path):
     payload = {
         "session": "1",

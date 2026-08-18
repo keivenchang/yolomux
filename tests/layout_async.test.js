@@ -4698,7 +4698,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       return request.promise;
     });
 
-    const request = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    const request = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     assert.equal(api.fileExplorerSessionFilesStateForTest().loading, true, 'the HTTP generation owns loading');
     assert.equal(api.applySessionFilesPayloadFromPushForTest({
       session: '1',
@@ -4757,7 +4757,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       return Promise.resolve(jsonResponse(receipt, 202));
     });
 
-    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     assert.equal(api.sessionFilesPayloadForTest().refreshing_elsewhere, true, 'the first accepted receipt paints queued state');
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: receipt.operation.id, cursor: {epoch: 'session-files-retained', seq: 1}},
@@ -4777,7 +4777,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     }), true, 'the accepted operation reaches one terminal result');
     assert.equal(api.sessionFilesPayloadForTest().files[0].path, 'DONE.md', 'the terminal result paints Differ');
 
-    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     const state = api.sessionFilesPayloadForTest();
     assert.equal(state.loaded, true, 'a duplicate receipt cannot regress ready state');
     assert.equal(state.refreshing_elsewhere, false, 'a duplicate receipt cannot repaint queued state');
@@ -6488,7 +6488,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/yolomux.dev2', root: '/home/test/yolomux.dev2'}},
         selected_pane: {current_path: '/home/test/yolomux.dev2'},
       });
-      syncTreeApi.setSessionFilesPayloadForTest({
+      syncTreeApi.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/yolomux.dev2'}, {repo: '/home/test/ai-config'}],
         files: [
@@ -6534,7 +6534,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
         selected_pane: {current_path: '/home/test/project/1/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [
@@ -6562,7 +6562,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/tmp/outside/src', root: '/tmp/outside'}},
         selected_pane: {current_path: '/tmp/outside/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '2',
         repos: [{repo: '/tmp/outside'}, {repo: '/home/test/project/3'}],
         files: [
@@ -6588,7 +6588,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
         selected_pane: {current_path: '/home/test/project/1/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [
@@ -6622,7 +6622,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/3', root: '/home/test/project/3'}},
         selected_pane: {current_path: '/home/test/project/3'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '2',
         repos: [{repo: '/home/test/project/3'}],
         files: [{repo: '/home/test/project/3', path: 'README.md', abs_path: '/home/test/project/3/README.md'}],
@@ -6635,7 +6635,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         '/home/test/project/3',
       ], 'focusing another home tab swaps to that tab chain without carrying previous expanded folders');
 
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [

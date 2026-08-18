@@ -2137,7 +2137,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
     assert.equal(source.includes('let sessionFilesRequestId = 0;'), false, 'standalone Changes request id is removed');
     assert.ok(/const fileExplorerSessionFilesState = \{[\s\S]*guard: makeGenerationGuard\(\)/.test(source), 'Finder diff payload, signature, loading, and stale-response guard share one record');
-    assert.ok(source.includes('const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();'), 'Finder diff fetches reject stale responses through the shared guard');
+    assert.ok(source.includes('const requestIsCurrent = state.guard.begin();'), 'Finder and Differ fetches reject stale responses through their destination record guard');
     assert.ok(source.includes('function activeChangesControl'), 'Finder diff renders can detect active controls');
     assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
     assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
@@ -3093,8 +3093,10 @@ async function runLayoutRestoreSuite() {
     const detachedHeadParts = api.fileTreeDisplayParts('/repo/detached-head', {kind: 'dir', is_repo: true, name: 'detached-head'});
     assert.equal(detachedHeadParts.text, 'detached-head [detached]', 'a positively identified detached HEAD keeps its Finder badge');
     // Rich hover popover (replaces the native title tooltip) carries branch / upstream / stat / path.
-    const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3, head_sha: headSha});
     assert.ok(pop.includes('feature/x') && pop.includes('2 ahead') && pop.includes('1 behind') && pop.includes('3 dirty'), 'repo popover shows branch + ahead/behind/dirty');
+    assert.ok(pop.includes(`SHA: ${headSha}`), 'repo popover shows the repository HEAD SHA');
     assert.ok(pop.includes('/repo/app'), 'repo popover shows the repo root path');
     assert.equal(api.repoInfoPopoverHtml({}), '', 'no popover html without a repo root');
     assert.ok(/\.file-tree-repo-popover\s*\{[^}]*position:\s*fixed/.test(css), 'the repo hover popover is a styled floating element');

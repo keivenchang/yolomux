@@ -421,6 +421,7 @@ const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {sig
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerFinderSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
@@ -534,8 +535,17 @@ const tabberActivityState = {
 const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
+// Differ owns arbitrary selected refs. Finder has a separate fixed HEAD/current record below so a
+// historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+  abortController: null,
+};
+const fileExplorerFinderSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
@@ -21174,6 +21184,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     detached: repo.detached === true,
+    head_sha: repo.head_sha == null ? null : String(repo.head_sha).trim(),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -21481,7 +21492,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -21752,7 +21763,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesRepoRoots(payload = fileExplorerFinderSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -21770,7 +21781,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesAffectedDirs(payload = fileExplorerFinderSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -21871,7 +21882,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -22088,7 +22099,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -22268,6 +22279,7 @@ function repoInfoPopoverHtml(repo) {
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
   const branch = repoBranchDisplayText(repo);
   if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
+  if (repo.head_sha) rows.push(`<div class="file-tree-repo-popover-sha">${esc(t('menu.help.about.sha', {sha: repo.head_sha}))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
@@ -22314,7 +22326,7 @@ async function showRepoRowHoverPopover(row, path) {
   const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
   showFileTreeRepoPopover(row, cached);
-  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (cached && cached.head_sha !== null && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
@@ -22971,7 +22983,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+  const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -22985,7 +22997,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -23053,12 +23065,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
+  const repos = Array.isArray(fileExplorerFinderSessionFilesState.payload?.repos) ? fileExplorerFinderSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+    const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
@@ -26580,12 +26592,12 @@ function bindFileExplorerHeaderActions(container = document) {
       clearTabberSessionFilesStates();
       fetchTabberActivity();
       refreshTabberPanels();
-    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    } else if (view === 'differ') fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         // A user-requested refresh must bypass the Finder directory cache; otherwise the control
         // only repaints cached rows and cannot reveal filesystem changes.
         refreshFileExplorerTrees({fresh: true});
-        fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+        fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
@@ -26629,8 +26641,8 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     await refreshFileExplorerTrees();
-    if (typeof fetchSessionFiles === 'function') {
-      await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+    if (typeof refreshVisibleSessionFilesSurfaces === 'function') {
+      await refreshVisibleSessionFilesSurfaces({silent: true, force: true});
     }
     renderSessionButtons();
     renderPaneTabStrips();
@@ -28562,9 +28574,12 @@ function clientServerWatchRootDescriptor() {
   for (const directory of watchedFileExplorerDirectories()) {
     addClientServerWatchRootSurface(rootSurfaces, directory, 'finder');
   }
-  if (fileExplorerSessionFilesPaneIsVisible()) {
+  if (fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
-    for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
+    const payloads = [];
+    if (fileExplorerTreePaneIsVisible()) payloads.push(fileExplorerFinderSessionFilesState.payload);
+    if (fileExplorerSessionFilesPaneIsVisible()) payloads.push(fileExplorerSessionFilesState.payload);
+    for (const repo of payloads.flatMap(payload => payload?.repos || [])) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
       addClientServerWatchRootSurface(rootSurfaces, path, 'modified-files-repository');
@@ -28572,7 +28587,7 @@ function clientServerWatchRootDescriptor() {
     }
     // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
     // otherwise one Differ result row would redundantly declare one hot directory root.
-    for (const file of fileExplorerSessionFilesState.payload?.files || []) {
+    for (const file of payloads.flatMap(payload => payload?.files || [])) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
       addClientServerWatchRootSurface(rootSurfaces, dirnameOf(path), 'modified-files-parent');
@@ -28630,7 +28645,7 @@ function clientServerWatchState() {
       hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
+  if ((fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
@@ -28813,8 +28828,8 @@ async function refreshWatchedFilesystem(options = {}) {
       }
     }
     await refreshOpenFilesIfChanged();
-    if (fileExplorerSessionFilesPaneIsVisible()) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    if (fileExplorerPaneIsOpen()) {
+      refreshVisibleSessionFilesSurfaces({silent: true});
     }
     syncServerWatchRoots();
   } finally {
@@ -62095,25 +62110,43 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
-function sessionFilesRequestQueryString() {
-  return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+function sessionFilesRequestQueryString(destination = 'differ') {
+  return destination === 'finder'
+    ? 'from=HEAD&to=current'
+    : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
-function clientSessionFilesWatchRequests() {
-  const params = new URLSearchParams(sessionFilesRequestQueryString());
+function sessionFilesRequestForDestination(destination, sessionOverride = '') {
+  const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
   let repoRefs = null;
   const refs = params.get('refs');
   if (refs) {
     const parsed = safeJsonParse(refs, null);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
   }
-  return [{
-    session: fileExplorerSessionFilesTargetSession(),
+  return {
+    session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
     hours: 24,
     from_ref: params.get('from') || 'HEAD',
     to_ref: params.get('to') || 'current',
     repo_refs: repoRefs,
-  }];
+  };
+}
+
+function clientSessionFilesWatchRequests() {
+  const candidates = [];
+  if (fileExplorerTreePaneIsVisible()) candidates.push(sessionFilesRequestForDestination('finder'));
+  if (fileExplorerSessionFilesPaneIsVisible()) candidates.push(sessionFilesRequestForDestination('differ'));
+  const requests = [];
+  const seen = new Set();
+  for (const request of candidates) {
+    if (!request.session) continue;
+    const key = sessionFilesRequestKey(request, request.session);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    requests.push(request);
+  }
+  return requests;
 }
 
 function normalizedSessionFilesRepoRefs(repoRefs) {
@@ -62148,14 +62181,24 @@ function sessionFilesRequestKey(request = {}, sessionFallback = '') {
   return JSON.stringify(normalized);
 }
 
-function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+function sessionFilesRequestMatchesDestination(request = {}, session = '', destination = 'differ') {
   if (!request || typeof request !== 'object') return false;
-  const current = clientSessionFilesWatchRequests()[0] || {};
+  if (destination === 'finder' && !fileExplorerTreePaneIsVisible()) return false;
+  if (destination === 'differ' && !fileExplorerSessionFilesPaneIsVisible()) return false;
+  const current = sessionFilesRequestForDestination(destination);
   return sessionFilesRequestKey(request, session) === sessionFilesRequestKey(current, session);
 }
 
-function sessionFilesCacheKey(session) {
-  return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
+function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+  return ['finder', 'differ'].some(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesDestinationsForRequest(request = {}, session = '') {
+  return ['finder', 'differ'].filter(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesCacheKey(session, destination = 'differ') {
+  return `${String(session || '')}\x1f${sessionFilesRequestQueryString(destination)}`;
 }
 
 function sessionFilesPayloadHasDifferPath(payload, path) {
@@ -62722,8 +62765,12 @@ function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('common.reset'))}</button>`;
 }
 
-function invalidateSessionFilesCaches() {
-  fileExplorerSessionFilesCache.clear();
+function sessionFilesCacheForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesCache : fileExplorerSessionFilesCache;
+}
+
+function invalidateSessionFilesCaches(destination = 'differ') {
+  sessionFilesCacheForDestination(destination).clear();
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -62743,7 +62790,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     diffRefTo = nextTo;
   }
   writeStoredDiffRefs();
-  invalidateSessionFilesCaches();
+  invalidateSessionFilesCaches('differ');
   for (const state of fileState.values()) {
     if (!state || state.kind !== 'text') continue;
     state.diffLoaded = false;
@@ -62752,8 +62799,8 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     state.diffPinnedFromRef = '';
     state.diffPinnedToRef = '';
   }
-  renderFileExplorerChangesPanels({force: true});
-  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  renderFileExplorerChangesPanels({force: true, view: 'differ'});
+  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
   return true;
 }
@@ -62798,7 +62845,7 @@ function fileExplorerFinderTargetSession() {
     fileExplorerFinderSelectedSession = selected;
     return selected;
   }
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
 }
@@ -62814,8 +62861,9 @@ function fileExplorerSessionFilesTargetSession() {
   return sessions[0] || '';
 }
 
-function emptySessionFilesPayload(session = '', loaded = true) {
-  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
+function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
+  const refs = destination === 'finder' ? {from: 'HEAD', to: 'current'} : {from: diffRefFrom, to: diffRefTo};
+  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: refs.from, to_ref: refs.to, loaded};
 }
 
 function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
@@ -62873,9 +62921,9 @@ function sessionFilesPanelIsLoading(payload, files = null) {
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
 
-function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
+function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'differ') {
   const session = String(nextPayload?.session || '');
-  const current = sessionFilesPayloadForDestination('finder');
+  const current = sessionFilesPayloadForDestination(destination);
   if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
   if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
@@ -62895,22 +62943,22 @@ function switchFileExplorerChangesSession(session) {
     scheduleTabberTreeLayoutStateSync();
     return;
   }
-  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
+  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session, 'differ'));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
-    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesPayloadForDestination('differ', cached.payload);
     fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else {
-    const pendingPayload = emptySessionFilesPayload(session, false);
-    setSessionFilesPayloadForDestination('finder', pendingPayload);
+    const pendingPayload = emptySessionFilesPayload(session, false, 'differ');
+    setSessionFilesPayloadForDestination('differ', pendingPayload);
     fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
-  setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
+  setSessionFilesLoadingForDestination('differ', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
   // A cached session switch already has visible last-known-good rows. Let the server decide
   // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
   // that parent and submit a full session-files job for every tab switch.
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
+  fetchSessionFiles({destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
 }
 
 function switchFileExplorerFinderSession(session) {
@@ -62919,6 +62967,13 @@ function switchFileExplorerFinderSession(session) {
   fileExplorerFinderSelectedSession = session;
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  const cached = fileExplorerFinderSessionFilesCache.get(sessionFilesCacheKey(session, 'finder'));
+  const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
+  if (cachedPayloadIsLoaded) {
+    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesSignatureForDestination('finder', cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload));
+  }
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   return true;
 }
 
@@ -62940,7 +62995,11 @@ function noteFileExplorerChangesSessionInteraction(session) {
 }
 
 function sessionFilesPayloadForDestination(destination) {
-  return fileExplorerSessionFilesState.payload;
+  return sessionFilesStateForDestination(destination).payload;
+}
+
+function sessionFilesStateForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesState : fileExplorerSessionFilesState;
 }
 
 const sessionFilesProducerDeadlineMs = 5000;
@@ -62961,18 +63020,18 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(nextPayload.session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(nextPayload.session, destination), {payload: nextPayload, signature});
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }, sessionFilesProducerDeadlineMs);
 }
 
-function retireSessionFilesRequest(reason = 'session-files request superseded') {
-  fileExplorerSessionFilesState.guard.invalidate();
-  const controller = fileExplorerSessionFilesState.abortController;
-  fileExplorerSessionFilesState.abortController = null;
+function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+  const state = sessionFilesStateForDestination(destination);
+  state.guard.invalidate();
+  const controller = state.abortController;
+  state.abortController = null;
   if (!controller || controller.signal.aborted) return;
   const error = new Error(reason);
   error.name = 'AbortError';
@@ -62980,8 +63039,9 @@ function retireSessionFilesRequest(reason = 'session-files request superseded') 
 }
 
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
-  if (options.invalidateRequest !== false) retireSessionFilesRequest(options.retirementReason);
-  fileExplorerSessionFilesState.payload = payload;
+  const state = sessionFilesStateForDestination(destination);
+  if (options.invalidateRequest !== false) retireSessionFilesRequest(destination, options.retirementReason);
+  state.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
   if (
@@ -63039,19 +63099,19 @@ function sessionFilesPayloadSignatureForPayload(payload) {
 }
 
 function sessionFilesSignatureForDestination(destination) {
-  return fileExplorerSessionFilesState.signature;
+  return sessionFilesStateForDestination(destination).signature;
 }
 
 function setSessionFilesSignatureForDestination(destination, signature) {
-  fileExplorerSessionFilesState.signature = signature;
+  sessionFilesStateForDestination(destination).signature = signature;
 }
 
 function sessionFilesLoadingForDestination(destination) {
-  return fileExplorerSessionFilesState.loading;
+  return sessionFilesStateForDestination(destination).loading;
 }
 
 function setSessionFilesLoadingForDestination(destination, loading) {
-  fileExplorerSessionFilesState.loading = loading;
+  sessionFilesStateForDestination(destination).loading = loading;
 }
 
 function sessionFilesRenderOptions(options = {}) {
@@ -63064,26 +63124,33 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
   }
-  renderFileExplorerChangesPanels(options);
+  if (destination === 'finder') {
+    updateFileTreeGitStatusRows();
+  } else {
+    renderFileExplorerChangesPanels({...options, view: 'differ'});
+  }
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = 'finder';
+  const destination = options.destination === 'finder' ? 'finder' : 'differ';
   const forceRefresh = options.force === true;
   const backgroundRefresh = options.background === true;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || fileExplorerSessionFilesTargetSession();
+  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
+  const state = sessionFilesStateForDestination(destination);
   let shouldRender = options.silent !== true;
   if (!session) {
-    const emptyPayload = emptySessionFilesPayload('', true);
+    const emptyPayload = emptySessionFilesPayload('', true, destination);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
@@ -63092,10 +63159,10 @@ async function fetchSessionFiles(options = {}) {
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
-  retireSessionFilesRequest('session-files request replaced');
-  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
+  retireSessionFilesRequest(destination, 'session-files request replaced');
+  const requestIsCurrent = state.guard.begin();
   const requestController = typeof AbortController === 'function' ? new AbortController() : null;
-  fileExplorerSessionFilesState.abortController = requestController;
+  state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
@@ -63103,9 +63170,8 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
-    // does not paint historical diff badges after the repo is clean.
-    const params = new URLSearchParams(sessionFilesRequestQueryString());
+    const request = sessionFilesRequestForDestination(destination, session);
+    const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
@@ -63128,21 +63194,25 @@ async function fetchSessionFiles(options = {}) {
         method: 'GET',
       });
     }
-    const nextPayload = normalizedSessionFilesPayload(payload, {session});
+    const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
-    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
+    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
+    for (const mirrorDestination of sessionFilesDestinationsForRequest(request, session)) {
+      if (mirrorDestination === destination) continue;
+      applySessionFilesPayloadToDestination(mirrorDestination, nextPayload, request, session);
+    }
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
     if (isApiPendingResponse(err)) {
       const nextPayload = {
-        ...emptySessionFilesPayload(session, false),
+        ...emptySessionFilesPayload(session, false, destination),
         refreshing_elsewhere: true,
         pending_key: err.key,
         pending_epoch: err.epoch,
@@ -63157,7 +63227,8 @@ async function fetchSessionFiles(options = {}) {
       return;
     }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
+    const failedRefs = sessionFilesRequestForDestination(destination, session);
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -63167,61 +63238,79 @@ async function fetchSessionFiles(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
-    if (fileExplorerSessionFilesState.abortController === requestController) {
-      fileExplorerSessionFilesState.abortController = null;
+    if (state.abortController === requestController) {
+      state.abortController = null;
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
-    if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
+    if (current && (shouldRender || wasLoading) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
-      if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
       renderSessionButtons();
     }
   }
 }
 
-function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
-  const destination = 'finder';
-  const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
-    if (sessionFilesLoadingForDestination(destination)) setSessionFilesLoadingForDestination(destination, false);
-    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
-    return false;
+async function refreshVisibleSessionFilesSurfaces(options = {}) {
+  const destinations = [];
+  if (fileExplorerTreePaneIsVisible()) destinations.push('finder');
+  if (fileExplorerSessionFilesPaneIsVisible()) destinations.push('differ');
+  const seen = new Set();
+  const requests = [];
+  for (const destination of destinations) {
+    const request = sessionFilesRequestForDestination(destination);
+    const key = sessionFilesRequestKey(request, request.session);
+    if (!request.session || seen.has(key)) continue;
+    seen.add(key);
+    requests.push(fetchSessionFiles({
+      destination,
+      session: request.session,
+      silent: options.silent !== false,
+      force: options.force === true,
+    }));
   }
+  await Promise.all(requests);
+}
+
+function applySessionFilesPayloadToDestination(destination, payload, request, session) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
-  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
+  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
-  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }
   return true;
 }
 
-function applySessionFilesOperationFailure(result = {}, context = {}) {
-  const destination = 'finder';
-  const session = String(context.session || fileExplorerSessionFilesTargetSession() || '');
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(context, session)) return false;
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+  const session = String(payload.session || request.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(request, session);
+  if (!destinations.length) return false;
+  let applied = false;
+  for (const destination of destinations) {
+    applied = applySessionFilesPayloadToDestination(destination, payload, request, session) || applied;
+  }
+  if (applied && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  return applied;
+}
+
+function applySessionFilesOperationFailureToDestination(destination, result, context, session) {
   const error = result.error && typeof result.error === 'object' ? result.error : {};
   const issue = error.message && typeof error.message === 'object'
     ? {...error.message}
     : userMessageSnapshot(result, 'session-files request failed').user_message;
   const nextPayload = {
-    ...emptySessionFilesPayload(session, true),
+    ...emptySessionFilesPayload(session, true, destination),
     refreshing_elsewhere: false,
     errors: [issue],
     operation_error: error,
@@ -63230,11 +63319,21 @@ function applySessionFilesOperationFailure(result = {}, context = {}) {
   setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   renderSessionFilesDestination(destination, {force: true});
-  updateFileTreeGitStatusRows();
   renderPaneTabStrips();
   renderSessionButtons();
+  return true;
+}
+
+function applySessionFilesOperationFailure(result = {}, context = {}) {
+  const session = String(context.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(context, session);
+  if (!destinations.length) return false;
+  for (const destination of destinations) {
+    applySessionFilesOperationFailureToDestination(destination, result, context, session);
+  }
   statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(result, 'session-files request failed')}));
   return true;
 }
@@ -64316,10 +64415,10 @@ function bindChangesPanel(panel) {
     const refresh = event.target.closest('[data-session-files-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      const destination = refresh.closest('[data-file-explorer-changes]') ? 'finder' : 'changes';
+      const destination = fileExplorerViewForItem(panel.dataset.panelItem) === 'finder' ? 'finder' : 'differ';
       fetchSessionFiles({
         destination,
-        session: destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession(),
+        session: destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession(),
       });
       return;
     }
@@ -64857,11 +64956,17 @@ function createFileExplorerPanel(item = finderItemId) {
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
+    }
+  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+    if (clientPushCanSupplyData()) {
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    } else {
+      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
   } else if (view === 'tabber') fetchTabberActivity();
   return panel;
@@ -64963,6 +65068,10 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
+    const session = fileExplorerFinderTargetSession();
+    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
+      fetchSessionFiles({destination: 'finder', session, silent: true});
+    }
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -64972,7 +65081,7 @@ function activateFileExplorerSurface(item) {
   }
   const session = fileExplorerSessionFilesTargetSession();
   if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'finder', session, silent: true});
+    fetchSessionFiles({destination: 'differ', session, silent: true});
   }
   return true;
 }

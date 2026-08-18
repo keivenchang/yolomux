@@ -420,6 +420,7 @@ const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {sig
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerFinderSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
@@ -533,8 +534,17 @@ const tabberActivityState = {
 const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
+// Differ owns arbitrary selected refs. Finder has a separate fixed HEAD/current record below so a
+// historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+  abortController: null,
+};
+const fileExplorerFinderSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),

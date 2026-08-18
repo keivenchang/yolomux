@@ -3764,6 +3764,11 @@ body.app-vw-lte-980 .tabs {
   font-family: var(--mono-font);
   color: var(--text);
 }
+.file-tree-repo-popover-sha {
+  font-family: var(--mono-font);
+  color: var(--muted);
+  word-break: break-all;
+}
 .file-tree-repo-popover-stat {
   color: var(--muted);
 }

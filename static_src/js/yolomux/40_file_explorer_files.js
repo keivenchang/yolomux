@@ -1061,6 +1061,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     detached: repo.detached === true,
+    head_sha: repo.head_sha == null ? null : String(repo.head_sha).trim(),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -1368,7 +1369,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -1639,7 +1640,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesRepoRoots(payload = fileExplorerFinderSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -1657,7 +1658,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesAffectedDirs(payload = fileExplorerFinderSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -1758,7 +1759,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -1975,7 +1976,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -2155,6 +2156,7 @@ function repoInfoPopoverHtml(repo) {
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
   const branch = repoBranchDisplayText(repo);
   if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
+  if (repo.head_sha) rows.push(`<div class="file-tree-repo-popover-sha">${esc(t('menu.help.about.sha', {sha: repo.head_sha}))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
@@ -2201,7 +2203,7 @@ async function showRepoRowHoverPopover(row, path) {
   const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
   showFileTreeRepoPopover(row, cached);
-  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (cached && cached.head_sha !== null && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
@@ -2858,7 +2860,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+  const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -2872,7 +2874,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -2940,12 +2942,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
+  const repos = Array.isArray(fileExplorerFinderSessionFilesState.payload?.repos) ? fileExplorerFinderSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+    const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);

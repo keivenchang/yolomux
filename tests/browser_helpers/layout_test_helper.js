@@ -1180,12 +1180,23 @@ globalThis.__layoutTestApi = {
   fileExplorerFinderTargetSessionForTest: fileExplorerFinderTargetSession,
   switchFileExplorerFinderSessionForTest: switchFileExplorerFinderSession,
   sessionFilesCacheKeyForTest: sessionFilesCacheKey,
+  clientSessionFilesWatchRequestsForTest: clientSessionFilesWatchRequests,
+  setGlobalDiffRefsForTest(fromRef, toRef) {
+    diffRefFrom = String(fromRef || 'HEAD');
+    diffRefTo = String(toRef || 'current');
+  },
+  setRepoDiffRefsForTest: setRepoDiffRefs,
+  sessionFilesCacheSizesForTest() {
+    return {finder: fileExplorerFinderSessionFilesCache.size, differ: fileExplorerSessionFilesCache.size};
+  },
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   setFileExplorerFinderSelectedSessionForTest(value) { fileExplorerFinderSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fetchSessionFilesForTest: fetchSessionFiles,
   fileExplorerSessionFilesStateForTest() { return {...fileExplorerSessionFilesState}; },
+  fileExplorerFinderSessionFilesStateForTest() { return {...fileExplorerFinderSessionFilesState}; },
+  sessionFilesRequestForDestinationForTest: sessionFilesRequestForDestination,
   sessionFilesPayloadSignatureForPayloadForTest: sessionFilesPayloadSignatureForPayload,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
@@ -2941,19 +2952,25 @@ globalThis.__layoutTestApi = {
   visualPointFromAppSpace,
   fitTerminalForTest: fitTerminal,
   setSessionFilesPayloadForTest(payload) {
-    setSessionFilesPayloadForDestination('finder', payload);
+    setSessionFilesPayloadForDestination('differ', payload);
   },
   setSessionFilesPayloadForDestinationForTest(payload) {
-    setSessionFilesPayloadForDestination('finder', payload);
+    setSessionFilesPayloadForDestination('differ', payload);
   },
   setSessionFilesLoadingForTest(loading) {
     fileExplorerSessionFilesState.loading = Boolean(loading);
   },
   setFileExplorerSessionFilesPayloadForTest(payload) {
+    setSessionFilesPayloadForDestination('differ', payload);
+  },
+  setFinderSessionFilesPayloadForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
   sessionFilesPayloadForTest() {
     return fileExplorerSessionFilesState.payload;
+  },
+  finderSessionFilesPayloadForTest() {
+    return fileExplorerFinderSessionFilesState.payload;
   },
   applyLayoutUrlStateSeedForTest: applyLayoutUrlStateSeed,
   applyEditorStateFieldsForTest: applyEditorStateFields,
@@ -2966,9 +2983,16 @@ globalThis.__layoutTestApi = {
       signature: sessionFilesPayloadSignatureForPayload(payload),
     });
   },
+  setFinderSessionFilesCachePayloadForTest(session, payload) {
+    fileExplorerFinderSessionFilesCache.set(sessionFilesCacheKey(session, 'finder'), {
+      payload: {...payload, session},
+      signature: sessionFilesPayloadSignatureForPayload(payload),
+    });
+  },
   applySessionFilesPayloadFromPushForTest: applySessionFilesPayloadFromPush,
   sessionFilesPanelIsLoadingForTest: sessionFilesPanelIsLoading,
   sessionFilesPushRequestMatchesCurrentForTest: sessionFilesPushRequestMatchesCurrent,
+  sessionFilesRequestMatchesDestinationForTest: sessionFilesRequestMatchesDestination,
   changedFileOwnerSessionForPathForTest: changedFileOwnerSessionForPath,
   fileTreeChangedAncestorStatsForTest(payload) {
     return Array.from(fileTreeChangedAncestorStats(payload).entries()).map(([path, stats]) => [path, {...stats}]);

@@ -35,6 +35,38 @@ const {
 const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
+  test('Finder working-tree request stays HEAD/current when Differ selects historical refs', () => {
+    const requestApi = loadYolomux('', ['1']);
+    const slots = requestApi.emptyLayoutSlots();
+    slots[requestApi.layoutTreeKey] = requestApi.leafNode('left');
+    slots.left = requestApi.paneStateWithTabs([requestApi.finderItemId, requestApi.differItemId], requestApi.differItemId);
+    requestApi.setLayoutSlotsForTest(slots);
+    requestApi.setFinderSessionFilesPayloadForTest({
+      session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], repos: [{repo: '/repo/app', added: 2, removed: 1}],
+      files: [{repo: '/repo/app', abs_path: '/repo/app/a.py', status: 'M', added: 2, removed: 1}],
+    });
+    requestApi.setSessionFilesPayloadForTest({
+      session: '1', loaded: true, from_ref: 'v0.7.4', to_ref: 'current', errors: [], repos: [{repo: '/repo/app', added: 200, removed: 100}],
+      files: [{repo: '/repo/app', abs_path: '/repo/app/a.py', status: 'A', added: 200, removed: 100}],
+    });
+    requestApi.setGlobalDiffRefsForTest('v0.7.4', 'current');
+    const requests = requestApi.clientSessionFilesWatchRequestsForTest();
+    assert.equal(requests.length, 2, 'Finder and Differ publish independent session-files requests when their comparisons differ');
+    assert.ok(requests.some(request => request.from_ref === 'HEAD' && request.to_ref === 'current'), 'Finder always requests uncommitted working-tree changes');
+    assert.ok(requests.some(request => request.from_ref === 'v0.7.4' && request.to_ref === 'current'), 'Differ retains its selected historical comparison');
+    const finderStats = new Map(requestApi.fileTreeChangedAncestorStatsForTest());
+    assert.deepEqual(finderStats.get('/repo/app'), {count: 1, agents: [], mtime: 0, added: 2, removed: 1}, 'Finder annotations use only the fixed working-tree payload');
+    assert.equal(requestApi.finderSessionFilesPayloadForTest().from_ref, 'HEAD', 'historical Differ state does not overwrite Finder refs');
+
+    const cacheApi = loadYolomux('', ['1']);
+    cacheApi.setFinderSessionFilesCachePayloadForTest('1', {loaded: true, from_ref: 'HEAD', to_ref: 'current', repos: [{repo: '/repo/app'}], files: []});
+    cacheApi.setSessionFilesCachePayloadForTest('1', {loaded: true, from_ref: 'HEAD', to_ref: 'current', repos: [{repo: '/repo/app'}], files: []});
+    assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 1});
+    cacheApi.setRepoDiffRefsForTest('/repo/app', 'v0.7.4', 'current');
+    assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 0}, 'changing Differ refs invalidates only the Differ cache');
+    assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
+  });
+
   test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8')
       + fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')
@@ -687,7 +719,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
     assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
-    assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
+    assert.ok(/async function deleteFileTreePath[\s\S]*refreshVisibleSessionFilesSurfaces\(\{silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes both Finder working-tree and Differ comparison records');
     assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
     const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
     const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
@@ -1707,13 +1739,13 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling still avoids the explicit-input helper that commits Finder targets');
     assert.ok(/function terminalDataShouldAcknowledgeAttention\(data\)[\s\S]*terminalDataWithoutPassiveReports\(data\)\.length > 0/.test(appSource), 'terminal byte handling filters passive xterm reports before acknowledging attention');
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*acknowledgeTerminalAttentionFromTransportInput\(session, filtered, options\)/.test(appSource), 'terminal byte handling acknowledges red/yellow attention from real typed xterm input');
-    assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a cached Finder session switch preserves last-known-good rows and lets the server coalesce stale refreshes');
-    assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
-    assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
-    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before a coalesced refresh');
+    assert.ok(/fetchSessionFiles\(\{destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a cached Differ session switch preserves last-known-good rows and lets the server coalesce stale refreshes');
+    assert.ok(/function sessionFilesCacheKey\(session, destination = 'differ'\)[\s\S]*sessionFilesRequestQueryString\(destination\)/.test(appSource), 'each session-files cache is keyed by session plus its destination comparison');
+    assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session, 'differ'\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
+    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('differ', cached\.payload\)/.test(appSource), 'Differ session switches apply cached target payloads immediately before a coalesced refresh');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
-    assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
-    assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
+    assert.ok(/sessionFilesCacheForDestination\(destination\)\.set\(sessionFilesCacheKey\(session, destination\), \{payload: nextPayload, signature\}\)/.test(appSource), 'each destination stores payloads under the same comparison-aware key it reads');
+    assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesDestinationsForRequest\(request, session\)/.test(appSource), 'SSE session-files payloads route only to Finder or Differ records whose current request matches');
     const stalePushApi = loadYolomux('', ['1']);
     stalePushApi.setFileExplorerModeForTest('diff');
     stalePushApi.setFileExplorerChangesSelectedSessionForTest('1');
@@ -1725,17 +1757,20 @@ async function runCrossSurfaceStateSuite() {
       repos: [{repo: '/home/test/vllm-0.22.0', count: 8, added: 270, removed: 8}],
       errors: [],
     });
-    assert.equal(stalePushApi.sessionFilesPushRequestMatchesCurrentForTest({
+    const worktreeRequest = {
       session: '1',
       hours: 24,
       from_ref: 'HEAD',
       to_ref: 'current',
-    }, '1'), false, 'a stale HEAD/current session-files push does not match active per-repo refs');
+    };
+    assert.equal(stalePushApi.sessionFilesRequestMatchesDestinationForTest(worktreeRequest, '1', 'differ'), false, 'a HEAD/current session-files push does not match active per-repo Differ refs');
+    assert.equal(stalePushApi.sessionFilesRequestMatchesDestinationForTest(worktreeRequest, '1', 'finder'), true, 'the same HEAD/current push remains current for Finder');
     assert.equal(stalePushApi.applySessionFilesPayloadFromPushForTest(
       {session: '1', loaded: true, files: [], repos: [{repo: '/home/test/vllm-0.22.0', count: 0, added: 0, removed: 0}]},
-      {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
-    ), false, 'stale session-files push is ignored before it can replace the active Differ payload');
-    assert.equal(stalePushApi.sessionFilesPayloadForTest().repos[0].added, 270, 'ignored stale push leaves the visible Differ payload intact');
+      worktreeRequest,
+    ), true, 'the worktree push updates Finder even while Differ uses historical refs');
+    assert.equal(stalePushApi.sessionFilesPayloadForTest().repos[0].added, 270, 'Finder worktree push leaves the visible historical Differ payload intact');
+    assert.equal(stalePushApi.finderSessionFilesPayloadForTest().repos[0].added, 0, 'Finder receives the matching worktree payload');
     const rootlessDifferApi = loadYolomux('', ['8002']);
     const yolomuxRepo = '/home/keivenc/yolomux.dev8002';
     rootlessDifferApi.setFileExplorerModeForTest('diff');
@@ -1750,13 +1785,13 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, files: [], repos: [], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
-    ), false, 'rootless empty session-files push cannot blank a loaded same-session Differ repo');
-    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'ignored rootless push leaves the yolomux.dev8002 Differ repo visible');
+    ), true, 'rootless worktree push can update Finder without blanking a loaded same-session Differ repo');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'rootless Finder push leaves the yolomux.dev8002 Differ repo visible');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
-    ), false, 'follower refresh placeholders cannot replace a loaded same-session Differ repo');
-    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'ignored follower refresh placeholder leaves the visible Differ payload intact');
+    ), true, 'follower worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder follower placeholder leaves the visible Differ payload intact');
     assert.equal(rootlessDifferApi.sessionFilesPanelIsLoadingForTest(
       {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
     ), true, 'a rooted follower placeholder renders as loading instead of a completed zero-diff result');
@@ -1789,13 +1824,15 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores follower refresh placeholders after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(payload\)[\s\S]*return false/.test(appSource), 'a rooted follower-refresh placeholder remains loading until real files, warnings, or errors arrive');
-    assert.ok(/function applySessionFilesPayloadFromPush\(payload = \{\}, request = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear a stale foreground loading flag before rerendering');
-    assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
+    assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
+    assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');
-    assert.ok(/function sessionFilesRequestQueryString\(\)\s*\{\s*return `\$\{diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}`;\s*\}/.test(appSource), 'the independent Differ request owner always follows its selected global and per-repo refs');
+    assert.ok(/function sessionFilesRequestQueryString\(destination = 'differ'\)[\s\S]*destination === 'finder'[\s\S]*'from=HEAD&to=current'[\s\S]*diffRefQueryString\(\)/.test(appSource), 'Finder is pinned to HEAD/current while Differ follows selected global and per-repo refs');
+    assert.ok(/function sessionFilesRepoRoots\(payload = fileExplorerFinderSessionFilesState\.payload\)/.test(appSource), 'Finder Sync root planning defaults to the working-tree record rather than the active Differ comparison');
+    assert.ok(/const destination = fileExplorerViewForItem\(panel\.dataset\.panelItem\) === 'finder' \? 'finder' : 'differ';[\s\S]*destination === 'finder' \? fileExplorerFinderTargetSession\(\) : fileExplorerSessionFilesTargetSession\(\)/.test(appSource), 'the shared Reload handler targets the mounted Finder or Differ record instead of treating both panels as Finder');
     assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(appSource), 'the legacy mode entry point now activates the matching independent surface instead of maintaining a second renderer mode');
-    assert.ok(/\[data-file-explorer-refresh\][\s\S]*refreshFileExplorerTrees\(\{fresh: true\}\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload bypasses the directory cache and refreshes the modified-file overlay');
+    assert.ok(/\[data-file-explorer-refresh\][\s\S]*refreshFileExplorerTrees\(\{fresh: true\}\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerFinderTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload bypasses the directory cache and refreshes its working-tree overlay');
     assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
     assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
     assert.equal(filesTab.includes('agent-icon file'), false);
@@ -4866,7 +4903,7 @@ async function runCrossSurfaceStateSuite() {
       project: {git: {cwd: '/home/test/yolomux.dev/static_src/js', root: '/home/test/yolomux.dev'}},
       selected_pane: {current_path: '/home/test/yolomux.dev/static_src/js'},
     });
-    api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});
+    api.setFinderSessionFilesPayloadForTest({session: '1', repos: [], files: []});
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
@@ -4894,7 +4931,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.commonAncestorPath(['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b/src']), '/home/test/dynamo');
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo/repo-a/src'}});
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '1',
       repos: [{repo: '/home/test/dynamo/repo-a'}, {repo: '/home/test/dynamo/repo-b'}],
       files: [
@@ -4934,7 +4971,7 @@ async function runCrossSurfaceStateSuite() {
     api.setFileExplorerRootMode('fixed', {sync: false});
     assert.equal(api.fileExplorerSessionHighlightClassForPath('/home/test/dynamo/repo-a', 'dir'), '');
     api.setFileExplorerRootMode('sync', {sync: false});
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '2',
       repos: [{repo: '/home/test/dynamo/repo-a'}],
       files: [{repo: '/home/test/dynamo/repo-a', path: 'src/a.js', abs_path: '/home/test/dynamo/repo-a/src/a.js'}],
@@ -4945,7 +4982,7 @@ async function runCrossSurfaceStateSuite() {
       '/home/test/dynamo/repo-a/src',
     ], 'changing selected sessions removes the previous star set and derives the new session set');
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo1/src'}});
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '1',
       repos: [{repo: '/home/test/dynamo1'}, {repo: '/tmp/x'}],
       files: [
@@ -4960,7 +4997,7 @@ async function runCrossSurfaceStateSuite() {
       expandPaths: ['/home/test/dynamo1', '/home/test/dynamo1/src'],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/ai-config/claude/skills'}});
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '1',
       repos: [{repo: '/home/test/ai-config'}],
       files: [
@@ -4986,7 +5023,7 @@ async function runCrossSurfaceStateSuite() {
         '/home/test/ai-config/claude/skills/a',
       ],
     });
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '1',
       repos: [],
       files: [
@@ -5007,14 +5044,14 @@ async function runCrossSurfaceStateSuite() {
       ],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: ''}});
-    api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});
+    api.setFinderSessionFilesPayloadForTest({session: '1', repos: [], files: []});
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
       affectedDirs: [],
       expandPaths: [],
     });
-    api.setSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       session: '3',
       repos: [{repo: '/home/test/stale'}],
       files: [{repo: '/home/test/stale', path: 'old.js', abs_path: '/home/test/stale/old.js'}],
@@ -5119,7 +5156,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(refreshTree.scrollTop, 44);
     assert.equal(srcChildren.scrollTop, 12);
 
-    api.setFileExplorerSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       loaded: true,
       repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 5, removed: 3}],
       files: [
@@ -5155,7 +5192,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(modifiedStatus.textContent, 'M');
     assert.equal(modifiedStatus.getAttribute('title'), 'M: modified', 'Finder M status badge explains itself on hover');
     assert.equal(modifiedStatus.getAttribute('aria-label'), 'M: modified', 'Finder M status badge is labeled for assistive tech');
-    api.setFileExplorerSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       loaded: true,
       repos: [],
       files: [{abs_path: '/repo/screenshot.png', agent: 'codex', status: '?'}],
@@ -5169,7 +5206,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(unknownStatus.getAttribute('title'), '?: untracked', 'Finder ? status badge explains itself on hover');
 
     const hiddenFile = {abs_path: '/repo/.github/workflows/ci.yml', repo: '/repo', path: '.github/workflows/ci.yml', status: 'M', added: 41, removed: 0};
-    api.setFileExplorerSessionFilesPayloadForTest({loaded: true, repos: [], files: [hiddenFile]});
+    api.setFinderSessionFilesPayloadForTest({loaded: true, repos: [], files: [hiddenFile]});
+    api.setSessionFilesPayloadForTest({loaded: true, repos: [], files: [hiddenFile]});
     const hiddenFinderTree = new TestElement('hidden-finder-tree');
     hiddenFinderTree.setAttribute('role', 'tree');
     api.renderTreeChildrenForTest(hiddenFinderTree, '/repo', [{name: '.github', kind: 'dir'}]);
@@ -5191,7 +5229,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(hiddenDifferHtml.includes('data-open-change-file="/repo/.github/workflows/ci.yml"'), 'rendered Differ panel opens changed files under hidden directories');
     assert.ok(/data-open-change-file="\/repo\/\.github\/workflows\/ci\.yml"[\s\S]*changes-diff-add">\+41</.test(hiddenDifferHtml), 'Differ shows the hidden file numstat');
 
-    api.setFileExplorerSessionFilesPayloadForTest({
+    api.setFinderSessionFilesPayloadForTest({
       loaded: true,
       repos: [],
       files: [

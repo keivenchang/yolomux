@@ -329,6 +329,7 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
         return result
 
     branch, detached = git_branch_state(repo, runner=lambda args: run(args, 1.0))
+    head = run(["rev-parse", "HEAD"], 1.0)
     upstream = run(["rev-parse", "--abbrev-ref", "@{upstream}"], 1.0)
     ahead = 0
     behind = 0
@@ -352,6 +353,7 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
         "name": repo.name,
         "branch": branch,
         "detached": detached,
+        "head_sha": head.stdout.strip() if head.returncode == 0 else "",
         "dirty_count": dirty_count,
         "upstream": upstream.stdout.strip() if upstream.returncode == 0 else "",
         "ahead": ahead,
