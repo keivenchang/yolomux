@@ -764,9 +764,9 @@ def test_finder_keyboard_selection_drag_payload_and_readonly_context_are_real_pa
     assert [button["text"] for button in readonly["buttons"][:3]] == [
         "Edit in new tab",
         "Preview in new tab",
-        "Diff in new tab",
+        "ΔShow Diff",
     ], readonly
-    assert all(disabled[label] is True for label in ("Edit in new tab", "Preview in new tab", "Diff in new tab")), readonly
+    assert all(disabled[label] is True for label in ("Edit in new tab", "Preview in new tab", "ΔShow Diff")), readonly
     assert disabled["Rename"] is True and disabled["Delete"] is True and disabled["Download"] is True, readonly
     assert readonly["errors"] == [] and readonly["rejections"] == [], readonly
 
@@ -967,6 +967,7 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
             content: fileStateFor(path)?.content,
             dirty: fileStateFor(path)?.dirty === true,
             mode: editorViewModeFor(path, item),
+            tabLabel: document.querySelector('[data-pane-tab="' + CSS.escape(item) + '"] .session-button-dir')?.textContent || '',
           };
 
           Object.assign(fileStateFor(path), {
@@ -978,7 +979,7 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
             diffPinnedFromRef: 'old-from',
             diffPinnedToRef: 'old-to',
           });
-          await choose('Diff in new tab');
+          await choose('ΔShow Diff');
           await waitFor(() => editorViewModeFor(path, item) === 'diff' && fileStateFor(path)?.diffLoaded === true);
           const finalState = fileStateFor(path);
           done({
@@ -992,6 +993,7 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
             mode: editorViewModeFor(path, item),
             diffFrom: finalState?.diffFromRef,
             diffTo: finalState?.diffToRef,
+            tabLabel: document.querySelector('[data-pane-tab="' + CSS.escape(item) + '"] .session-button-dir')?.textContent || '',
             diffRequests: requests.filter(request => request.startsWith('/api/fs/diff')),
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
@@ -1003,18 +1005,20 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
         path,
     )
     assert not metrics.get("error"), metrics
-    assert metrics["initialOrder"] == ["Edit in new tab", "Preview in new tab", "Diff in new tab"], metrics
+    assert metrics["initialOrder"] == ["Edit in new tab", "Preview in new tab", "ΔShow Diff"], metrics
     assert metrics["expectedItem"] == f"file:{path}", metrics
     assert metrics["afterPreview"] == {
         "item": f"file:{path}",
         "content": "# dirty and unsaved\n",
         "dirty": True,
         "mode": "preview",
+        "tabLabel": "note.md",
     }, metrics
     assert metrics["openItems"] == [f"file:{path}"], metrics
     assert metrics["panelItems"] == [f"file:{path}"], metrics
     assert metrics["content"] == "# dirty and unsaved\n" and metrics["dirty"] is True, metrics
     assert metrics["mode"] == "diff" and metrics["diffFrom"] == "HEAD" and metrics["diffTo"] == "current", metrics
+    assert metrics["tabLabel"] == "Δnote.md;test", metrics
     assert metrics["diffRequests"] == [f"/api/fs/diff?path=%2Fhome%2Ftest%2Fnote.md&from=HEAD&to=current"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -1141,15 +1145,15 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
         """
     )
     assert not metrics.get("error"), metrics
-    assert metrics["eligible"][0] == "Diff repo", metrics
-    assert all(label not in metrics["eligible"] for label in ["Edit in new tab", "Preview in new tab", "Diff in new tab"]), metrics
-    assert "Diff repo" not in metrics["plain"], metrics
-    assert "Diff repo" not in metrics["multiple"], metrics
-    binary_diff = next(button for button in metrics["binary"] if button["label"] == "Diff in new tab")
-    large_diff = next(button for button in metrics["large"] if button["label"] == "Diff in new tab")
+    assert metrics["eligible"][0] == "ΔShow Diff", metrics
+    assert all(label not in metrics["eligible"] for label in ["Edit in new tab", "Preview in new tab"]), metrics
+    assert "ΔShow Diff" not in metrics["plain"], metrics
+    assert "ΔShow Diff" not in metrics["multiple"], metrics
+    binary_diff = next(button for button in metrics["binary"] if button["label"] == "ΔShow Diff")
+    large_diff = next(button for button in metrics["large"] if button["label"] == "ΔShow Diff")
     assert binary_diff["disabled"] is True and "binary" in binary_diff["title"].lower(), metrics
     assert large_diff["disabled"] is True and "large" in large_diff["title"].lower(), metrics
-    assert metrics["touch"][0] == "Diff repo", metrics
+    assert metrics["touch"][0] == "ΔShow Diff", metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -1220,6 +1224,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               repo,
               relative_path: path === repo ? '' : 'src',
               head: shaA,
+              hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
               snapshot_cursor: 'snapshot-zero',
               next_cursor: '',
               truncated: false,
@@ -1241,6 +1246,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               repo,
               relative_path: path === repo ? '' : 'src',
               head: shaA,
+              hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
               snapshot_cursor: 'snapshot-zero',
               next_cursor: 'page-2',
               truncated: false,
@@ -1249,7 +1255,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
                   sha: shaA,
                   short: shaA.slice(0, 9),
                   parents: [parentA, secondParent],
-                  subject: 'Merge exact history',
+                  subject: 'Merge exact history #123',
                   author: 'Keiven Chang',
                   authored_at: 1786931640,
                   files: 3,
@@ -1349,7 +1355,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + repo + '"]').click();
           await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + nested + '"]'));
 
-          await chooseFinderAction(repo, 'Diff repo');
+          await chooseFinderAction(repo, 'ΔShow Diff');
           const rootItem = gitDiffItemFor(repo);
           const rootPanel = await waitFor(() => {
             const panel = panelNodes.get(rootItem);
@@ -1358,6 +1364,20 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
           const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
           const fieldOrder = Array.from(rootRows[0].children).map(node => node.className.split(' ')[0]);
+          const shaLink = rootRows[0].querySelector('.git-diff-commit-sha');
+          const changeLink = rootRows[0].querySelector('.git-diff-change-link');
+          changeLink.addEventListener('click', event => event.preventDefault(), {once: true});
+          changeLink.click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const hostedLinks = {
+            sha: shaLink?.href || '',
+            change: changeLink?.href || '',
+            expandedAfterLink: rootRows[0].getAttribute('aria-expanded'),
+          };
+          const summaryColors = {
+            added: getComputedStyle(rootRows[0].querySelector('.git-diff-commit-added')).color,
+            removed: getComputedStyle(rootRows[0].querySelector('.git-diff-commit-removed')).color,
+          };
           rootPanel.style.width = '1200px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const alignedColumnVisibility = fieldVisibility(rootPanel);
@@ -1464,6 +1484,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             dirtyChrome: historicalTab?.querySelector('.file-tab-dirty') != null,
             missingChrome: historicalTab?.classList.contains('file-missing') === true,
             missingAria: historicalTab?.getAttribute('aria-label')?.includes('Missing') === true,
+            tabLabel: historicalTab?.querySelector('.session-button-dir')?.textContent || '',
           };
           previewButton.click();
           await waitFor(() => editorViewModeFor(historicalPath, historicalItem) === 'preview');
@@ -1473,6 +1494,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             content: fileEditorStateForItem(historicalPath, historicalItem)?.content,
             dirty: fileEditorStateForItem(historicalPath, historicalItem)?.dirty === true,
             previewSelected: previewButton.getAttribute('aria-pressed') === 'true',
+            tabLabel: document.querySelector('[data-pane-tab="' + CSS.escape(historicalItem) + '"] .session-button-dir')?.textContent || '',
           };
 
           await editorNavBack();
@@ -1515,6 +1537,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           applyGlobalThemeMode({updateEditor: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
           const lightPaint = getComputedStyle(rootPanel).backgroundColor;
+          const lightSeparator = getComputedStyle(rootRows[0].closest('.git-diff-commit')).boxShadow;
+          const lightSecondaryText = getComputedStyle(rootRows[0].querySelector('.git-diff-commit-date')).color;
           const lightClass = document.body.classList.contains('theme-light');
           globalThemeMode = 'dark';
           applyGlobalThemeMode({updateEditor: true});
@@ -1550,13 +1574,17 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           ));
           if (finderRepoRow.getAttribute('aria-expanded') !== 'true') finderRepoRow.click();
           await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + nested + '"]'));
-          await chooseFinderAction(nested, 'Diff repo');
+          await chooseFinderAction(nested, 'ΔShow Diff');
           const nestedItem = gitDiffItemFor(nested);
           await waitFor(() => {
             const panel = panelNodes.get(nestedItem);
             return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2;
           });
-          await chooseFinderAction(nested, 'Diff repo');
+          const tabLabels = {
+            root: document.querySelector('[data-pane-tab="' + CSS.escape(rootItem) + '"] .session-button-dir')?.textContent || '',
+            nested: document.querySelector('[data-pane-tab="' + CSS.escape(nestedItem) + '"] .session-button-dir')?.textContent || '',
+          };
+          await chooseFinderAction(nested, 'ΔShow Diff');
           await waitFor(() => activeItemForSide(slotForItem(nestedItem)) === nestedItem);
           const tabs = paneTabs(slotForItem(nestedItem));
           done({
@@ -1565,6 +1593,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             commitOrder,
             loadedOrder,
             fieldOrder,
+            hostedLinks,
+            summaryColors,
             alignedColumnVisibility,
             columnStarts,
             rowDensity,
@@ -1588,9 +1618,12 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             narrowRetention,
             darkPaint,
             lightPaint,
+            lightSeparator,
+            lightSecondaryText,
             lightClass,
             french,
             tabs,
+            tabLabels,
             historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')),
             detailRequests: requests.filter(request => request.startsWith('/api/fs/git-commit')),
             diffRequests: requests.filter(request => request.startsWith('/api/fs/diff')),
@@ -1629,6 +1662,12 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "git-diff-commit-author",
         "git-diff-commit-description",
     ], metrics
+    assert metrics["hostedLinks"] == {
+        "sha": f"https://github.com/example/project/commit/{sha_a}",
+        "change": "https://github.com/example/project/pull/123",
+        "expandedAfterLink": "false",
+    }, metrics
+    assert metrics["summaryColors"]["added"] != metrics["summaryColors"]["removed"], metrics
     assert all(metrics["alignedColumnVisibility"].values()), metrics["alignedColumnVisibility"]
     assert all(
         max(starts) - min(starts) <= 0.5 for starts in metrics["columnStarts"].values()
@@ -1661,12 +1700,14 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "dirtyChrome": False,
         "missingChrome": False,
         "missingAria": False,
+        "tabLabel": "Δnew.js;repo/src",
     }, metrics
     assert metrics["historicalAfterPreview"] == {
         "mode": "preview",
         "content": "export const value = 2;\n",
         "dirty": False,
         "previewSelected": True,
+        "tabLabel": "Δnew.js;repo/src",
     }, metrics
     assert metrics["historicalAfterClose"] == {
         "renamePromptCalls": 0,
@@ -1686,8 +1727,11 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["mediumRetention"] == {"sha": True, "date": False, "changes": True, "author": False, "description": True}, metrics
     assert metrics["narrowRetention"] == {"sha": True, "date": False, "changes": False, "author": False, "description": True}, metrics
     assert metrics["darkPaint"] != metrics["lightPaint"] and metrics["lightClass"] is True, metrics
-    assert metrics["french"]["heading"] == "Comparer le dépôt" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
+    assert metrics["lightSeparator"] != metrics["lightPaint"], metrics
+    assert metrics["lightSecondaryText"] != metrics["lightPaint"], metrics
+    assert metrics["french"]["heading"] == "ΔAfficher les différences" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
+    assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
     assert metrics["historyRequests"] == [
         f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=50",
         f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=50&cursor=page-2",

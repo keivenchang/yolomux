@@ -81,10 +81,11 @@ async function runLayoutAsyncSuite() {
   test('Git history commit rows keep the approved field order and responsive retention contract', () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
+    api.setGitDiffTabStateForTest(item, {hostedRemote: {provider: 'github', base_url: 'https://github.com/owner/project'}});
     const row = api.gitDiffCommitRowForTest(item, {
       sha: 'a'.repeat(40), short: 'a'.repeat(9), authored_at: 1786931640,
       files: 3, added: 42, removed: 11, binary_files: 0,
-      author: 'Keiven Chang', subject: 'Record release evidence', parents: ['b'.repeat(40)],
+      author: 'Keiven Chang', subject: 'Record release evidence #123', parents: ['b'.repeat(40)],
     });
     assert.deepStrictEqual([...row.children].map(child => child.className), [
       'git-diff-commit-caret ui-disclosure-triangle',
@@ -94,10 +95,24 @@ async function runLayoutAsyncSuite() {
       'git-diff-commit-author',
       'git-diff-commit-description',
     ]);
+    assert.equal(row.localName, 'div', 'commit links are never nested inside a button');
     assert.equal(row.getAttribute('aria-expanded'), 'false');
     assert.equal(row.children[1].textContent, 'aaaaaaaaa', 'SHA is always rendered');
-    assert.ok(row.children[3].textContent.includes('3') && row.children[3].textContent.includes('+42') && row.children[3].textContent.includes('-11'));
+    assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
+    assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
+    assert.deepStrictEqual([
+      row.querySelector('.git-diff-commit-added').textContent,
+      row.querySelector('.git-diff-commit-removed').textContent,
+    ], ['+42', '-11']);
     assert.ok(row.getAttribute('aria-label').includes('Keiven Chang') && row.getAttribute('aria-label').includes('+42') && row.getAttribute('aria-label').includes('Record release evidence'), 'the accessible name retains every visible summary field');
+    const gitlabItem = api.gitDiffItemFor('/gitlab');
+    api.setGitDiffTabStateForTest(gitlabItem, {hostedRemote: {provider: 'gitlab', base_url: 'https://gitlab.example.com/group/project'}});
+    const gitlabRow = api.gitDiffCommitRowForTest(gitlabItem, {sha: 'b'.repeat(40), short: 'b'.repeat(9), subject: 'Merge #9'});
+    assert.equal(gitlabRow.querySelector('.git-diff-commit-sha').href, `https://gitlab.example.com/group/project/-/commit/${'b'.repeat(40)}`);
+    assert.equal(gitlabRow.querySelector('.git-diff-change-link').href, 'https://gitlab.example.com/group/project/-/merge_requests/9');
+    const plainRow = api.gitDiffCommitRowForTest(api.gitDiffItemFor('/plain'), {sha: 'c'.repeat(40), short: 'c'.repeat(9), subject: 'Plain #7'});
+    assert.equal(plainRow.querySelector('.git-diff-commit-sha').localName, 'span');
+    assert.equal(plainRow.querySelector('.git-diff-change-link').localName, 'span');
     const css = fs.readFileSync('static_src/css/yolomux/35_git_diff_viewer.css', 'utf8');
     const authorDrop = css.indexOf('.git-diff-commit-author');
     const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
@@ -114,6 +129,10 @@ async function runLayoutAsyncSuite() {
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*24px;[\s\S]*padding:\s*var\(--space-2\) var\(--space-6\)/,
       'commit summaries keep the approved compact row height and padding');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
+    assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-staged\)/);
+    assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-deleted\)/);
+    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
+    assert.match(css, /\.git-diff-commit\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
     assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
   });
 
@@ -337,7 +356,7 @@ async function runLayoutAsyncSuite() {
     panel.querySelector('.git-diff-heading').textContent = 'stale heading';
     panel.querySelector('.git-diff-commit-date').textContent = 'stale date';
     api.relocalizeGitDiffPanelForTest(item, panel);
-    assert.equal(panel.querySelector('.git-diff-heading').textContent, frCatalog['contextmenu.diffRepo']);
+    assert.equal(panel.querySelector('.git-diff-heading').textContent, frCatalog['contextmenu.showDiff']);
     assert.notEqual(panel.querySelector('.git-diff-commit-date').textContent, enDate, 'visible date/time uses the active locale');
     assert.equal(panel.querySelector('.git-diff-commit-date').title.length > 0, true, 'localized date retains an absolute-time tooltip');
     assert.equal(state.details, detailsIdentity);

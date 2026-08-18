@@ -238,6 +238,7 @@
   "contextmenu.openUrl": "فتح الرابط في علامة تبويب جديدة",
   "contextmenu.previewNewTab": "معاينة في علامة تبويب جديدة",
   "contextmenu.readOnlyUnavailable": "محتوى نظام الملفات غير متاح في وضع القراءة فقط",
+  "contextmenu.showDiff": "Δعرض الفرق",
   "contextmenu.zipDownload": "الرمز البريدي والتنزيل",
   "debug.apiCalls": "مكالمات API",
   "debug.cleared": "تم مسح أحداث التصحيح",

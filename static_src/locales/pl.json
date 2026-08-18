@@ -2619,6 +2619,7 @@
   "gitDiff.staleSnapshot": "Migawka historii Git jest nieaktualna.",
   "contextmenu.diffNewTab": "Porównaj w nowej karcie",
   "contextmenu.diffRepo": "Porównaj repozytorium",
+  "contextmenu.showDiff": "ΔPokaż różnice",
   "contextmenu.editNewTab": "Edytuj w nowej karcie",
   "contextmenu.gitVerificationUnavailable": "Weryfikacja repozytorium Git jest niedostępna",
   "contextmenu.previewNewTab": "Podgląd w nowej karcie",

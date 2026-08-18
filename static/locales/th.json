@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "เปิด URL ในแท็บใหม่",
   "contextmenu.previewNewTab": "แสดงตัวอย่างในแท็บใหม่",
   "contextmenu.readOnlyUnavailable": "เนื้อหาระบบไฟล์ไม่พร้อมใช้งานในโหมดอ่านอย่างเดียว",
+  "contextmenu.showDiff": "Δแสดงส่วนต่าง",
   "contextmenu.zipDownload": "ซิปและดาวน์โหลด",
   "debug.apiCalls": "API การโทร",
   "debug.cleared": "ล้างเหตุการณ์การแก้ไขข้อบกพร่อง",

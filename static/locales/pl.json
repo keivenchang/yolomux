@@ -226,6 +226,7 @@
   "contextmenu.openUrl": "Otwórz URL w nowej karcie",
   "contextmenu.previewNewTab": "Podgląd w nowej karcie",
   "contextmenu.readOnlyUnavailable": "Zawartość systemu plików jest niedostępna w trybie tylko do odczytu",
+  "contextmenu.showDiff": "ΔPokaż różnice",
   "contextmenu.zipDownload": "Zip & pobierz",
   "debug.apiCalls": "API dzwoni",
   "debug.cleared": "wyczyszczenie zdarzeń debugowania",

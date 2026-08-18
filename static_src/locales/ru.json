@@ -2619,6 +2619,7 @@
   "gitDiff.staleSnapshot": "Снимок истории Git устарел.",
   "contextmenu.diffNewTab": "Сравнить в новой вкладке",
   "contextmenu.diffRepo": "Сравнить репозиторий",
+  "contextmenu.showDiff": "ΔПоказать различия",
   "contextmenu.editNewTab": "Редактировать в новой вкладке",
   "contextmenu.gitVerificationUnavailable": "Проверка репозитория Git недоступна",
   "contextmenu.previewNewTab": "Предпросмотр в новой вкладке",

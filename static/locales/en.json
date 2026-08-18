@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "Open URL in a new tab",
   "contextmenu.previewNewTab": "Preview in new tab",
   "contextmenu.readOnlyUnavailable": "Filesystem content is unavailable in read-only mode",
+  "contextmenu.showDiff": "ΔShow Diff",
   "contextmenu.zipDownload": "Zip & download",
   "debug.apiCalls": "API calls",
   "debug.cleared": "debug events cleared",

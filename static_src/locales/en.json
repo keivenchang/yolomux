@@ -214,6 +214,7 @@
   "contextmenu.disallowIndex": "Exclude from index",
   "contextmenu.diffNewTab": "Diff in new tab",
   "contextmenu.diffRepo": "Diff repo",
+  "contextmenu.showDiff": "ΔShow Diff",
   "contextmenu.editNewTab": "Edit in new tab",
   "contextmenu.expandInFinder": "Expand {name} in {finder}",
   "contextmenu.gitVerificationUnavailable": "Git repository verification is unavailable",

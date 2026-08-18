@@ -220,6 +220,7 @@
   "contextmenu.openUrl": "Ouvrir l'URL dans un nouvel onglet",
   "contextmenu.previewNewTab": "Aperçu dans un nouvel onglet",
   "contextmenu.readOnlyUnavailable": "Le contenu du système de fichiers n’est pas disponible en mode lecture seule",
+  "contextmenu.showDiff": "ΔAfficher les différences",
   "contextmenu.zipDownload": "Zipper et télécharger",
   "debug.apiCalls": "Appels API",
   "debug.cleared": "événements de débogage effacés",

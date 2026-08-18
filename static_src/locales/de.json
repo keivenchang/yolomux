@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Der Git-Verlaufssnapshot ist veraltet.",
   "contextmenu.diffNewTab": "In neuem Tab vergleichen",
   "contextmenu.diffRepo": "Repository vergleichen",
+  "contextmenu.showDiff": "ΔDiff anzeigen",
   "contextmenu.editNewTab": "In neuem Tab bearbeiten",
   "contextmenu.gitVerificationUnavailable": "Die Git-Repository-Prüfung ist nicht verfügbar",
   "contextmenu.previewNewTab": "Vorschau in neuem Tab",

@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git geçmişi anlık görüntüsü eskimiş.",
   "contextmenu.diffNewTab": "Yeni sekmede karşılaştır",
   "contextmenu.diffRepo": "Depoyu karşılaştır",
+  "contextmenu.showDiff": "ΔFarkı göster",
   "contextmenu.editNewTab": "Yeni sekmede düzenle",
   "contextmenu.gitVerificationUnavailable": "Git deposu doğrulaması kullanılamıyor",
   "contextmenu.previewNewTab": "Yeni sekmede önizle",

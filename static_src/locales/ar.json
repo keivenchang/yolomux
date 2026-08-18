@@ -2711,6 +2711,7 @@
   "gitDiff.staleSnapshot": "لقطة سجل Git قديمة.",
   "contextmenu.diffNewTab": "عرض الفرق في علامة تبويب جديدة",
   "contextmenu.diffRepo": "مقارنة المستودع",
+  "contextmenu.showDiff": "Δعرض الفرق",
   "contextmenu.editNewTab": "تحرير في علامة تبويب جديدة",
   "contextmenu.gitVerificationUnavailable": "التحقق من مستودع Git غير متاح",
   "contextmenu.previewNewTab": "معاينة في علامة تبويب جديدة",

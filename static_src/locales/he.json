@@ -2573,6 +2573,7 @@
   "gitDiff.staleSnapshot": "תמונת המצב של היסטוריית Git אינה עדכנית.",
   "contextmenu.diffNewTab": "הצגת הבדלים בכרטיסייה חדשה",
   "contextmenu.diffRepo": "השוואת מאגר",
+  "contextmenu.showDiff": "Δהצגת הבדלים",
   "contextmenu.editNewTab": "עריכה בכרטיסייה חדשה",
   "contextmenu.gitVerificationUnavailable": "אימות מאגר Git אינו זמין",
   "contextmenu.previewNewTab": "תצוגה מקדימה בכרטיסייה חדשה",

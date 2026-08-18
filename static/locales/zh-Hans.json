@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "在新标签页中打开网址",
   "contextmenu.previewNewTab": "在新选项卡中预览",
   "contextmenu.readOnlyUnavailable": "只读模式下无法访问文件系统内容",
+  "contextmenu.showDiff": "Δ显示差异",
   "contextmenu.zipDownload": "压缩下载",
   "debug.apiCalls": "API 调用",
   "debug.cleared": "已清除调试事件",

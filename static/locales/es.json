@@ -220,6 +220,7 @@
   "contextmenu.openUrl": "Abrir URL en una pestaña nueva",
   "contextmenu.previewNewTab": "Vista previa en una pestaña nueva",
   "contextmenu.readOnlyUnavailable": "El contenido del sistema de archivos no está disponible en modo de solo lectura",
+  "contextmenu.showDiff": "ΔMostrar diferencias",
   "contextmenu.zipDownload": "Comprimir y descargar",
   "debug.apiCalls": "llamadas API",
   "debug.cleared": "eventos de depuración borrados",

@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "新しいタブでURLを開く",
   "contextmenu.previewNewTab": "新しいタブでプレビュー",
   "contextmenu.readOnlyUnavailable": "読み取り専用モードではファイルシステムの内容を利用できません",
+  "contextmenu.showDiff": "Δ差分を表示",
   "contextmenu.zipDownload": "圧縮してダウンロード",
   "debug.apiCalls": "API呼び出し",
   "debug.cleared": "デバッグ イベントがクリアされました",

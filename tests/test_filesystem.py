@@ -2533,6 +2533,26 @@ def test_git_history_snapshot_cursor_reloads_the_frozen_first_page(tmp_path):
     assert restored["next_cursor"] == first["next_cursor"]
 
 
+@pytest.mark.parametrize(
+    ("remote_url", "expected"),
+    [
+        ("git@github.com:owner/project.git", {"provider": "github", "base_url": "https://github.com/owner/project"}),
+        ("ssh://git@gitlab.example.com/group/subgroup/project.git", {"provider": "gitlab", "base_url": "https://gitlab.example.com/group/subgroup/project"}),
+        ("ssh://git@gitlab.example.com:2222/group/project.git", {"provider": "gitlab", "base_url": "https://gitlab.example.com/group/project"}),
+        ("https://example.com/owner/project.git", None),
+        ("https://token@github.com/owner/project.git", None),
+        ("https://github.com/owner/project.git?token=secret", None),
+    ],
+)
+def test_git_history_exposes_only_safe_supported_hosted_origin(tmp_path, remote_url, expected):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("remote", "add", "origin", remote_url)
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["hosted_remote"] == expected
+
+
 def test_git_commit_detail_preserves_root_merge_rename_copy_binary_mode_and_hostile_paths(tmp_path, monkeypatch):
     repo = create_git_history_repository(tmp_path / "history")
     calls = []

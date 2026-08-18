@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git 履歴のスナップショットは古くなっています。",
   "contextmenu.diffNewTab": "新しいタブで差分を表示",
   "contextmenu.diffRepo": "リポジトリを比較",
+  "contextmenu.showDiff": "Δ差分を表示",
   "contextmenu.editNewTab": "新しいタブで編集",
   "contextmenu.gitVerificationUnavailable": "Git リポジトリを確認できません",
   "contextmenu.previewNewTab": "新しいタブでプレビュー",

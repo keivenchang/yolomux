@@ -226,6 +226,7 @@
   "contextmenu.openUrl": "Открыть URL в новой вкладке",
   "contextmenu.previewNewTab": "Предпросмотр в новой вкладке",
   "contextmenu.readOnlyUnavailable": "Содержимое файловой системы недоступно в режиме только для чтения",
+  "contextmenu.showDiff": "ΔПоказать различия",
   "contextmenu.zipDownload": "Заархивировать и скачать",
   "debug.apiCalls": "API звонки",
   "debug.cleared": "события отладки удалены",

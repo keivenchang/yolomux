@@ -140,7 +140,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     const disabledReason = finderPathActionDisabledReason(primaryInfo);
     const disabled = Boolean(disabledReason);
     return [{
-      label: t('contextmenu.diffRepo'),
+      label: t('contextmenu.showDiff'),
       item: gitDiffItemFor(fullPath),
       disabled,
       disabledReason,
@@ -171,7 +171,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   return [
     actionForMode('edit', 'contextmenu.editNewTab'),
     actionForMode('preview', 'contextmenu.previewNewTab'),
-    actionForMode('diff', 'contextmenu.diffNewTab', diffDisabled, diffDisabledReason),
+    actionForMode('diff', 'contextmenu.showDiff', diffDisabled, diffDisabledReason),
   ];
 }
 
@@ -2052,6 +2052,7 @@ async function refreshOpenFileDiff(path, options = {}) {
       );
       ensureHistoricalDiffPayloadIdentity(state, payload);
       applyOpenFileDiffPayload(state, payload);
+      refreshPaneTabLabel(item || fileEditorItemFor(path));
       if (state.historical === true) {
         state.original = String(payload.working || '');
         state.content = String(payload.working || '');

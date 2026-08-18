@@ -84,6 +84,8 @@ async function runCrossSurfaceStateSuite() {
     const directoryItem = api.gitDiffItemFor(directoryPath);
     assert.equal(api.gitDiffItemPath(directoryItem), directoryPath, 'gitdiff path encoding round-trips hostile URL characters');
     assert.equal(api.tabTypeForItem(directoryItem)?.key, 'git-diff', 'gitdiff items use one dedicated directory descriptor');
+    api.setGitDiffTabStateForTest(directoryItem, {repo: '/repo/space and % value', relativePath: 'src'});
+    assert.equal(api.itemLabel(directoryItem), 'Δspace and % value;src');
     assert.equal(api.panePlacementForItem(directoryItem), api.panePlacementGenericOnly, 'repository history is Generic-Pane only');
     assert.equal(api.paneRoleAllowsItem({kind: api.paneRoleSide, side: api.paneSideLeft}, directoryItem, {allowCandidate: true}), false, 'repository history rejects Side panes');
 
@@ -101,10 +103,11 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileItemPath(first), path, 'the current Editor path owner decodes historical items');
     assert.equal(api.tabTypeForItem(first)?.key, 'file-editor', 'historical files remain the current Editor tab type');
 
-    api.setHistoricalFileStateForTest(first, {kind: 'text', content: 'first', diffFromRef: 'a'.repeat(40), diffToRef: 'b'.repeat(40)});
+    api.setHistoricalFileStateForTest(first, {kind: 'text', content: 'first', gitRoot: '/repo', diffFromRef: 'a'.repeat(40), diffToRef: 'b'.repeat(40)});
     api.setHistoricalFileStateForTest(second, {kind: 'text', content: 'second', diffFromRef: 'c'.repeat(40), diffToRef: 'd'.repeat(40)});
     assert.equal(api.fileEditorStateForItemForTest(path, first).content, 'first', 'first tuple owns its immutable content');
     assert.equal(api.fileEditorStateForItemForTest(path, second).content, 'second', 'second tuple cannot overwrite the first tuple');
+    assert.equal(api.itemLabel(first), 'Δname with % value.js;repo/src', 'historical Preview and Diff retain one delta comparison title');
   });
 
   test('Finder builds the approved mode actions from one explicit registry', () => {
@@ -118,7 +121,7 @@ async function runCrossSurfaceStateSuite() {
       menuState,
     };
     const fileActions = api.finderOpenInNewTabActionsForContext(fileContext);
-    assert.deepStrictEqual([...fileActions.map(action => action.label)], ['Edit in new tab', 'Preview in new tab', 'Diff in new tab']);
+    assert.deepStrictEqual([...fileActions.map(action => action.label)], ['Edit in new tab', 'Preview in new tab', 'ΔShow Diff']);
     assert.deepStrictEqual([...fileActions.map(action => action.mode)], ['edit', 'preview', 'diff']);
     assert.equal(fileActions.every(action => action.canonical === true), true, 'all Finder modes converge on the canonical working-tree tab');
     const unverifiedActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: null});
@@ -137,7 +140,7 @@ async function runCrossSurfaceStateSuite() {
       primaryInfo: {repo_root: '/repo', relative_path: ''},
       menuState,
     });
-    assert.deepStrictEqual([...repoActions.map(action => action.label)], ['Diff repo']);
+    assert.deepStrictEqual([...repoActions.map(action => action.label)], ['ΔShow Diff']);
     assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({...fileContext, selectedPaths: ['/repo/app.js', '/repo/other.js']})], [], 'multi-selection omits Finder open actions');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
@@ -187,6 +190,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(opened, existingItem, 'the canonical action retains the existing working Editor item instead of replacing it');
     assert.equal(api.slotForItem(existingItem), 'slot1', 'the existing Editor remains in its current pane');
     assert.deepStrictEqual(diffRequests.map(request => [request.searchParams.get('from'), request.searchParams.get('to')]), [['HEAD', 'current']], 'Finder Diff resets arbitrary pinned refs to HEAD/current');
+    assert.equal(api.itemLabel(existingItem), 'Δapp.js;repo');
+    api.setFileEditorViewMode(path, 'preview', existingItem);
+    assert.equal(api.itemLabel(existingItem), 'app.js', 'the canonical Editor title drops delta when Preview is selected');
   });
 
   test('historical Editor chrome and close state are isolated from the working file record', () => {

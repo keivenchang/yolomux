@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git इतिहास स्नैपशॉट पुराना है।",
   "contextmenu.diffNewTab": "नए टैब में अंतर दिखाएँ",
   "contextmenu.diffRepo": "रिपॉज़िटरी की तुलना करें",
+  "contextmenu.showDiff": "Δअंतर दिखाएँ",
   "contextmenu.editNewTab": "नए टैब में संपादित करें",
   "contextmenu.gitVerificationUnavailable": "Git रिपॉज़िटरी सत्यापन उपलब्ध नहीं है",
   "contextmenu.previewNewTab": "नए टैब में पूर्वावलोकन करें",

@@ -2573,6 +2573,7 @@
   "gitDiff.staleSnapshot": "La instantánea del historial de Git está obsoleta.",
   "contextmenu.diffNewTab": "Comparar en una pestaña nueva",
   "contextmenu.diffRepo": "Comparar repositorio",
+  "contextmenu.showDiff": "ΔMostrar diferencias",
   "contextmenu.editNewTab": "Editar en una pestaña nueva",
   "contextmenu.gitVerificationUnavailable": "La verificación del repositorio Git no está disponible",
   "contextmenu.previewNewTab": "Vista previa en una pestaña nueva",

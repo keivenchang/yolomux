@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "URL को नए टैब में खोलें",
   "contextmenu.previewNewTab": "नए टैब में पूर्वावलोकन करें",
   "contextmenu.readOnlyUnavailable": "फ़ाइल सिस्टम सामग्री केवल-पढ़ने के मोड में उपलब्ध नहीं है",
+  "contextmenu.showDiff": "Δअंतर दिखाएँ",
   "contextmenu.zipDownload": "ज़िप करें और डाउनलोड करें",
   "debug.apiCalls": "API कॉल",
   "debug.cleared": "डिबग इवेंट साफ़ हो गए",

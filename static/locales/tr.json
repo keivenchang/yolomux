@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "URL'yi yeni sekmede aç",
   "contextmenu.previewNewTab": "Yeni sekmede önizle",
   "contextmenu.readOnlyUnavailable": "Dosya sistemi içeriği salt okunur modda kullanılamıyor",
+  "contextmenu.showDiff": "ΔFarkı göster",
   "contextmenu.zipDownload": "Zip ve indir",
   "debug.apiCalls": "API çağrılar",
   "debug.cleared": "hata hata alma etkinlikleri temizlendi",

@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "De momentopname van de Git-geschiedenis is verouderd.",
   "contextmenu.diffNewTab": "Vergelijken in nieuw tabblad",
   "contextmenu.diffRepo": "Repository vergelijken",
+  "contextmenu.showDiff": "ΔVerschil tonen",
   "contextmenu.editNewTab": "Bewerken in nieuw tabblad",
   "contextmenu.gitVerificationUnavailable": "Git-repositoryverificatie is niet beschikbaar",
   "contextmenu.previewNewTab": "Voorbeeld in nieuw tabblad",

@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "在新分頁中開啟網址",
   "contextmenu.previewNewTab": "在新分頁中預覽",
   "contextmenu.readOnlyUnavailable": "唯讀模式下無法存取檔案系統內容",
+  "contextmenu.showDiff": "Δ顯示差異",
   "contextmenu.zipDownload": "壓縮下載",
   "debug.apiCalls": "API 呼叫",
   "debug.cleared": "已清除除錯事件",

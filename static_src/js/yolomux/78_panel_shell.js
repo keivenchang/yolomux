@@ -463,6 +463,16 @@ function renderPaneTabStripsMeasured() {
   }
 }
 
+function refreshPaneTabLabel(item) {
+  if (!item) return;
+  const label = itemLabel(item);
+  document.querySelectorAll(`[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => {
+    const visibleLabel = tab.querySelector?.('.session-button-dir');
+    if (visibleLabel) visibleLabel.textContent = label;
+    tab.setAttribute?.('aria-label', paneTabAriaLabel(item));
+  });
+}
+
 function updatePaneTabStrip(panel, side) {
   const strip = panel.querySelector('.pane-tabs');
   if (!strip) return;
@@ -1048,7 +1058,7 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
   const missing = fileEditorTabIsMissing(item) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(itemLabel(item))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {

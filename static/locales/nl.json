@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "URL openen in nieuw tabblad",
   "contextmenu.previewNewTab": "Voorbeeld in nieuw tabblad",
   "contextmenu.readOnlyUnavailable": "Bestandssysteeminhoud is niet beschikbaar in alleen-lezenmodus",
+  "contextmenu.showDiff": "ΔVerschil tonen",
   "contextmenu.zipDownload": "Comprimeren en downloaden",
   "debug.apiCalls": "API roept",
   "debug.cleared": "debug-events verwijderd",

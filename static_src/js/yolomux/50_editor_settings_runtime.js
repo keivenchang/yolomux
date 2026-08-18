@@ -25,6 +25,11 @@ function setFileEditorViewMode(path, mode, item = null) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
+  if (previousMode !== mode) {
+    renderPaneTabStrips();
+    refreshPaneTabLabel(item || fileEditorItemFor(path));
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
+  }
 }
 
 function updateEditorModeControl(control, path, state, item = null) {

@@ -21,6 +21,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 from typing import Callable
+from urllib.parse import urlsplit
 
 from ..common import git
 from ..common import git_bytes
@@ -714,6 +715,7 @@ class PinnedGitObjectStore:
     git_common_directory: str
     object_directory: str
     descriptors: tuple[int, ...]
+    hosted_remote: dict[str, str] | None
 
 
 def _ensure_git_view_deadline(deadline: float) -> None:
@@ -778,6 +780,7 @@ class PinnedGitHistoryScope:
     git_object_descriptors: tuple[int, ...]
     shallow_snapshot: str
     shallow_data: bytes
+    hosted_remote: dict[str, str] | None
 
 
 def _history_error(message: str, *, key: str, status: int = 400, diagnostic: object = "") -> paths.FilesystemError:
@@ -1030,6 +1033,7 @@ def _read_bounded_git_config(handle: paths.SafePathHandle) -> bytes:
             key="fs.error.gitRepositoryChanged",
             status=409,
         )
+    _ensure_pinned_regular_file_unchanged(handle)
     try:
         data = os.pread(handle.descriptor, GIT_CONFIG_MAX_BYTES + 1, 0)
     except OSError as error:
@@ -1045,6 +1049,7 @@ def _read_bounded_git_config(handle: paths.SafePathHandle) -> bytes:
             key="fs.error.gitHistoryTooLarge",
             status=413,
         )
+    _ensure_pinned_regular_file_unchanged(handle)
     return data
 
 
@@ -1127,6 +1132,75 @@ def _git_repository_format(config_data: bytes) -> tuple[int, str]:
             status=422,
         )
     return repository_format_version, object_format
+
+
+def _git_origin_remote_url(config_data: bytes) -> str:
+    in_origin = False
+    for raw_line in config_data.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("["):
+            in_origin = re.fullmatch(r'\[\s*remote\s+"origin"\s*\]', line, flags=re.IGNORECASE) is not None
+            continue
+        if not in_origin:
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+        else:
+            key, value = line.split(None, 1) if " " in line else (line, "")
+        if key.strip().lower() != "url":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"' and "\\" not in value:
+            value = value[1:-1]
+        return value
+    return ""
+
+
+def _hosted_git_remote(config_data: bytes) -> dict[str, str] | None:
+    raw_url = _git_origin_remote_url(config_data)
+    if not raw_url or any(character in raw_url for character in ("\x00", "\r", "\n")):
+        return None
+    host = ""
+    port: int | None = None
+    repository_path = ""
+    if "://" not in raw_url:
+        scp_match = re.fullmatch(r"(?:[^@/:]+@)?([A-Za-z0-9.-]+):(.+)", raw_url)
+        if scp_match is None:
+            return None
+        host, repository_path = scp_match.groups()
+    else:
+        try:
+            parsed = urlsplit(raw_url)
+            port = parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme not in {"https", "ssh", "git"} or parsed.query or parsed.fragment:
+            return None
+        if parsed.scheme == "https" and (parsed.username or parsed.password):
+            return None
+        if parsed.scheme != "https":
+            port = None
+        host = parsed.hostname or ""
+        repository_path = parsed.path.lstrip("/")
+    normalized_host = host.lower().rstrip(".")
+    if re.fullmatch(r"[a-z0-9.-]+", normalized_host) is None:
+        return None
+    if normalized_host == "github.com" or normalized_host.startswith("github.") or ".github." in normalized_host:
+        provider = "github"
+    elif normalized_host == "gitlab.com" or normalized_host.startswith("gitlab.") or ".gitlab." in normalized_host:
+        provider = "gitlab"
+    else:
+        return None
+    path = repository_path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    segments = path.split("/")
+    if len(segments) < 2 or any(re.fullmatch(r"[A-Za-z0-9._~-]+", segment) is None or segment in {".", ".."} for segment in segments):
+        return None
+    authority = normalized_host if port is None else f"{normalized_host}:{port}"
+    return {"provider": provider, "base_url": f"https://{authority}/{'/'.join(segments)}"}
 
 
 def _snapshot_regular_child(
@@ -1397,6 +1471,7 @@ def _pinned_git_object_store(
 
         repository_format_version = 0
         object_format = "sha1"
+        hosted_remote = None
         _ensure_git_view_deadline(deadline)
         try:
             config_stat = os.stat("config", dir_fd=git_common_dir_handle.descriptor, follow_symlinks=False)
@@ -1426,9 +1501,9 @@ def _pinned_git_object_store(
                     observe_name=False,
                 )
             )
-            repository_format_version, object_format = _git_repository_format(
-                _read_bounded_git_config(config_handle)
-            )
+            config_data = _read_bounded_git_config(config_handle)
+            repository_format_version, object_format = _git_repository_format(config_data)
+            hosted_remote = _hosted_git_remote(config_data)
 
         loose_budget = GitViewBudget(
             deadline=deadline,
@@ -1688,6 +1763,7 @@ def _pinned_git_object_store(
                 git_common_directory=str(control_directory),
                 object_directory=str(object_directory),
                 descriptors=tuple(handle.descriptor for handle in exposed_handles),
+                hosted_remote=hosted_remote,
             )
         finally:
             retirement.check()
@@ -1985,6 +2061,7 @@ def _pinned_git_history_scope(raw_path: str, *, operation: str):
                             git_object_descriptors=object_store.descriptors,
                             shallow_snapshot=shallow_snapshot,
                             shallow_data=shallow_data,
+                            hosted_remote=object_store.hosted_remote,
                         )
                     finally:
                         retirement_deadline = retirement.begin()
@@ -2424,6 +2501,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
                 "head": "",
+                "hosted_remote": scope.hosted_remote,
                 "snapshot_cursor": "",
                 "commits": [],
                 "next_cursor": "",
@@ -2528,6 +2606,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
                 "head": frozen_head,
+                "hosted_remote": scope.hosted_remote,
                 "snapshot_cursor": snapshot_cursor,
                 "commits": visible,
                 "next_cursor": next_cursor,

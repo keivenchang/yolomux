@@ -1166,6 +1166,16 @@ function virtualPanelTabType(spec) {
     terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
     popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
 }
+function diffFileTabLabel(item, path) {
+  if (!isHistoricalFileEditorItem(item) && editorViewModeFor(path, item) !== 'diff') return basenameOf(path);
+  const state = fileEditorTabState(item);
+  const repo = normalizeDirectoryPath(state?.gitRoot || state?.diffRepo || '');
+  const relativePath = repo && pathIsInsideDirectory(path, repo) ? pathRelativeToDirectory(path, repo) : '';
+  const parent = relativePath.includes('/') ? dirnameOf(relativePath) : '';
+  const scope = repo ? [basenameOf(repo), parent].filter(Boolean).join('/') : compactHomePath(dirnameOf(path));
+  return `Δ${basenameOf(path)}${scope ? `;${scope}` : ''}`;
+}
+
 function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
   const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return virtualPanelTabType({
@@ -1173,7 +1183,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     prefix,
     prefixes: itemPrefixes,
     match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
-    label: item => basenameOf(fileItemPath(item)),
+    label: item => diffFileTabLabel(item, fileItemPath(item)),
     shortLabel,
     terminalTitle,
     sortRank,
@@ -1392,8 +1402,8 @@ const TAB_TYPES = [
     key: 'git-diff',
     prefix: gitDiffItemPrefix,
     label: item => gitDiffTabLabel(item),
-    shortLabel: () => t('contextmenu.diffRepo'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('contextmenu.diffRepo')}),
+    shortLabel: () => t('contextmenu.showDiff'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('contextmenu.showDiff')}),
     sortRank: 0.73,
     param: item => item,
     detail: item => compactHomePath(gitDiffItemPath(item) || ''),

@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "สแนปช็อตประวัติ Git ล้าสมัยแล้ว",
   "contextmenu.diffNewTab": "ดูส่วนต่างในแท็บใหม่",
   "contextmenu.diffRepo": "เปรียบเทียบที่เก็บ",
+  "contextmenu.showDiff": "Δแสดงส่วนต่าง",
   "contextmenu.editNewTab": "แก้ไขในแท็บใหม่",
   "contextmenu.gitVerificationUnavailable": "ไม่สามารถตรวจสอบที่เก็บ Git ได้",
   "contextmenu.previewNewTab": "แสดงตัวอย่างในแท็บใหม่",

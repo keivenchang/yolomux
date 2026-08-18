@@ -21,6 +21,8 @@
   font-size: var(--ui-font-size-2xs);
 }
 .git-diff-panel {
+  --git-diff-row-separator: color-mix(in srgb, var(--line) 76%, transparent);
+  --git-diff-secondary-text: var(--text-muted-cool);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   width: 100%;
@@ -30,6 +32,10 @@
   color: var(--text);
   background: var(--panel);
   container: git-diff-panel / inline-size;
+}
+body.theme-light .git-diff-panel {
+  --git-diff-row-separator: #aeb9c8;
+  --git-diff-secondary-text: #465468;
 }
 .git-diff-toolbar {
   display: grid;
@@ -76,6 +82,7 @@
   grid-column: 1 / -1;
   column-gap: var(--space-8);
   min-width: 0;
+  box-shadow: inset 0 -1px var(--git-diff-row-separator);
 }
 .git-diff-commit-row {
   display: grid;
@@ -91,6 +98,7 @@
   border-radius: var(--radius-control);
   color: inherit;
   background: transparent;
+  cursor: pointer;
   text-align: start;
   white-space: nowrap;
 }
@@ -111,8 +119,16 @@
   color: var(--text);
   text-overflow: ellipsis;
 }
-.git-diff-commit-row > span:not(.git-diff-commit-description, .git-diff-commit-caret) {
-  color: var(--text-muted-cool);
+.git-diff-commit-date,
+.git-diff-commit-changes,
+.git-diff-commit-author {
+  color: var(--git-diff-secondary-text);
+}
+.git-diff-commit-added {
+  color: var(--git-staged);
+}
+.git-diff-commit-removed {
+  color: var(--git-deleted);
 }
 .git-diff-commit-detail {
   grid-column: 1 / -1;

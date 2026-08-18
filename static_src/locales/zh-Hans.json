@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git 历史快照已过期。",
   "contextmenu.diffNewTab": "在新选项卡中查看差异",
   "contextmenu.diffRepo": "比较仓库",
+  "contextmenu.showDiff": "Δ显示差异",
   "contextmenu.editNewTab": "在新选项卡中编辑",
   "contextmenu.gitVerificationUnavailable": "无法验证 Git 仓库",
   "contextmenu.previewNewTab": "在新选项卡中预览",

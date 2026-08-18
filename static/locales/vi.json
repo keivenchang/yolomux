@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "Mở URL trong tab mới",
   "contextmenu.previewNewTab": "Xem trước trong tab mới",
   "contextmenu.readOnlyUnavailable": "Nội dung hệ thống tệp không khả dụng ở chế độ chỉ đọc",
+  "contextmenu.showDiff": "ΔHiển thị khác biệt",
   "contextmenu.zipDownload": "Zip và tải xuống",
   "debug.apiCalls": "cuộc gọi API",
   "debug.cleared": "sự kiện gỡ lỗi bị xóa",

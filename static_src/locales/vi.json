@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Ảnh chụp lịch sử Git đã cũ.",
   "contextmenu.diffNewTab": "So sánh trong tab mới",
   "contextmenu.diffRepo": "So sánh kho mã",
+  "contextmenu.showDiff": "ΔHiển thị khác biệt",
   "contextmenu.editNewTab": "Chỉnh sửa trong tab mới",
   "contextmenu.gitVerificationUnavailable": "Không thể xác minh kho Git",
   "contextmenu.previewNewTab": "Xem trước trong tab mới",

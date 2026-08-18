@@ -2573,6 +2573,7 @@
   "gitDiff.staleSnapshot": "L’istantanea della cronologia Git non è più valida.",
   "contextmenu.diffNewTab": "Confronta in una nuova scheda",
   "contextmenu.diffRepo": "Confronta repository",
+  "contextmenu.showDiff": "ΔMostra differenze",
   "contextmenu.editNewTab": "Modifica in una nuova scheda",
   "contextmenu.gitVerificationUnavailable": "La verifica del repository Git non è disponibile",
   "contextmenu.previewNewTab": "Anteprima in una nuova scheda",

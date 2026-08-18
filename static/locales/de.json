@@ -214,6 +214,7 @@
   "contextmenu.openUrl": "URL in neuem Tab öffnen",
   "contextmenu.previewNewTab": "Vorschau in neuem Tab",
   "contextmenu.readOnlyUnavailable": "Dateisysteminhalte sind im schreibgeschützten Modus nicht verfügbar",
+  "contextmenu.showDiff": "ΔDiff anzeigen",
   "contextmenu.zipDownload": "Zippen und herunterladen",
   "debug.apiCalls": "API-Aufrufe",
   "debug.cleared": "Debug-Ereignisse gelöscht",

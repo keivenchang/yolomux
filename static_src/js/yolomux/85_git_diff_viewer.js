@@ -4,7 +4,11 @@
 
 function gitDiffTabLabel(item) {
   const path = gitDiffItemPath(item);
-  return path ? `${t('contextmenu.diffRepo')} · ${basenameOf(path)}` : t('contextmenu.diffRepo');
+  const state = gitDiffTabState.get(item);
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  const name = basenameOf(repo || path);
+  const relativePath = String(state?.relativePath || '');
+  return name ? `Δ${name}${relativePath ? `;${relativePath}` : ''}` : 'Δ';
 }
 
 function newGitDiffTabState(item, defaults = {}) {
@@ -14,6 +18,7 @@ function newGitDiffTabState(item, defaults = {}) {
     path,
     repo: '',
     relativePath: '',
+    hostedRemote: null,
     head: '',
     snapshotCursor: '',
     commits: [],
@@ -87,6 +92,11 @@ function gitDiffHistoryPayloadIsValid(payload) {
     && typeof payload.repo === 'string'
     && typeof payload.relative_path === 'string'
     && typeof payload.head === 'string'
+    && (payload.hosted_remote === undefined || payload.hosted_remote === null || (
+      typeof payload.hosted_remote === 'object'
+      && ['github', 'gitlab'].includes(payload.hosted_remote.provider)
+      && typeof payload.hosted_remote.base_url === 'string'
+    ))
     && (payload.snapshot_cursor === undefined || typeof payload.snapshot_cursor === 'string')
     && Array.isArray(payload.commits)
     && typeof payload.next_cursor === 'string');
@@ -162,6 +172,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.path = normalizeDirectoryPath(payload.path) || state.path;
     state.repo = normalizeDirectoryPath(payload.repo);
     state.relativePath = payload.relative_path;
+    state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
@@ -170,6 +181,9 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.truncationReason = String(payload.truncation_reason || '');
     state.loaded = true;
     state.error = null;
+    renderPaneTabStrips();
+    refreshPaneTabLabel(item);
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
     if (!append) pruneGitDiffShaState(state, new Set(state.commits.map(commit => String(commit?.sha || '')).filter(Boolean)));
     for (const sha of state.expanded) if (!state.details.has(sha) && !state.detailLoading.has(sha)) void loadGitDiffCommitDetail(item, sha);
     refreshLayoutUrlStateSoon();
@@ -263,12 +277,67 @@ function gitDiffTextNode(className, text = '') {
   return node;
 }
 
-function gitDiffCommitChangesText(commit) {
+function gitDiffCommitChangesNode(commit) {
   const files = Math.max(0, Number(commit?.files) || 0);
   const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
   const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
   const binary = Math.max(0, Number(commit?.binary_files) || 0);
-  return `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`;
+  const node = gitDiffTextNode('git-diff-commit-changes');
+  node.append(
+    document.createTextNode(`${files} ${t('common.files')} `),
+    gitDiffTextNode('git-diff-commit-added', `+${added}`),
+    document.createTextNode(' '),
+    gitDiffTextNode('git-diff-commit-removed', `-${removed}`),
+  );
+  if (binary) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
+  node.setAttribute('aria-label', `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`);
+  return node;
+}
+
+function gitDiffHostedLink(remote, kind, value) {
+  if (!remote || !['github', 'gitlab'].includes(remote.provider)) return '';
+  let base;
+  try {
+    base = new URL(String(remote.base_url || ''));
+  } catch (_error) {
+    return '';
+  }
+  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) return '';
+  const identifier = String(value || '');
+  if (kind === 'commit' && !/^[0-9a-f]{40,64}$/.test(identifier)) return '';
+  if (kind === 'change' && !/^[1-9][0-9]*$/.test(identifier)) return '';
+  const suffix = kind === 'commit'
+    ? (remote.provider === 'gitlab' ? `/-/commit/${identifier}` : `/commit/${identifier}`)
+    : (remote.provider === 'gitlab' ? `/-/merge_requests/${identifier}` : `/pull/${identifier}`);
+  return `${base.origin}${base.pathname.replace(/\/$/, '')}${suffix}`;
+}
+
+function gitDiffHostedAnchor(className, text, href) {
+  if (!href) return gitDiffTextNode(className, text);
+  const link = document.createElement('a');
+  link.className = className;
+  link.textContent = String(text || '');
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
+function gitDiffCommitSubjectNode(commit, remote) {
+  const node = gitDiffTextNode('git-diff-commit-description');
+  const subject = String(commit?.subject || '');
+  let offset = 0;
+  for (const match of subject.matchAll(/#([1-9][0-9]*)\b/g)) {
+    if (match.index > offset) node.append(document.createTextNode(subject.slice(offset, match.index)));
+    node.append(gitDiffHostedAnchor(
+      'git-diff-change-link',
+      match[0],
+      gitDiffHostedLink(remote, 'change', match[1]),
+    ));
+    offset = match.index + match[0].length;
+  }
+  if (offset < subject.length) node.append(document.createTextNode(subject.slice(offset)));
+  return node;
 }
 
 function gitDiffCommitDateText(commit) {
@@ -281,8 +350,7 @@ function gitDiffCommitRow(item, commit, row = null) {
   const state = ensureGitDiffTabState(item);
   const sha = String(commit?.sha || '');
   const expanded = state?.expanded?.has(sha) === true;
-  const control = row || makeButton({className: 'git-diff-commit-row'});
-  control.type = 'button';
+  const control = row?.localName === 'div' ? row : document.createElement('div');
   control.className = 'git-diff-commit-row';
   control.dataset.gitDiffCommit = sha;
   control.dataset.path = `/commit/${sha}`;
@@ -294,13 +362,18 @@ function gitDiffCommitRow(item, commit, row = null) {
   const caret = gitDiffTextNode('git-diff-commit-caret ui-disclosure-triangle', disclosureTriangleGlyph(expanded));
   caret.dataset.disclosureExpanded = expanded ? 'true' : 'false';
   caret.setAttribute('aria-hidden', 'true');
-  const shortSha = gitDiffTextNode('git-diff-commit-sha', commit?.short || sha.slice(0, 9));
+  const shortShaText = commit?.short || sha.slice(0, 9);
+  const shortSha = gitDiffHostedAnchor(
+    'git-diff-commit-sha',
+    shortShaText,
+    gitDiffHostedLink(state?.hostedRemote, 'commit', sha),
+  );
   const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
   date.title = localizedExactDateTimeFormat(commit?.authored_at);
-  const changes = gitDiffTextNode('git-diff-commit-changes', gitDiffCommitChangesText(commit));
+  const changes = gitDiffCommitChangesNode(commit);
   const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
-  const description = gitDiffTextNode('git-diff-commit-description', commit?.subject || '');
-  control.setAttribute('aria-label', [shortSha.textContent, date.textContent, changes.textContent, author.textContent, description.textContent].filter(Boolean).join(' '));
+  const description = gitDiffCommitSubjectNode(commit, state?.hostedRemote);
+  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, commit?.subject || ''].filter(Boolean).join(' '));
   control.replaceChildren(caret, shortSha, date, changes, author, description);
   return control;
 }
@@ -316,6 +389,7 @@ function gitDiffCommitShaFromRow(row) {
 const gitDiffCommitTreeInteractionController = createSharedTreeInteractionController({
   name: 'git-diff-commits',
   rowSelector: '.git-diff-commit-row[data-path]',
+  shouldIgnoreEvent: event => Boolean(event?.target?.closest?.('a[href]')),
   rovingFocus: true,
   applyCurrentClasses: false,
   selectedIds: tree => {
@@ -566,7 +640,7 @@ function createGitDiffPanel(item) {
   panel.setAttribute('aria-label', gitDiffTabLabel(item));
   const toolbar = document.createElement('header');
   toolbar.className = 'git-diff-toolbar';
-  const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.diffRepo'));
+  const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.showDiff'));
   const path = gitDiffTextNode('git-diff-path');
   const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => void refreshGitDiffHistory(item, {refresh: true})});
   toolbar.append(heading, path, refresh);
@@ -632,7 +706,7 @@ function renderGitDiffPanel(item, options = {}) {
 function relocalizeGitDiffPanel(item, panel) {
   panel?.setAttribute?.('aria-label', gitDiffTabLabel(item));
   const heading = panel?.querySelector?.('.git-diff-heading');
-  if (heading) heading.textContent = t('contextmenu.diffRepo');
+  if (heading) heading.textContent = t('contextmenu.showDiff');
   renderGitDiffPanel(item, {panel});
 }
 

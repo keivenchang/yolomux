@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git 歷史快照已過期。",
   "contextmenu.diffNewTab": "在新分頁中檢視差異",
   "contextmenu.diffRepo": "比較儲存庫",
+  "contextmenu.showDiff": "Δ顯示差異",
   "contextmenu.editNewTab": "在新分頁中編輯",
   "contextmenu.gitVerificationUnavailable": "無法驗證 Git 儲存庫",
   "contextmenu.previewNewTab": "在新分頁中預覽",

@@ -2527,6 +2527,7 @@
   "gitDiff.staleSnapshot": "Git 기록 스냅샷이 오래되었습니다.",
   "contextmenu.diffNewTab": "새 탭에서 비교",
   "contextmenu.diffRepo": "저장소 비교",
+  "contextmenu.showDiff": "Δ차이 보기",
   "contextmenu.editNewTab": "새 탭에서 편집",
   "contextmenu.gitVerificationUnavailable": "Git 저장소 확인을 사용할 수 없습니다",
   "contextmenu.previewNewTab": "새 탭에서 미리 보기",

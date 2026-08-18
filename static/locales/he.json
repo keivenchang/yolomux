@@ -220,6 +220,7 @@
   "contextmenu.openUrl": "פתח כתובת בלשונית חדשה",
   "contextmenu.previewNewTab": "תצוגה מקדימה בכרטיסייה חדשה",
   "contextmenu.readOnlyUnavailable": "תוכן מערכת הקבצים אינו זמין במצב קריאה בלבד",
+  "contextmenu.showDiff": "Δהצגת הבדלים",
   "contextmenu.zipDownload": "מיקוד והורד",
   "debug.apiCalls": "שיחות API",
   "debug.cleared": "אירועי ניפוי באגים נוקו",
