@@ -1,100 +1,143 @@
 # Progress
 
-Updated: 2026-08-18 09:17 AM PT
+Updated: 2026-08-18 02:45 PM PT
 Worktree: `/home/keivenc/dev/yolomux.dev7771`
 
-**Goal:** Eliminate the urgent refresh-fanout and background-CPU regression, then finish the remaining v0.7.8 queues
+**Goal:** v0.7.9 technical debt: close eight explicit release outcomes across decisions, implementation, verification, landing, and deployment. The checklist counts equal-weight release outcomes, not effort; supporting queue checkboxes show subtask volume.
 
-**Goal totals:** 8/8 done (100%); 0 TODO.
+**Goal totals:** 0/8 done (0%); 8 TODO.
 
 ## Goal checklist
 
-- [x] 1. Bound single-browser refresh fan-out and eliminate recurring GIL-bound web CPU with timing-attributed, generation-keyed owners and matched live Chrome evidence
-- [x] 2. Fix relative product-root resolution and prove a restarted server writes no unexpected product state under $HOME
-- [x] 3. Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone
-- [x] 4. Decide whether multi-machine connectivity has a justified bounded workflow, recording NO_BUILD or one separately approved implementation queue
-- [x] 5. Remove the standalone YO!cost panel and place Cost immediately after Graphs inside YO!stats, migrating legacy saved references without breaking restored layouts
-- [x] 6. Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb
-- [x] 7. Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts
-- [x] 8. Restore usable Preview touch scrolling and native xterm typing on real mobile devices, then deliver responsive single-pane focus behavior without desktop regressions
+- [ ] 1. Decide the two standing p0 queues: deliver filesystem-descriptor-authorization and tmux-session-destruction, or downgrade them with a recorded reason so p0 keeps meaning something
+- [ ] 2. Land Finder working-tree diffs for v0.7.9: implementation and focused/live evidence exist in the dirty 7771 worktree, but the 18-file tracked batch is uncommitted, the DONE draft is untracked, and the full landing gate remains pending
+- [ ] 3. Attribute the 414 Request-URI Too Long responses to a named client, method and complete request line
+- [ ] 4. Close the two acceptance-only queues needing live or two-host evidence: background-owner live fleet requires explicit permission to drive or restart 7770-7773, and NFS configuration lock requires exporter-local plus NFS-client access
+- [ ] 5. Split the filesystem delete lane so an unbounded recursive delete cannot strand the interactive lane
+- [ ] 6. Bound memory growth (DOIT.p1.e5.memory-hog) with measured before and after during a verified quiet-host window
+- [ ] 7. With explicit production deployment/restart authorization, deploy the shipped statsd and daemon-lifetime fixes to 7770 and prove the instance Keiven uses is running them
+- [ ] 8. Land origin/fix/macos-boot-tmux-env (queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md): current ref 6bf61d5e6 remains one commit and 6 files (+272/-35); completion still requires a fresh merge-tree check, both launch paths, the canonical gate, and real-macOS acceptance or an explicit recorded block
 
-**Supporting queue totals:** 25/25 done; 0 pending. All four supporting queues are archived.
+**Supporting queue totals:** 0/71 done; 71 pending.
 
-## Supporting queue set
+## Active queues
 
 | queue | done | pending | complete |
 | --- | ---: | ---: | ---: |
-| `docs/DONE/2026-08/DONE.stats-snapshot-401-no-backoff.md` | 6 | 0 | 100% |
-| `docs/DONE/2026-08/DONE.orphaned-local-service-daemons.md` | 9 | 0 | 100% |
-| `docs/DONE/2026-08/DONE.jobd-reload-fanout-admission.md` | 6 | 0 | 100% |
-| `docs/DONE/2026-08/DONE.transcript-prune-stat-race.md` | 4 | 0 | 100% |
+| `queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md` | 0 | 13 | 0% |
+| `queues/backlog/DOIT.p0.e5.tmux-session-destruction.md` | 0 | 13 | 0% |
+| `queues/backlog/DOIT.p1.e2.background-owner-live-fleet-acceptance.md` | 0 | 5 | 0% |
+| `queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md` | 0 | 12 | 0% |
+| `queues/backlog/DOIT.p1.e2.nfs-configuration-lock-acceptance.md` | 0 | 7 | 0% |
+| `queues/backlog/DOIT.p1.e2.request-uri-too-long-attribution.md` | 0 | 5 | 0% |
+| `queues/backlog/DOIT.p1.e3.filesystem-delete-lane-split.md` | 0 | 8 | 0% |
+| `queues/backlog/DOIT.p1.e5.memory-hog.md` | 0 | 8 | 0% |
 
 ## All queue checkboxes
 
-- [x] Stop snapshot polling on `authentication_required` and surface signed-out state.
-- [x] Route ping, client-events, stats-capabilities, and stats-stream 401s through the same terminal owner.
-- [x] Add a red-first snapshot 401 no-further-request regression.
-- [x] Prove a 401 permits at most one further request.
-- [x] Confirm signed-out state in a real browser.
-- [x] Pass all canonical functional lanes for the 401 queue and record the exact-SHA certification refusal.
-- [x] Establish whether the 05:01 `jobd.produce` burst and orphan daemons are related.
-- [x] Bind every local-service daemon lifetime to its owning server.
-- [x] Reap matching prior-generation orphans on startup.
-- [x] Prune accumulated local-service lock files.
-- [x] Decide and implement ownership for YO!agent-spawned `yag-*` daemons.
-- [x] Prove daemon exit when its owning server dies.
-- [x] Prove fresh startup leaves no prior-generation orphan.
-- [x] Clear current proven orphans and record before/after counts.
-- [x] Pass all canonical functional lanes for the daemon queue and record the exact-SHA certification refusal.
-- [x] Reproduce the exact reload fanout and identify the first incorrect transition.
-- [x] Coalesce only semantically identical reload-triggered filesystem work through the shared owner.
-- [x] Keep live jobd admission and operation completion available under bounded reload fanout.
-- [x] Add exact and ordering-varied red-first reload regressions.
-- [x] Prove the exact reload journey has no jobd 503 and every accepted operation terminates.
-- [x] Pass the focused pytest/browser lanes for the split reload-fanout queue.
-- [x] Treat missing transcript cache files as successful prune outcomes at every stat site.
-- [x] Add missing-at-sort and missing-at-size regressions.
-- [x] Prove missing files log nothing while genuine OSErrors remain loud.
-- [x] Pass all canonical functional lanes for the transcript-prune queue and record the exact-SHA certification refusal.
+### `queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md` (0/13)
+- [ ] Build deterministic failing probes for each known race: replace an authorized file before read consumption, replace a listed regular child with a blocked symli…
+- [ ] Add one shared descriptor-bound authorization owner in the filesystem package that opens without following unintended links, validates policy and identity from…
+- [ ] Migrate single-file reads, raw/media reads, path info, directory listing, symlink text/metadata, recursive count/zip, and search/index metadata to consume the…
+- [ ] Migrate `diff_file()` and other Git-backed file consumers so the authorized descriptor remains live until Git or the replacement bounded consumer has finished.…
+- [ ] Route create, write, rename, and delete through an authorized parent descriptor plus exactly one validated basename. Preserve configured-root refusal, expected…
+- [ ] Add an exact regression for every reproduced race plus a property-derived matrix across regular files, symlinks, hardlinks, missing targets, parent replacement…
+- [ ] Update `docs/specs/GUI.md`, `docs/DEVELOPMENT.md`, and operator-facing error text for the descriptor-bound contract; run focused filesystem, route, search/inde…
+- [ ] Before editing, the DONE note names the implementation worktree and current `origin/main` HEAD; every deterministic barrier test is captured red before the fix…
+- [ ] The focused command `python3 -m pytest -q tests/test_filesystem.py tests/test_filesystem_access_policy.py tests/test_filesystem_authorize_repoint.py tests/test…
+- [ ] For every race, the post-fix result contains zero `BLOCKED_SENTINEL_DO_NOT_EXPOSE` bytes and zero blocked metadata fields; it either returns data from the orig…
+- [ ] The property matrix covers regular files, symlinks, hardlinks, missing targets, allowed-root boundaries, blocked-secret paths, unsupported descriptor semantics…
+- [ ] A consumer inventory under `/tmp` names every filesystem route, daemon producer, search/index annotator, Git consumer, and namespace mutation, and its negative…
+- [ ] `python3 tools/static_build.py --check` when frontend assets are touched and an unmodified `python3 tools/check.py` both exit 0; after restart, the DONE note r…
+
+### `queues/backlog/DOIT.p0.e5.tmux-session-destruction.md` (0/13)
+- [ ] Resolve the leaking invoker by executable, PID/start identity, parent, argv, exact CWD, start source, socket environment, and PT minute; immediately stop or re…
+- [ ] Inventory `~/dev/yolomux` and `~/dev/yolomux.dev7771` through `~/dev/yolomux.dev7776`; for each stale checkout, record pre-HEAD/status and either safely fast-f…
+- [ ] Keep one shared destructive-authority owner: refuse ambient/default-socket `kill-server` unconditionally; permit exact-target `kill-session -t =<session>` on a…
+- [ ] Add failing-first unit and API regressions for no socket/no opt-in, default socket with opt-in, private socket, `kill-server` in every mode, malformed/prefix t…
+- [ ] Extend the shared `tmux_state.sh` snapshot owner to emit one retained JSONL event for a vanished session that cannot join an allowlisted teardown by exact sess…
+- [ ] Run the focused tmux suites and an unmodified canonical gate while capturing default-socket session/history state, then begin the seven-day retained tripwire o…
+- [ ] The DONE note identifies the leaking invoker with executable, PID/start identity, parent, argv, exact CWD, start source, resolved socket, and PT minute; that r…
+- [ ] The seven permanent checkouts each have a recorded pre/post HEAD and status plus one explicit disposition: `updated`, `retired-from-invocation`, or `blocked-by…
+- [ ] `python3 -m pytest -q tests/test_tmux_runtime.py tests/test_gate_tmux.py` exits 0 and proves: no opt-in fails closed; explicit default-server opt-in permits on…
+- [ ] The API fixture starts two sessions on one private socket, deletes one through `POST /api/kill-session`, receives 200, proves the exact named session is gone,…
+- [ ] A deliberate unexplained scratch-session disappearance creates exactly one retained tripwire row with session, socket, prior/current snapshot, PT minute, and `…
+- [ ] An unmodified `python3 tools/check.py` exits 0 and produces zero `yt-*` sessions or history entries on the default socket before, during, and after the gate.
+- [ ] Seven complete consecutive PT calendar days, each with at least one retained snapshot per minute except explicitly recorded monitor downtime, contain zero unex…
+
+### `queues/backlog/DOIT.p1.e2.background-owner-live-fleet-acceptance.md` (0/5)
+- [ ] With explicit permission to restart or drive 7770-7773, record each port's PID, CWD, HEAD, state root, owner generation, service roster, and served bundle befo…
+- [ ] Verify startup ownership order, 7771 takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker-thr…
+- [ ] Restore the requested fleet topology and retain only bounded evidence under `/tmp`; unrelated ports and state must remain unchanged.
+- [ ] One current same-SHA run proves exactly one background owner, deterministic takeover, shared cache convergence, no follower worker, and responsive authenticate…
+- [ ] The DONE record links the already-complete isolated 8004-8007 implementation evidence and separately records the real-fleet acceptance result.
+
+### `queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md` (0/12)
+- [ ] Re-run `merge-tree` against the real HEAD immediately before merging and record the result; the clean result above is a snapshot.
+- [ ] Merge, then regenerate `tests/fixtures/architecture_budgets/v1.json` from the merged tree rather than taking either side.
+- [ ] Prove the defect is actually fixed: launch from inside a tmux session that has a stale `YOLOMUX_ROW_PLAN_FILE` exported and confirm the new server does not inh…
+- [ ] Confirm both launch paths still work after the collapse — `boot.sh` direct start and the supported multi-row launcher — since the branch merges two behaviours…
+- [ ] Verify on real macOS hardware, since that is the platform named. If no host is available, say so and mark that item blocked rather than passing it on Linux evi…
+- [ ] Check no product root is written under `$HOME` after the change, using the same check as the 0.7.8 root-leak work.
+- [ ] `git log HEAD..origin/fix/macos-boot-tmux-env` is empty.
+- [ ] A launch from a tmux session carrying a stale plan-file variable does not inherit it, proven by driving it, not by test alone.
+- [ ] Both direct and multi-row launch paths verified working post-collapse.
+- [ ] Architecture-budgets ratchet regenerated post-merge.
+- [ ] macOS acceptance, or explicitly recorded as blocked with the reason.
+- [ ] Canonical gate green.
+
+### `queues/backlog/DOIT.p1.e2.nfs-configuration-lock-acceptance.md` (0/7)
+- [ ] Run the actual exporter-local plus NFSv4-client configuration-lock acceptance in both directions. Prove mutual exclusion, crash release, same-key conflict beha…
+- [ ] `git ls-files --error-unmatch docs/NFS-LOCK-ACCEPTANCE.md` succeeds so the operative procedure is durable, and the DONE note records both host names, identical…
+- [ ] Preflight proves both hosts read one shared disposable `auth.yaml`, their SHA-256 values match, both harness `--help` calls succeed from the same HEAD, and eve…
+- [ ] Scenario 1 passes exporter-local holder to NFS-client waiter exclusion, and scenario 2 passes the reverse direction; in both cases waiter `lock_acquired` occur…
+- [ ] Scenario 3 passes crash release without deleting the lock file: after the blocked waiter records `wait_started`, killing the exact holder PID is followed by wa…
+- [ ] Scenario 4 records both merge completions, a typed stale-revision conflict for the second base, final `base`/`exporter_key`/`client_key` values, and `monitor_p…
+- [ ] If any scenario first reproduced a product defect, the DONE note names its failing-first node and fix HEAD, the focused regression exits 0, and all five real t…
+
+### `queues/backlog/DOIT.p1.e2.request-uri-too-long-attribution.md` (0/5)
+- [ ] Reproduce or capture one live 414 with timestamp, peer, user agent, method, raw bounded request-line bytes, route/parser state, and browser/network initiator w…
+- [ ] Prove or disprove each producer from current evidence. `jsDebugStatsSampleQuery()` is seven scalar parameters and about 160 characters, so do not attribute the…
+- [ ] Add one exact regression at the proven owner and preserve normal HTTP parser/authentication limits; do not widen request-line limits or change parsing from fra…
+- [ ] The DONE record contains one joined failing request and names the exact producer and framing defect, or records a bounded no-product-defect conclusion after ev…
+- [ ] Any fix has red/green parser/producer tests, the canonical gate, and a restarted authenticated reproduction with no credential retention.
+
+### `queues/backlog/DOIT.p1.e3.filesystem-delete-lane-split.md` (0/8)
+- [ ] Reproduce a one-entry unlink delayed behind held interactive/bulk work and a recursive delete whose work exceeds the mutation-lane bound.
+- [ ] Split the existing delete operation into an authorized bounded unlink case and a subtree case without adding a second path policy or route.
+- [ ] Route bounded unlink through the mutation lane and recursive deletion through a bulk receipt, preserving symlink safety, exact target authority, conflict behav…
+- [ ] Add cross-class isolation, recursive receipt, cancellation, partial-failure, file/symlink/directory, and namespace-replacement regressions.
+- [ ] The red/green tests prove a held bulk/interactive lane cannot delay bounded unlink and prove recursive deletion never occupies the mutation lane.
+- [ ] File, symlink, empty directory, nonempty directory, missing target, blocked path, namespace replacement, cancellation, and partial failure each have one typed…
+- [ ] The route, job descriptor, authorization owner, and operation result remain singular; focused tests and an unmodified `python3 tools/check.py` exit 0.
+- [ ] Restarted runtime evidence records bounded unlink responsiveness and honest recursive pending/terminal behavior on one unchanged HEAD.
+
+### `queues/backlog/DOIT.p1.e5.memory-hog.md` (0/8)
+- [ ] **Freeze production-scale reproductions and derive explicit budgets.** Create content-addressed fixtures and isolated subprocess harnesses for (a) the measured…
+- [ ] **Make the bounded aggregate ring the YO!stats cold serving owner.** On daemon start, validate and load the fixed aggregate-ring publication, publish a bounded…
+- [ ] **Bound every exact YO!stats rebuild by rows, decoded bytes, memory, and lifetime.** If an exact raw-history rebuild remains necessary, fold it in bounded chun…
+- [ ] **Separate shallow native freshness from large indexed-root reconciliation.** Keep immediate native notification only for visible/open Finder directories and e…
+- [ ] **Expose honest per-daemon memory and registration readiness.** Add one side-effect-free measured projection for peak and steady PSS/USS, anonymous/file PSS, s…
+- [ ] **Add daemon-specific regression and resource gates.** Extend the isolated gate to fail on statsd cold peak/steady PSS/USS, watchd native watch-descriptor coun…
+- [ ] **Certify the all-daemon release on one frozen identity.** After the implementation groups are complete, create the separately authorized freeze commit and run…
+- [ ] **Document the bounded ownership and archive the completed queue.** Update `README.md`, `docs/DEVELOPMENT.md`, the relevant YO!stats/watchd/search specificatio…
 
 ## Pending goal items
 
-- None.
-
-## Landing evidence
-
-- Candidate `80b4bf8ce` passed all nine functional lanes: py-compile, static, node-syntax, node-layout, non-browser pytest, browser pytest, E2E pytest, timing-sensitive serial pytest, and whitespace.
-- Exact-SHA certification did not pass. Two clean-checkout certification-only attempts exited 4 after measured shared-host qualification refusals: first I/O stall fractions 0.069948/0.071954 exceeded 0.051/0.056; second I/O full stall 0.051087/0.051029 exceeded 0.051 and one CPU-stall sample 0.074572 exceeded 0.067. This is recorded under Keiven's tiered evidence exception; no tag, push, certification pass, or production restart is claimed.
+- 1. Decide the two standing p0 queues: deliver filesystem-descriptor-authorization and tmux-session-destruction, or downgrade them with a recorded reason so p0 keeps meaning something
+- 2. Land Finder working-tree diffs for v0.7.9: implementation and focused/live evidence exist in the dirty 7771 worktree, but the 18-file tracked batch is uncommitted, the DONE draft is untracked, and the full landing gate remains pending
+- 3. Attribute the 414 Request-URI Too Long responses to a named client, method and complete request line
+- 4. Close the two acceptance-only queues needing live or two-host evidence: background-owner live fleet requires explicit permission to drive or restart 7770-7773, and NFS configuration lock requires exporter-local plus NFS-client access
+- 5. Split the filesystem delete lane so an unbounded recursive delete cannot strand the interactive lane
+- 6. Bound memory growth (DOIT.p1.e5.memory-hog) with measured before and after during a verified quiet-host window
+- 7. With explicit production deployment/restart authorization, deploy the shipped statsd and daemon-lifetime fixes to 7770 and prove the instance Keiven uses is running them
+- 8. Land origin/fix/macos-boot-tmux-env (queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md): current ref 6bf61d5e6 remains one commit and 6 files (+272/-35); completion still requires a fresh merge-tree check, both launch paths, the canonical gate, and real-macOS acceptance or an explicit recorded block
 
 ## Hourly history (last 24 hours)
 
 | PT hour | done | pending | delta done | note |
 | --- | ---: | ---: | ---: | --- |
-| 2026-08-17 09:00 PT | 7 | 1 | - | Keiven's real-iPad screenshots exposed the 44 px editor controls overlapping the absolutely centered Preview-font group and then showed the corrected row was too tall; the 577 CSS-pixel regression failed first for both states, coarse-pointer controls now remain 44 px wide but use a 36 px toolbar height, and restarted 7771 PID 528747 serves byte-identical corrected CSS pending iPad retest |
-| 2026-08-17 10:00 PT | 7 | 1 | +0 | Keiven rejected special iPad editor button sizing after the 36 px row still consumed excessive space; the 577 CSS-pixel regression failed first, then passed with desktop-identical control geometry while retaining non-overlapping flex ownership for the Preview-font and action groups; restarted 7771 PID 1333059 serves byte-identical corrected CSS pending iPad retest |
-| 2026-08-17 11:00 PT | 8 | 0 | +1 | Keiven accepted Preview scrolling, terminal input, and copy/paste on iPadOS 26.6 in a split pane; the final compact-control pins and architecture ratchet passed the static and mobile boot lanes, the disk-busy certification refusal was recorded under the reduced evidence bar, and v0.7.8 reached 8/8 |
-| 2026-08-17 12:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 13:00 PT | 8 | 0 | +0 | Fixed 300s Daemons load extrema at the server fold instead of fabricating min/max from average; focused materializer and 77/77 panel tests plus the node-layout lane passed, and restarted 7772 PID 55514 serves a live 300s approvald bucket at 0.0% min, 3.331% avg, 14.844% max. |
-| 2026-08-17 14:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 15:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 16:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 17:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 18:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 19:00 PT | 8 | 0 | +0 | Added a real mouse-driven Daemons Avg/Max/Min browser regression, replaced Markdown source preprocessing with a post-parse numbered-task presentation transform, fixed Working/footer classification plus current-question precedence, passed 179 detector tests and the 26-test architecture suite, and raised the supporting denominator from 10/11 to 28/31; only the three landing-gate/archive boxes remain. |
-| 2026-08-17 20:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 21:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 22:00 PT | 8 | 0 | +0 |  |
-| 2026-08-17 23:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 00:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 01:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 02:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 03:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 04:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 05:00 PT | 8 | 0 | +0 |  |
-| 2026-08-18 06:00 PT | 8 | 0 | +0 | Finished the scheduled-prune ownership and bounded-coverage-read items: 180 focused service/storage tests passed, the frozen production-shaped startup read fell from 108,146 to 57,312 coverage rows, and eight accelerated 1 Hz appends performed zero coverage rescans. |
-| 2026-08-18 07:00 PT | 8 | 0 | +0 | Advanced the three audit queues to 16/19: all nine functional gate lanes passed; exact-SHA certification refused the dirty checkout and a measured I/O-stall host sample, so the three gate boxes remain open pending authorized landing. Five stale jobd groups plus one legacy approvald were removed, production statsd locks fell from 27 to one active generation, and restarted 7771 PID 321291 serves the verified bundle with valid service parentage. |
-| 2026-08-18 08:00 PT | 8 | 0 | +0 | Completed and archived the 6/6 reload-fanout split queue. The first defect was duplicate cold watch-diff requests reserving completion capacity before jobd coalescing; one keyed JobdOperationService flight now shares raw work while preserving separate receipts. Exact/property tests, 169 Node checks, the two-client browser reload journey, and restarted-7771 deterministic live fanout passed with ten accepted operations, ten terminals, ten acknowledgments, and zero jobd/watch-diff 503s. |
-| 2026-08-18 09:00 PT | 8 | 0 | +3 | Closed and archived the three requested queues at 25/25 supporting checkboxes after candidate `80b4bf8ce` passed all nine functional lanes. The adversarial audit also fixed a cache-recheck follower that could retain a never-terminal 202 and a missing-at-sort transcript prune race. Exact-SHA certification was attempted twice and refused on measured shared-host I/O/CPU pressure; no certification pass is claimed. |
+| 2026-08-18 14:00 PT | 0 | 8 | - | Audited the new v0.7.9 ledger at HEAD 532db2064: eight named queues are 0/71; Finder implementation remains in an 18-file tracked dirty batch with an untracked DONE draft and pending full landing gate; reset history so completed v0.7.8 work does not appear as a v0.7.9 regression. |
 
-<!-- progress-report-goal: {"goal":"Eliminate the urgent refresh-fanout and background-CPU regression, then finish the remaining v0.7.8 queues","items":[{"id":1,"text":"Bound single-browser refresh fan-out and eliminate recurring GIL-bound web CPU with timing-attributed, generation-keyed owners and matched live Chrome evidence","done":true},{"id":2,"text":"Fix relative product-root resolution and prove a restarted server writes no unexpected product state under $HOME","done":true},{"id":3,"text":"Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone","done":true},{"id":4,"text":"Decide whether multi-machine connectivity has a justified bounded workflow, recording NO_BUILD or one separately approved implementation queue","done":true},{"id":5,"text":"Remove the standalone YO!cost panel and place Cost immediately after Graphs inside YO!stats, migrating legacy saved references without breaking restored layouts","done":true},{"id":6,"text":"Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb","done":true},{"id":7,"text":"Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts","done":true},{"id":8,"text":"Restore usable Preview touch scrolling and native xterm typing on real mobile devices, then deliver responsive single-pane focus behavior without desktop regressions","done":true}],"queues":[]} -->
-<!-- progress-report-history: [{"hour":"2026-08-17 09:00 PT","done":7,"pending":1,"note":"Keiven's real-iPad screenshots exposed the 44 px editor controls overlapping the absolutely centered Preview-font group and then showed the corrected row was too tall; the 577 CSS-pixel regression failed first for both states, coarse-pointer controls now remain 44 px wide but use a 36 px toolbar height, and restarted 7771 PID 528747 serves byte-identical corrected CSS pending iPad retest"},{"hour":"2026-08-17 10:00 PT","done":7,"pending":1,"note":"Keiven rejected special iPad editor button sizing after the 36 px row still consumed excessive space; the 577 CSS-pixel regression failed first, then passed with desktop-identical control geometry while retaining non-overlapping flex ownership for the Preview-font and action groups; restarted 7771 PID 1333059 serves byte-identical corrected CSS pending iPad retest"},{"hour":"2026-08-17 11:00 PT","done":8,"pending":0,"note":"Keiven accepted Preview scrolling, terminal input, and copy/paste on iPadOS 26.6 in a split pane; the final compact-control pins and architecture ratchet passed the static and mobile boot lanes, the disk-busy certification refusal was recorded under the reduced evidence bar, and v0.7.8 reached 8/8"},{"hour":"2026-08-17 12:00 PT","done":8,"pending":0},{"hour":"2026-08-17 13:00 PT","done":8,"pending":0,"note":"Fixed 300s Daemons load extrema at the server fold instead of fabricating min/max from average; focused materializer and 77/77 panel tests plus the node-layout lane passed, and restarted 7772 PID 55514 serves a live 300s approvald bucket at 0.0% min, 3.331% avg, 14.844% max."},{"hour":"2026-08-17 14:00 PT","done":8,"pending":0},{"hour":"2026-08-17 15:00 PT","done":8,"pending":0},{"hour":"2026-08-17 16:00 PT","done":8,"pending":0},{"hour":"2026-08-17 17:00 PT","done":8,"pending":0},{"hour":"2026-08-17 18:00 PT","done":8,"pending":0},{"hour":"2026-08-17 19:00 PT","done":8,"pending":0,"note":"Added a real mouse-driven Daemons Avg/Max/Min browser regression, replaced Markdown source preprocessing with a post-parse numbered-task presentation transform, fixed Working/footer classification plus current-question precedence, passed 179 detector tests and the 26-test architecture suite, and raised the supporting denominator from 10/11 to 28/31; only the three landing-gate/archive boxes remain."},{"hour":"2026-08-17 20:00 PT","done":8,"pending":0},{"hour":"2026-08-17 21:00 PT","done":8,"pending":0},{"hour":"2026-08-17 22:00 PT","done":8,"pending":0},{"hour":"2026-08-17 23:00 PT","done":8,"pending":0},{"hour":"2026-08-18 00:00 PT","done":8,"pending":0},{"hour":"2026-08-18 01:00 PT","done":8,"pending":0},{"hour":"2026-08-18 02:00 PT","done":8,"pending":0},{"hour":"2026-08-18 03:00 PT","done":8,"pending":0},{"hour":"2026-08-18 04:00 PT","done":8,"pending":0},{"hour":"2026-08-18 05:00 PT","done":8,"pending":0},{"hour":"2026-08-18 06:00 PT","done":8,"pending":0,"note":"Finished the scheduled-prune ownership and bounded-coverage-read items: 180 focused service/storage tests passed, the frozen production-shaped startup read fell from 108,146 to 57,312 coverage rows, and eight accelerated 1 Hz appends performed zero coverage rescans."},{"hour":"2026-08-18 07:00 PT","done":8,"pending":0,"note":"Advanced the three audit queues to 16/19: all nine functional gate lanes passed; exact-SHA certification refused the dirty checkout and a measured I/O-stall host sample, so the three gate boxes remain open pending authorized landing. Five stale jobd groups plus one legacy approvald were removed, production statsd locks fell from 27 to one active generation, and restarted 7771 PID 321291 serves the verified bundle with valid service parentage."},{"hour":"2026-08-18 08:00 PT","done":8,"pending":0,"note":"Completed and archived the 6/6 reload-fanout split queue. The first defect was duplicate cold watch-diff requests reserving completion capacity before jobd coalescing; one keyed JobdOperationService flight now shares raw work while preserving separate receipts. Exact/property tests, 169 Node checks, the two-client browser reload journey, and restarted-7771 deterministic live fanout passed with ten accepted operations, ten terminals, ten acknowledgments, and zero jobd/watch-diff 503s."},{"hour":"2026-08-18 09:00 PT","done":8,"pending":0}] -->
+<!-- progress-report-goal: {"goal":"v0.7.9 technical debt: close eight explicit release outcomes across decisions, implementation, verification, landing, and deployment. The checklist counts equal-weight release outcomes, not effort; supporting queue checkboxes show subtask volume.","items":[{"id":1,"text":"Decide the two standing p0 queues: deliver filesystem-descriptor-authorization and tmux-session-destruction, or downgrade them with a recorded reason so p0 keeps meaning something","done":false},{"id":2,"text":"Land Finder working-tree diffs for v0.7.9: implementation and focused/live evidence exist in the dirty 7771 worktree, but the 18-file tracked batch is uncommitted, the DONE draft is untracked, and the full landing gate remains pending","done":false},{"id":3,"text":"Attribute the 414 Request-URI Too Long responses to a named client, method and complete request line","done":false},{"id":4,"text":"Close the two acceptance-only queues needing live or two-host evidence: background-owner live fleet requires explicit permission to drive or restart 7770-7773, and NFS configuration lock requires exporter-local plus NFS-client access","done":false},{"id":5,"text":"Split the filesystem delete lane so an unbounded recursive delete cannot strand the interactive lane","done":false},{"id":6,"text":"Bound memory growth (DOIT.p1.e5.memory-hog) with measured before and after during a verified quiet-host window","done":false},{"id":7,"text":"With explicit production deployment/restart authorization, deploy the shipped statsd and daemon-lifetime fixes to 7770 and prove the instance Keiven uses is running them","done":false},{"id":8,"text":"Land origin/fix/macos-boot-tmux-env (queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md): current ref 6bf61d5e6 remains one commit and 6 files (+272/-35); completion still requires a fresh merge-tree check, both launch paths, the canonical gate, and real-macOS acceptance or an explicit recorded block","done":false}],"queues":["queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md","queues/backlog/DOIT.p0.e5.tmux-session-destruction.md","queues/backlog/DOIT.p1.e2.request-uri-too-long-attribution.md","queues/backlog/DOIT.p1.e2.background-owner-live-fleet-acceptance.md","queues/backlog/DOIT.p1.e2.nfs-configuration-lock-acceptance.md","queues/backlog/DOIT.p1.e3.filesystem-delete-lane-split.md","queues/backlog/DOIT.p1.e5.memory-hog.md","queues/backlog/DOIT.p1.e2.merge-macos-boot-tmux-env.md"]} -->
+<!-- progress-report-history: [{"hour":"2026-08-18 14:00 PT","done":0,"pending":8,"note":"Audited the new v0.7.9 ledger at HEAD 532db2064: eight named queues are 0/71; Finder implementation remains in an 18-file tracked dirty batch with an untracked DONE draft and pending full landing gate; reset history so completed v0.7.8 work does not appear as a v0.7.9 regression."}] -->
