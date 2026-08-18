@@ -29,6 +29,7 @@ const {
   canonical,
   makeFileTree,
   test,
+  testAsync,
   runSuites,
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
@@ -65,6 +66,150 @@ async function runCrossSurfaceStateSuite() {
     cacheApi.setRepoDiffRefsForTest('/repo/app', 'v0.7.4', 'current');
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 0}, 'changing Differ refs invalidates only the Differ cache');
     assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
+  test('initial URL Git history state is applied before layout construction without a temporal-dead-zone failure', () => {
+    const item = `gitdiff:${encodeURIComponent('/repo')}`;
+    const sha = 'a'.repeat(40);
+    const state = encodeURIComponent(JSON.stringify({
+      v: 1,
+      gitDiff: [{item, head: sha, snapshotCursor: 'opaque-zero', expanded: [sha]}],
+    }));
+    const api = loadYolomux(`?state=${state}`, ['1']);
+    const restored = api.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([restored.head, restored.snapshotCursor, ...restored.expanded], [sha, 'opaque-zero', sha]);
+  });
+
+  test('Git diff directory and historical editor identities are deterministic and use the existing pane contracts', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const directoryPath = '/repo/space and % value/src';
+    const directoryItem = api.gitDiffItemFor(directoryPath);
+    assert.equal(api.gitDiffItemPath(directoryItem), directoryPath, 'gitdiff path encoding round-trips hostile URL characters');
+    assert.equal(api.tabTypeForItem(directoryItem)?.key, 'git-diff', 'gitdiff items use one dedicated directory descriptor');
+    assert.equal(api.panePlacementForItem(directoryItem), api.panePlacementGenericOnly, 'repository history is Generic-Pane only');
+    assert.equal(api.paneRoleAllowsItem({kind: api.paneRoleSide, side: api.paneSideLeft}, directoryItem, {allowCandidate: true}), false, 'repository history rejects Side panes');
+
+    const path = '/repo/src/name with % value.js';
+    const first = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
+    const repeat = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
+    const second = api.historicalFileEditorItemFor(path, 'c'.repeat(40), 'd'.repeat(40));
+    assert.equal(first, repeat, 'the same path/FROM/TO tuple has one stable identity');
+    assert.notEqual(first, second, 'another ref pair creates another historical Editor instance');
+    assert.deepStrictEqual(canonical(api.historicalFileEditorIdentity(first)), {
+      path,
+      fromRef: 'a'.repeat(40),
+      toRef: 'b'.repeat(40),
+    });
+    assert.equal(api.fileItemPath(first), path, 'the current Editor path owner decodes historical items');
+    assert.equal(api.tabTypeForItem(first)?.key, 'file-editor', 'historical files remain the current Editor tab type');
+
+    api.setHistoricalFileStateForTest(first, {kind: 'text', content: 'first', diffFromRef: 'a'.repeat(40), diffToRef: 'b'.repeat(40)});
+    api.setHistoricalFileStateForTest(second, {kind: 'text', content: 'second', diffFromRef: 'c'.repeat(40), diffToRef: 'd'.repeat(40)});
+    assert.equal(api.fileEditorStateForItemForTest(path, first).content, 'first', 'first tuple owns its immutable content');
+    assert.equal(api.fileEditorStateForItemForTest(path, second).content, 'second', 'second tuple cannot overwrite the first tuple');
+  });
+
+  test('Finder builds the approved mode actions from one explicit registry', () => {
+    const api = loadYolomux('', ['1']);
+    const menuState = {openInNewTabDisabled: false};
+    const fileContext = {
+      fullPath: '/repo/app.js',
+      entry: {kind: 'file', name: 'app.js'},
+      selectedPaths: ['/repo/app.js'],
+      primaryInfo: {repo_root: '/repo', relative_path: 'app.js', git_tracked: true},
+      menuState,
+    };
+    const fileActions = api.finderOpenInNewTabActionsForContext(fileContext);
+    assert.deepStrictEqual([...fileActions.map(action => action.label)], ['Edit in new tab', 'Preview in new tab', 'Diff in new tab']);
+    assert.deepStrictEqual([...fileActions.map(action => action.mode)], ['edit', 'preview', 'diff']);
+    assert.equal(fileActions.every(action => action.canonical === true), true, 'all Finder modes converge on the canonical working-tree tab');
+    const unverifiedActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: null});
+    assert.equal(unverifiedActions.every(action => action.disabled === true && action.disabledReason), true, 'an unverified file disables every mode with an accessible reason');
+    const nonRepoActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: {repo_root: '', relative_path: 'app.js'}});
+    assert.deepStrictEqual([...nonRepoActions.map(action => [action.mode, action.disabled])], [['edit', false], ['preview', false], ['diff', true]], 'a proven non-repository file retains readable modes and disables only Diff');
+    const binaryActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: {repo_root: '/repo', relative_path: 'app.js', size: 64, preview_mime: 'application/octet-stream'}});
+    assert.equal(binaryActions.find(action => action.mode === 'diff').disabled, true, 'a proven binary file exposes Diff as disabled before opening a failing tab');
+    const oversizedActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: {repo_root: '/repo', relative_path: 'app.js', size: 21 * 1024 * 1024, preview_mime: ''}});
+    assert.equal(oversizedActions.find(action => action.mode === 'diff').disabled, true, 'a proven oversized file exposes Diff as disabled before opening a failing tab');
+
+    const repoActions = api.finderOpenInNewTabActionsForContext({
+      fullPath: '/repo',
+      entry: {kind: 'dir', name: 'repo'},
+      selectedPaths: ['/repo'],
+      primaryInfo: {repo_root: '/repo', relative_path: ''},
+      menuState,
+    });
+    assert.deepStrictEqual([...repoActions.map(action => action.label)], ['Diff repo']);
+    assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
+    assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({...fileContext, selectedPaths: ['/repo/app.js', '/repo/other.js']})], [], 'multi-selection omits Finder open actions');
+    assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
+      ...fileContext,
+      fullPath: '/plain',
+      entry: {kind: 'dir', name: 'plain'},
+      selectedPaths: ['/plain'],
+      primaryInfo: {repo_root: '', relative_path: ''},
+    })], [], 'a proven non-repository directory omits Diff repo');
+  });
+
+  await testAsync('Finder Diff resets stale refs and reuses the existing working Editor in its current pane', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/app.js';
+    const existingItem = api.fileEditorDiffPreviewItemFor(path);
+    api.setOpenFileStateForTest(path, {
+      kind: 'text', original: 'old\n', content: 'dirty\n', dirty: true,
+      gitRoot: '/repo', gitTracked: true, gitHistory: [{ref: 'HEAD'}, {ref: 'old'}], gitHasHistory: true,
+      diffLoaded: true, diffUnavailable: false, diff: 'stale', diffFromRef: 'old-from', diffToRef: 'old-to',
+      diffPinnedFromRef: 'old-from', diffPinnedToRef: 'old-to',
+    });
+    api.resolveLayoutItem(existingItem);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.slot1 = api.paneStateWithTabs([existingItem], existingItem);
+    api.applyLayoutSlotsForTest(slots, {focusSession: existingItem, prune: false});
+    assert.equal(api.slotForItem(existingItem), 'slot1', 'the fixture starts with the working Editor in a non-default pane');
+    const requests = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'https://yolomux.test');
+      requests.push(parsed);
+      if (parsed.pathname === '/api/fs/read') return Promise.resolve(jsonResponse({path, content: 'old\n', size: 4, mtime: 1, git_root: '/repo', git_tracked: true, git_history: [{ref: 'HEAD'}, {ref: 'old'}], git_has_history: true}));
+      if (parsed.pathname === '/api/fs/diff') return Promise.resolve(jsonResponse({repo: '/repo', relative_path: 'app.js', from_ref: parsed.searchParams.get('from'), to_ref: parsed.searchParams.get('to'), diff: 'fresh', original: 'old\n', working: 'dirty\n'}));
+      throw new Error(`unexpected request ${parsed.pathname}`);
+    });
+    const action = api.finderOpenInNewTabActionsForContext({
+      fullPath: path,
+      entry: {kind: 'file', name: 'app.js'},
+      selectedPaths: [path],
+      primaryInfo: {repo_root: '/repo', relative_path: 'app.js', size: 8, preview_mime: ''},
+      menuState: {openInNewTabDisabled: false},
+    }).find(candidate => candidate.mode === 'diff');
+    const opened = await action.action();
+    await flushAsyncWork();
+    const diffRequests = requests.filter(request => request.pathname === '/api/fs/diff');
+    assert.equal(opened, existingItem, 'the canonical action retains the existing working Editor item instead of replacing it');
+    assert.equal(api.slotForItem(existingItem), 'slot1', 'the existing Editor remains in its current pane');
+    assert.deepStrictEqual(diffRequests.map(request => [request.searchParams.get('from'), request.searchParams.get('to')]), [['HEAD', 'current']], 'Finder Diff resets arbitrary pinned refs to HEAD/current');
+  });
+
+  test('historical Editor chrome and close state are isolated from the working file record', () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/app.js';
+    const item = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
+    api.setOpenFileStateForTest(path, {kind: 'text', original: 'working', content: 'dirty', dirty: true, externalMissing: true});
+    api.setHistoricalFileStateForTest(item, {kind: 'text', original: 'old', content: 'new', dirty: false});
+    const html = api.fileEditorPaneTabHtml(item);
+    assert.equal(html.includes('file-tab-dirty'), false, 'historical chrome cannot inherit the working buffer dirty badge');
+    assert.equal(html.includes('file-tab-missing-badge'), false, 'historical chrome cannot inherit the working path missing badge');
+    assert.equal(api.paneTabAriaLabelForTest(item).includes('Missing'), false, 'historical accessible text cannot report working-path missing state');
+  });
+
+  await testAsync('a historical-only Editor tab closes without requiring working file state', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/deleted.js';
+    const item = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
+    api.setHistoricalFileStateForTest(item, {kind: 'text', original: 'old', content: '', dirty: false});
+    api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [item]), {focusSession: item, prune: false});
+    assert.equal(await api.closeFileTabForTest(path, {item}), true, 'historical close succeeds without a path-global working state');
+    assert.equal(api.itemInLayout(item, api.currentSlots()), false, 'historical close removes the exact tuple item');
+    assert.equal(api.fileEditorStateForItemForTest(path, item), null, 'historical close retires the immutable tuple state');
   });
 
   test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
@@ -113,7 +258,7 @@ async function runCrossSurfaceStateSuite() {
   test('cross-surface host state 01: YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open...', () => {
     api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,git-diff,image-viewer,file-editor');
     const virtualItems = {
       info: api.infoItemId,
       yoagent: api.yoagentItemId,
@@ -1284,7 +1429,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(appSource.includes('state.diffPinnedFromRef || state.diffPinnedToRef'), 'later diff refreshes reuse explicit file-level refs instead of falling back to HEAD/current');
     assert.ok(appSource.includes("state.diffPinnedFromRef = '';") && appSource.includes("state.diffPinnedToRef = '';"), 'repo-level FROM/TO changes clear any file-level explicit ref pins');
     assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
-    assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
+    assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent && state.historical !== true;'), 'working-tree diffs allow edits on current while historical diffs remain read-only');
     assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green rail does not linger in edit/normal mode');
   });
 
@@ -1659,7 +1804,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(appSource.includes('{wrap: false}'), false, '#47: expanded diff honors the live Word Wrap setting instead of forcing wrap off');
     assert.equal(appSource.includes('view.lineBlockAt(doc.line(line).from)'), false, '#48: diff overview must not infer deleted-row color from CodeMirror pixel gaps');
     assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
-    assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) \{[\s\S]{0,320}await refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false\}\);[\s\S]{0,160}if \(panel\._cmGeneration !== generation\) return null/.test(appSource), '#43/Q4: unresolved diffs await the deduped payload and continue in the same generation instead of flashing an edit view');
+    assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) \{[\s\S]{0,360}await refreshOpenFileDiff\(path, \{item, state, silent: true, renderOnComplete: false\}\);[\s\S]{0,160}if \(panel\._cmGeneration !== generation\) return null/.test(appSource), '#43/Q4: unresolved item-scoped diffs await the deduped payload and continue in the same generation instead of flashing an edit view');
     const unresolvedDiffBranch = appSource.slice(appSource.indexOf('async function ensureCodeMirrorDiffPanel('), appSource.indexOf('if (!fileStateCanRenderDiffView(path, state))', appSource.indexOf('async function ensureCodeMirrorDiffPanel(')));
     assert.equal(unresolvedDiffBranch.includes("forceMode: 'edit'"), false, 'unresolved diff payloads must not bail to a temporary edit-mode CodeMirror view');
     assert.ok(/CodeMirror diff language parser failed; retrying plain diff editor/.test(appSource), 'diff CodeMirror build has the same parser-failure plain retry safety net as edit mode');
@@ -1674,9 +1819,9 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
     const refreshDiffBody = appSource.slice(refreshDiffStart, openFileEditorStart);
     const diffLoadingClearIndex = refreshDiffBody.indexOf('state.diffLoading = false;');
-    const diffPanelRenderIndex = refreshDiffBody.indexOf('renderFileEditorPanel(panel, item);');
+    const diffPanelRenderIndex = refreshDiffBody.indexOf('renderFileEditorPanel(panel, panelItem);');
     assert.ok(diffLoadingClearIndex >= 0 && diffPanelRenderIndex > diffLoadingClearIndex, '#43: diff-load completion clears diffLoading before repainting the panel, so the expanded-context toolbar button is not left disabled');
-    assert.ok(refreshDiffBody.includes("options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff'"), 'awaited diff builders can suppress the completion re-render that otherwise supersedes their generation');
+    assert.ok(refreshDiffBody.includes("options.renderOnComplete !== false && editorViewModeFor(path, panelItem) === 'diff'"), 'awaited diff builders can suppress the completion re-render that otherwise supersedes their generation');
     assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), true, '#43: an untracked/all-added Differ row reports a displayable diff');
     assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
     assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');

@@ -1468,6 +1468,7 @@ body.editor-theme-light {
 .modal pre,
 .drop-action-result pre,
 .file-editor-conflict-compare pre,
+.git-diff-commit-message,
 .js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1540,6 +1541,7 @@ body.editor-theme-light {
   color: var(--text);
 }
 :where(button),
+.diff-ref-static-value,
 .diff-ref-suggestion-popover,
 .yoagent-message,
 .conversation-message,
@@ -1778,6 +1780,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .terminal-drop-suggestion-label,
 .js-debug-system-kv dd,
 .backend-health-indicator-text,
+.git-diff-path,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;

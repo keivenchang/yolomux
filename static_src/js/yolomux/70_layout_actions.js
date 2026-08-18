@@ -158,7 +158,7 @@ function tabIsEvictableForCap(item, keepItem) {
   const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
   if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
-    const state = fileState.get(fileItemPath(item));
+    const state = fileEditorTabState(item);
     if (state && state.dirty) return false;
   }
   return true;

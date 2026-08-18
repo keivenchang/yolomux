@@ -6,8 +6,9 @@ function editorViewModeFor(path, item = null) {
   const modes = fileEditorViewModesForPath(path);
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
-  if (!editorPreviewModeAvailable(path)) return 'edit';
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview') return 'diff';
+  if (!editorPreviewModeAvailable(path, state)) return 'edit';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -15,10 +16,12 @@ function editorViewModeFor(path, item = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
   const previousMode = editorViewModeFor(path, item);
-  if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
-  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, fileState.get(path)))) {
+  if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, state))) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
@@ -32,10 +35,13 @@ function updateEditorModeControl(control, path, state, item = null) {
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
     const nextMode = button.dataset.editorMode;
-    button.hidden = state?.kind !== 'text' && nextMode !== 'preview';
+    button.hidden = (state?.kind !== 'text' && nextMode !== 'preview') || (state?.historical === true && nextMode === 'split');
+    button.disabled = state?.historical === true && nextMode === 'edit';
+    if (button.disabled) button.title = t('editor.historicalReadOnly');
     const label = editorModeLabel(nextMode);
+    const visibleLabel = button.disabled ? `${label} (${t('common.readOnly')})` : label;
     const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
-    syncPressedButton(button, active, {labelOn: label, labelOff: label});
+    syncPressedButton(button, active, {labelOn: visibleLabel, labelOff: visibleLabel});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
 }
@@ -209,8 +215,8 @@ function refreshOpenEditorThemePanels() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    if (!path || fileState.get(path)?.kind !== 'text') return;
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
+    if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
@@ -542,7 +548,8 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   }
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = fileEditorPreviewSelectionOffsets(pane);
-  const rendered = renderEditorPreviewPane(pane, path, text, options);
+  const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   refreshPreviewFind(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -663,7 +670,7 @@ async function openEditorFindShortcut(host = null) {
 
 async function focusFileEditorSearch(panel = null) {
   const opened = await openEditorFindShortcut(panel);
-  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(fileEditorPanelPath(panel)), panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
   return opened;
 }
 
@@ -674,10 +681,11 @@ function applyEditorWrapPreference() {
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
     updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
-      if (liveText !== null && state.content !== liveText) state.content = liveText;
+      if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
@@ -685,7 +693,7 @@ function applyEditorWrapPreference() {
       // Re-render each panel with its OWN layout item: passing the editor item flipped
       // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
       // for raw/preview panels or browsers without CodeMirror compartments.
-      renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+      renderFileEditorPanel(panel, item);
     }
   });
 }
@@ -702,8 +710,8 @@ async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
     if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
@@ -735,7 +743,7 @@ function setDiffExpandUnchanged(enabled) {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
     if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
       renderFileEditorPanel(panel, item);
@@ -752,7 +760,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (!isFileEditorItem(item)) return;
   fileEditorDiffExpandOverrides.set(item, enabled === true);
   const panel = panelNodes.get(item);
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);

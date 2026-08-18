@@ -433,6 +433,10 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
         result = filesystem.count_directory_files(path)
     elif operation == "diff":
         result = filesystem.diff_file(path, from_ref=args.get("from_ref"), to_ref=args.get("to_ref"))
+    elif operation == "git_history":
+        result = filesystem.git_history(path, limit=args.get("limit"), cursor=str(args.get("cursor") or "") or None)
+    elif operation == "git_commit":
+        result = filesystem.git_commit(path, commit=str(args.get("commit") or ""), head=str(args.get("head") or ""))
     elif operation == "blame":
         result = filesystem.blame_file(path, ref=args.get("ref"))
     elif operation == "write":

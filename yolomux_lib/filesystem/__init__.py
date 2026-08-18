@@ -439,6 +439,22 @@ def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
 
 
 @normalize_os_errors
+def git_history(
+    raw_path: str,
+    limit: int | str | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    _sync_package_overrides()
+    return git_ops.git_history(raw_path, limit=limit, cursor=cursor)
+
+
+@normalize_os_errors
+def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
+    _sync_package_overrides()
+    return git_ops.git_commit(raw_path, commit=commit, head=head)
+
+
+@normalize_os_errors
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     _sync_package_overrides()
     payload = git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)

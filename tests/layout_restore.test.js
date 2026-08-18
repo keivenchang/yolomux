@@ -34,7 +34,58 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+function layoutItemsAfterQueryRoundTrip(api, slots) {
+  return [...api.layoutTabStatesFromParam(new URLSearchParams(`tabs=${api.layoutTabsParamValue(slots)}`).get('tabs')).values()].flatMap(state => state.tabs);
+}
+
 async function runLayoutRestoreSuite() {
+  test('dynamic Git history tabs clean runtime state on close and restore from encoded URL items', () => {
+    const api = loadYolomux('', ['1']), item = api.gitDiffItemFor('/repo/src');
+    assert.equal(api.resolveLayoutItem(item), item, 'encoded gitdiff URL items register through the dynamic descriptor');
+    api.setGitDiffTabStateForTest(item, {path: '/repo/src', head: 'a'.repeat(40), commits: [{sha: 'a'.repeat(40)}]});
+    const opened = api.layoutWithItems(api.emptyLayoutSlots(), [item]);
+    assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, opened), [item], 'the real query decoder and per-tab decoder preserve the canonical encoded item exactly');
+    api.applyLayoutSlotsForTest(opened, {focusSession: item, prune: false});
+    assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [true, 'a'.repeat(40)], 'URL restoration registers the item and preserves its history state');
+    api.applyLayoutSlotsForTest(api.layoutWithoutItem(item), {prune: false});
+    assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)], [false, null], 'closing the last layout owner disposes the item and retained history state');
+    assert.equal(api.resolveLayoutItem(item), item, 'Back or URL restore can recreate a disposed encoded item');
+  });
+
+  test('historical Editor URL state reconstructs immutable tuple state without touching the working-tree file state', () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/src/app.js', fromRef = '1'.repeat(40), toRef = '2'.repeat(40);
+    const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
+    assert.equal(api.resolveLayoutItem(item), item);
+    assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, api.layoutWithItems(api.emptyLayoutSlots(), [item])), [item], 'historical Editor tuple IDs survive both URL decoding layers');
+    api.setOpenFileStateForTest(path, {kind: 'text', content: 'working', original: 'working', dirty: true});
+    const restored = api.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'diff', diffFromRef: fromRef, diffToRef: toRef, historicalComparisonKind: 'merge-first-parent'});
+    assert.deepStrictEqual(canonical(restored), {path, item, mode: 'diff'});
+    const historical = api.fileEditorStateForItemForTest(path, item);
+    assert.deepStrictEqual([historical.historical, historical.diffPinnedFromRef, historical.diffPinnedToRef, historical.historicalComparisonKind], [true, fromRef, toRef, 'merge-first-parent']);
+    assert.equal(api.openFileStateForTest(path).content, 'working', 'historical URL restoration cannot overwrite unsaved working-tree content');
+  });
+
+  test('layout URL state restores the frozen Git history identity and disclosure focus', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo/src');
+    const sha = 'a'.repeat(40), head = 'f'.repeat(40);
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo/src', head, snapshotCursor: 'opaque-zero', focusedSha: sha, loaded: true, loadAttempted: true});
+    state.expanded.add(sha);
+    state.detailCollapsedDirectories.set(sha, new Set(['/repo/src/lib']));
+    api.resolveLayoutItem(item);
+    api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [item]), {focusSession: item, prune: false});
+    const snapshot = api.layoutUrlStateSnapshotForTest();
+    assert.ok(snapshot.gitDiff, 'the shared layout state carries Git history tab identity');
+    const restored = loadYolomux('', ['1']);
+    restored.applyLayoutUrlStateSeedForTest(snapshot);
+    restored.resolveLayoutItem(item);
+    const restoredState = restored.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([restoredState.head, restoredState.snapshotCursor, restoredState.focusedSha], [head, 'opaque-zero', sha]);
+    assert.deepStrictEqual([...restoredState.expanded], [sha]);
+    assert.deepStrictEqual([...restoredState.detailCollapsedDirectories.get(sha)], ['/repo/src/lib']);
+  });
+
   test('server-projected agent auth availability preserves the client tri-state decision', () => {
     const cases = [
       {loggedIn: true, available: true, disabled: false, detail: ''},
@@ -1452,10 +1503,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.ndjson', 'text'), 'preview', 'NDJSON opens in table Preview by default');
-    assert.equal(api.previewPathIsPreviewable('/repo/app.py'), false, 'generic code/text renderer is not a distinct Preview affordance');
-    assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), false, 'plain text renderer is not a distinct Preview affordance');
+    assert.equal(api.previewPathIsPreviewable('/repo/app.py'), true, 'generic code uses the shared syntax-highlighted Preview mode');
+    assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), true, 'plain text uses the shared syntax-highlighted Preview mode');
     assert.equal(api.previewPathIsPreviewable('/repo/config.json'), true, 'structured JSON preview stays available because it differs from the editor');
-    assert.equal(api.previewRendererForPath('/repo/notes.txt').previewable, false, 'text preview availability is owned by the renderer registry flag');
+    assert.equal(api.previewRendererForPath('/repo/notes.txt').previewable, true, 'text Preview availability is owned by the renderer registry flag');
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
@@ -1771,8 +1822,8 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomux('', ['1']);
     assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
-    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
-    assert.equal(api.editorPreviewModeAvailable('/home/test/notes.txt'), false);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), true);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/notes.txt'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/config.json'), true);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
@@ -1850,7 +1901,7 @@ async function runLayoutRestoreSuite() {
     api.renderEditorPreviewPane(pdfPreview, pdfPath, '');
     assert.notEqual(pdfPreview.querySelector('.file-editor-pdf-preview'), pdfFrame, 'a changed PDF version replaces the retained iframe');
     api.setFileEditorViewMode('/home/test/app.py', 'split');
-    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
+    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'split', 'generic code shares Preview and Split through the current Editor renderer');
     api.setFileEditorViewMode('/home/test/README.md', 'split');
     assert.equal(api.editorViewModeFor('/home/test/README.md'), 'split');
     const changedPath = '/repo/app/README.md';

@@ -420,13 +420,16 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
         mtime: int | None = None
         mtime_ns: int | None = None
         preview_mime = ""
+        diff_capable = False
         if kind == "file":
             size = int(file_stat.st_size)
             mtime = int(file_stat.st_mtime)
             mtime_ns = int(file_stat.st_mtime_ns)
             with os.fdopen(os.dup(handle.descriptor), "rb") as fh:
-                preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
-        repo_root, _tracked, _history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
+                sample = fh.read(512)
+            preview_mime = _sniff_raw_mime(sample) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
+            diff_capable = size <= paths.MAX_READ_BYTES and not preview_mime and not paths._looks_binary(sample)
+        repo_root, tracked, history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
             handle,
             include_repo_info=True,
             operation=operation,
@@ -439,7 +442,10 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
             "mtime": mtime,
             "mtime_ns": mtime_ns,
             "preview_mime": preview_mime,
+            "diff_capable": diff_capable,
             "repo_root": repo_root,
+            "git_tracked": tracked,
+            "git_has_history": bool(history),
             "relative_path": relative_path,
             "repo": repo_info,
             **paths._physical_file_identity(path, resolved=handle.resolved, stat_result=file_stat),
@@ -467,7 +473,10 @@ def path_info(raw_path: str, *, operation: str = "path_info") -> dict[str, Any]:
             "mtime": None,
             "mtime_ns": None,
             "preview_mime": "",
+            "diff_capable": False,
             "repo_root": "",
+            "git_tracked": False,
+            "git_has_history": False,
             "relative_path": "",
             "repo": None,
         }

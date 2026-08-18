@@ -741,7 +741,7 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
-  const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
+  const missingFileClass = isEditor && fileEditorTabIsMissing(item) ? 'file-missing' : '';
   const tmuxTabClass = !isVirtual && !isEditor ? 'tmux-pane-tab-token' : '';
   tab.className = `pane-tab session-popover-host ${tmuxTabClass} ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
@@ -750,7 +750,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
   tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    bindFilePopoverActions(tab);
+    if (!isHistoricalFileEditorItem(item)) bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
@@ -789,7 +789,7 @@ function createPaneTab(side, item, displayContext = {}) {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
-  if (isEditor) {
+  if (isEditor && !isHistoricalFileEditorItem(item)) {
     tab.addEventListener('dblclick', event => {
       if (event.target.closest('[data-pane-tab-close]')) return;
       event.preventDefault();
@@ -810,7 +810,7 @@ function createPaneTab(side, item, displayContext = {}) {
 
 function paneTabAriaLabel(item) {
   if (isFileEditorItem(item)) {
-    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    const missing = fileEditorTabIsMissing(item) ? ` ${t('filetab.missingTitle')}` : '';
     return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
   }
   const type = tabTypeForItem(item);
@@ -827,6 +827,7 @@ function beginPaneTabRename(tab, session) {
 }
 
 function beginFileTabRename(tab, item) {
+  if (isHistoricalFileEditorItem(item)) return;
   const path = fileItemPath(item);
   if (!path) return;
   const entry = {kind: 'file', name: basenameOf(path)};
@@ -895,6 +896,16 @@ function ensureFileTabStateForItem(item) {
   const path = fileItemPath(item);
   if (!path) return null;
   if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    return ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
   let state = fileStateFor(path);
   if (!state || !state.kind) {
     state = ensureFileState(path, {
@@ -920,7 +931,7 @@ function refreshFileTabPopover(tab, item) {
   const popover = tab?.querySelector?.(':scope > .file-popover') || detached;
   if (!popover) return;
   const path = fileItemPath(item);
-  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  const rows = filePopoverRows(path, fileEditorTabState(item) || {});
   popover.innerHTML = `
     <div class="popover-head">
       <div>
@@ -1029,13 +1040,13 @@ function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
 
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
-  const owners = openFileOwnerSessionsForPath(path);
+  const state = fileEditorTabState(item) || {};
+  const owners = isHistoricalFileEditorItem(item) ? [] : openFileOwnerSessionsForPath(path);
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
-  const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
+  const missing = fileEditorTabIsMissing(item) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }

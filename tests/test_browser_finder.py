@@ -1,5 +1,7 @@
 import json
 import re
+from pathlib import Path
+from urllib.parse import quote
 
 from selenium.webdriver.common.by import By
 
@@ -759,6 +761,12 @@ def test_finder_keyboard_selection_drag_payload_and_readonly_context_are_real_pa
         """
     )
     disabled = {button["text"]: button["disabled"] for button in readonly["buttons"]}
+    assert [button["text"] for button in readonly["buttons"][:3]] == [
+        "Edit in new tab",
+        "Preview in new tab",
+        "Diff in new tab",
+    ], readonly
+    assert all(disabled[label] is True for label in ("Edit in new tab", "Preview in new tab", "Diff in new tab")), readonly
     assert disabled["Rename"] is True and disabled["Delete"] is True and disabled["Download"] is True, readonly
     assert readonly["errors"] == [] and readonly["rejections"] == [], readonly
 
@@ -854,40 +862,813 @@ def test_finder_context_index_action_and_nonimage_guard_use_real_menu_state(brow
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
-def test_finder_context_open_new_tab_uses_the_selected_file(browser, tmp_path):
+def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_path):
+    path = "/home/test/note.md"
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
         "?sessions=files,1&layout=left&tabs=left:files",
         settings={"file_explorer": {"root_mode": "fixed"}},
-        fs_entries={"/home/test": [{"name": "note.txt", "kind": "file"}]},
+        fs_entries={"/home/test": [{"name": "note.md", "kind": "file"}]},
     )
     WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.md\"]')"
+        )
     )
     metrics = browser.execute_async_script(
         """
-        const done = arguments[0];
-        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/note.txt"]');
-        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
-        const deadline = performance.now() + 2000;
-        const inspect = () => {
-          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === 'Open in new tab');
-          if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!button) return done({error: 'open action missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-          button.click();
-          const waitForOpen = () => {
-            if (fileState.has('/home/test/note.txt')) return done({opened: true, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-            if (performance.now() >= deadline) return done({error: 'selected file did not open', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
-            requestAnimationFrame(waitForOpen);
-          };
-          requestAnimationFrame(waitForOpen);
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const requests = [];
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          requests.push(url.pathname + url.search);
+          if (url.pathname === '/api/fs/batch') {
+            const body = JSON.parse(options.body || '{}');
+            return jsonResponse({responses: (body.requests || []).map((request, index) => ({
+              id: request.id ?? index,
+              ok: true,
+              status: 200,
+              payload: {
+                path: request.path,
+                name: request.path.split('/').filter(Boolean).pop() || '/',
+                kind: request.path === '/home/test' ? 'dir' : 'file',
+                realpath: request.path,
+                repo_root: '/home/test',
+                relative_path: request.path === path ? 'note.md' : '',
+              },
+            }))});
+          }
+          if (url.pathname === '/api/fs/read') return jsonResponse({
+            path,
+            content: '# original\\n',
+            size: 11,
+            mtime: 1,
+            mtime_ns: 1,
+            realpath: path,
+            file_id: 'dev:1:ino:2',
+            git_root: '/home/test',
+            git_tracked: true,
+            git_history: [{ref: 'HEAD'}],
+            git_has_history: true,
+          });
+          if (url.pathname === '/api/fs/diff') return jsonResponse({
+            repo: '/home/test',
+            relative_path: 'note.md',
+            from_ref: url.searchParams.get('from'),
+            to_ref: url.searchParams.get('to'),
+            diff: '@@ -1 +1 @@\\n-# original\\n+# dirty\\n',
+            original: '# original\\n',
+            working: '# dirty\\n',
+          });
+          return originalFetch(input, options);
         };
-        requestAnimationFrame(inspect);
+        const openMenu = async () => {
+          closeFileContextMenu();
+          const row = document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${path}"]`);
+          row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+          return waitFor(() => {
+            const buttons = Array.from(document.querySelectorAll('.file-context-menu button'));
+            return buttons.length ? buttons : null;
+          });
+        };
+        const choose = async label => {
+          const buttons = await openMenu();
+          const button = buttons.find(node => node.textContent.trim() === label);
+          if (!button) throw new Error(`${label} action missing: ${buttons.map(node => node.textContent.trim()).join(', ')}`);
+          if (button.disabled) throw new Error(`${label} action unexpectedly disabled: ${button.title}`);
+          button.click();
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          const initialButtons = await openMenu();
+          const initialOrder = initialButtons.slice(0, 3).map(button => button.textContent.trim());
+          closeFileContextMenu();
+
+          await choose('Edit in new tab');
+          const item = fileEditorItemFor(path);
+          const panel = await waitFor(() => {
+            const candidate = panelNodes.get(item);
+            return fileState.has(path) && editorViewModeFor(path, item) === 'edit' && candidate?._cmView ? candidate : null;
+          });
+          panel._cmView.dispatch({
+            changes: {from: 0, to: panel._cmView.state.doc.length, insert: '# dirty and unsaved\\n'},
+          });
+          await waitFor(() => fileStateFor(path)?.dirty === true);
+
+          await choose('Preview in new tab');
+          await waitFor(() => editorViewModeFor(path, item) === 'preview');
+          const afterPreview = {
+            item: activeItemForSide(slotForItem(item)),
+            content: fileStateFor(path)?.content,
+            dirty: fileStateFor(path)?.dirty === true,
+            mode: editorViewModeFor(path, item),
+          };
+
+          Object.assign(fileStateFor(path), {
+            diffLoaded: true,
+            diffUnavailable: false,
+            diff: 'stale arbitrary refs',
+            diffFromRef: 'old-from',
+            diffToRef: 'old-to',
+            diffPinnedFromRef: 'old-from',
+            diffPinnedToRef: 'old-to',
+          });
+          await choose('Diff in new tab');
+          await waitFor(() => editorViewModeFor(path, item) === 'diff' && fileStateFor(path)?.diffLoaded === true);
+          const finalState = fileStateFor(path);
+          done({
+            initialOrder,
+            expectedItem: item,
+            afterPreview,
+            openItems: openFileEditorItems(),
+            panelItems: filePanelItemsForPath(path),
+            content: finalState?.content,
+            dirty: finalState?.dirty === true,
+            mode: editorViewModeFor(path, item),
+            diffFrom: finalState?.diffFromRef,
+            diffTo: finalState?.diffToRef,
+            diffRequests: requests.filter(request => request.startsWith('/api/fs/diff')),
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {
+          window.fetch = originalFetch;
+        });
+        """,
+        path,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["initialOrder"] == ["Edit in new tab", "Preview in new tab", "Diff in new tab"], metrics
+    assert metrics["expectedItem"] == f"file:{path}", metrics
+    assert metrics["afterPreview"] == {
+        "item": f"file:{path}",
+        "content": "# dirty and unsaved\n",
+        "dirty": True,
+        "mode": "preview",
+    }, metrics
+    assert metrics["openItems"] == [f"file:{path}"], metrics
+    assert metrics["panelItems"] == [f"file:{path}"], metrics
+    assert metrics["content"] == "# dirty and unsaved\n" and metrics["dirty"] is True, metrics
+    assert metrics["mode"] == "diff" and metrics["diffFrom"] == "HEAD" and metrics["diffTo"] == "current", metrics
+    assert metrics["diffRequests"] == [f"/api/fs/diff?path=%2Fhome%2Ftest%2Fnote.md&from=HEAD&to=current"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={
+            "/home/test": [
+                {"name": "repo", "kind": "dir"},
+                {"name": "plain", "kind": "dir"},
+            ],
+            "/home/test/repo": [
+                {"name": "binary.dat", "kind": "file", "size": 32},
+                {"name": "large.txt", "kind": "file", "size": 20971521},
+            ],
+            "/home/test/plain": [],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo"]')
+              && document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/plain"]');
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/batch') {
+            const body = JSON.parse(options.body || '{}');
+            return jsonResponse({responses: (body.requests || []).map((request, index) => {
+              const repoBacked = request.path === '/home/test/repo' || request.path.startsWith('/home/test/repo/');
+              const binary = request.path.endsWith('/binary.dat');
+              const large = request.path.endsWith('/large.txt');
+              return {
+                id: request.id ?? index,
+                ok: true,
+                status: 200,
+                payload: {
+                  path: request.path,
+                  name: request.path.split('/').filter(Boolean).pop() || '/',
+                  kind: binary || large ? 'file' : 'dir',
+                  realpath: request.path,
+                  ...(binary ? {size: 32, preview_mime: 'application/octet-stream', diff_capable: false} : {}),
+                  ...(large ? {size: 20971521, preview_mime: 'text/plain', diff_capable: false} : {}),
+                  ...(repoBacked ? {repo_root: '/home/test/repo'} : {}),
+                },
+              };
+            })});
+          }
+          return originalFetch(input, options);
+        };
+        const menuButtons = async path => {
+          closeFileContextMenu();
+          const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + path + '"]');
+          row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+          const buttons = await waitFor(() => {
+            const values = Array.from(document.querySelectorAll('.file-context-menu button'));
+            return values.length ? values : null;
+          });
+          return buttons;
+        };
+        const menuLabels = async path => {
+          const buttons = await menuButtons(path);
+          return buttons.map(button => button.textContent.trim());
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          const eligible = await menuLabels('/home/test/repo');
+          const plain = await menuLabels('/home/test/plain');
+          document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo"]').click();
+          await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo/binary.dat"]'));
+          const binary = (await menuButtons('/home/test/repo/binary.dat')).map(button => ({
+            label: button.textContent.trim(), disabled: button.disabled, title: button.title,
+          }));
+          const large = (await menuButtons('/home/test/repo/large.txt')).map(button => ({
+            label: button.textContent.trim(), disabled: button.disabled, title: button.title,
+          }));
+
+          selectFileTreePath('/home/test/repo');
+          selectFileTreePath('/home/test/plain', {clear: false});
+          const multiple = await menuLabels('/home/test/repo');
+
+          selectFileTreePath('/home/test/repo');
+          closeFileContextMenu();
+          const touchRow = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo"]');
+          touchRow.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 41,
+            pointerType: 'touch',
+            isPrimary: true,
+            button: 0,
+            clientX: 36,
+            clientY: 36,
+          }));
+          const touchButtons = await waitFor(() => {
+            const values = Array.from(document.querySelectorAll('.file-context-menu button'));
+            return values.length ? values : null;
+          });
+          done({
+            eligible,
+            plain,
+            binary,
+            large,
+            multiple,
+            touch: touchButtons.map(button => button.textContent.trim()),
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {
+          window.fetch = originalFetch;
+        });
         """
     )
     assert not metrics.get("error"), metrics
-    assert metrics["opened"] is True and metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    assert metrics["eligible"][0] == "Diff repo", metrics
+    assert all(label not in metrics["eligible"] for label in ["Edit in new tab", "Preview in new tab", "Diff in new tab"]), metrics
+    assert "Diff repo" not in metrics["plain"], metrics
+    assert "Diff repo" not in metrics["multiple"], metrics
+    binary_diff = next(button for button in metrics["binary"] if button["label"] == "Diff in new tab")
+    large_diff = next(button for button in metrics["large"] if button["label"] == "Diff in new tab")
+    assert binary_diff["disabled"] is True and "binary" in binary_diff["title"].lower(), metrics
+    assert large_diff["disabled"] is True and "large" in large_diff["title"].lower(), metrics
+    assert metrics["touch"][0] == "Diff repo", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_path):
+    repo = "/home/test/repo"
+    nested = f"{repo}/src"
+    sha_a = "a" * 40
+    parent_a = "b" * 40
+    second_parent = "c" * 40
+    sha_b = "d" * 40
+    parent_b = "e" * 40
+    historical_path = f"{nested}/new.js"
+    fr_catalog = json.loads((Path(__file__).resolve().parents[1] / "static/locales/fr.json").read_text(encoding="utf-8"))
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={
+            "/home/test": [{"name": "repo", "kind": "dir"}],
+            repo: [{"name": "src", "kind": "dir"}, {"name": "README.md", "kind": "file"}],
+            nested: [{"name": "new.js", "kind": "file"}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/repo\"]')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const repo = arguments[0];
+        const nested = arguments[1];
+        const shaA = arguments[2];
+        const parentA = arguments[3];
+        const secondParent = arguments[4];
+        const shaB = arguments[5];
+        const parentB = arguments[6];
+        const historicalPath = arguments[7];
+        const frCatalog = arguments[8];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const requests = [];
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          requests.push(url.pathname + url.search);
+          if (url.pathname === '/api/fs/batch') {
+            const body = JSON.parse(options.body || '{}');
+            return jsonResponse({responses: (body.requests || []).map((request, index) => ({
+              id: request.id ?? index,
+              ok: true,
+              status: 200,
+              payload: {
+                path: request.path,
+                name: request.path.split('/').filter(Boolean).pop() || '/',
+                kind: request.path === historicalPath ? 'file' : 'dir',
+                realpath: request.path,
+                ...(request.path === repo || request.path.startsWith(repo + '/') ? {repo_root: repo} : {}),
+              },
+            }))});
+          }
+          if (url.pathname === '/api/fs/git-history') {
+            const path = url.searchParams.get('path');
+            if (url.searchParams.get('cursor') === 'page-2') return jsonResponse({
+              path,
+              repo,
+              relative_path: path === repo ? '' : 'src',
+              head: shaA,
+              snapshot_cursor: 'snapshot-zero',
+              next_cursor: '',
+              truncated: false,
+              commits: [{
+                sha: 'f'.repeat(40),
+                short: 'f'.repeat(9),
+                parents: [shaB],
+                subject: 'Oldest loaded page',
+                author: 'Older Author',
+                authored_at: 1786758840,
+                files: 1,
+                added: 1,
+                removed: 0,
+                binary_files: 0,
+              }],
+            });
+            return jsonResponse({
+              path,
+              repo,
+              relative_path: path === repo ? '' : 'src',
+              head: shaA,
+              snapshot_cursor: 'snapshot-zero',
+              next_cursor: 'page-2',
+              truncated: false,
+              commits: [
+                {
+                  sha: shaA,
+                  short: shaA.slice(0, 9),
+                  parents: [parentA, secondParent],
+                  subject: 'Merge exact history',
+                  author: 'Keiven Chang',
+                  authored_at: 1786931640,
+                  files: 3,
+                  added: 5,
+                  removed: 6,
+                  binary_files: 1,
+                },
+                {
+                  sha: shaB,
+                  short: shaB.slice(0, 9),
+                  parents: [parentB],
+                  subject: 'Older ordinary change',
+                  author: 'Other Author',
+                  authored_at: 1786845240,
+                  files: 1,
+                  added: 2,
+                  removed: 1,
+                  binary_files: 0,
+                },
+              ],
+            });
+          }
+          if (url.pathname === '/api/fs/git-commit') {
+            const sha = url.searchParams.get('commit');
+            if (sha === shaA) return jsonResponse({
+              repo,
+              scope_path: '',
+              sha: shaA,
+              parents: [parentA, secondParent],
+              from_ref: parentA,
+              to_ref: shaA,
+              subject: 'Merge exact history',
+              message: 'Merge exact history\\n\\nBody text',
+              authored_at: 1786931640,
+              message_truncated: false,
+              files_truncated: false,
+              truncated: false,
+              files: [
+                {status: 'R', path: 'src/new.js', old_path: 'src/old.js', added: 5, removed: 2, binary: false, counts_available: true},
+                {status: 'M', path: 'assets/data.bin', old_path: '', added: null, removed: null, binary: true, counts_available: true},
+                {status: 'D', path: 'gone.txt', old_path: '', added: 0, removed: 4, binary: false, counts_available: true},
+              ],
+            });
+            return jsonResponse({
+              repo,
+              scope_path: '',
+              sha: shaB,
+              parents: [parentB],
+              from_ref: parentB,
+              to_ref: shaB,
+              subject: 'Older ordinary change',
+              message: 'Older ordinary change\\n\\nSecond body',
+              authored_at: 1786845240,
+              message_truncated: false,
+              files_truncated: false,
+              truncated: false,
+              files: [
+                {status: 'M', path: 'README.md', old_path: '', added: 2, removed: 1, binary: false, counts_available: true},
+              ],
+            });
+          }
+          if (url.pathname === '/api/fs/diff') return jsonResponse({
+            repo,
+            relative_path: 'src/new.js',
+            from_ref: url.searchParams.get('from'),
+            to_ref: url.searchParams.get('to'),
+            diff: '@@ -1 +1 @@\\n-export const value = 1;\\n+export const value = 2;\\n',
+            original: 'export const value = 1;\\n',
+            working: 'export const value = 2;\\n',
+          });
+          if (url.pathname === '/static/locales/fr.json') return jsonResponse(frCatalog);
+          return originalFetch(input, options);
+        };
+        const chooseFinderAction = async (path, label) => {
+          closeFileContextMenu();
+          const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + path + '"]');
+          if (!row) throw new Error('Finder row missing: ' + path);
+          row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+          const button = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(
+            candidate => candidate.textContent.trim() === label,
+          ));
+          if (button.disabled) throw new Error(label + ' disabled: ' + button.title);
+          button.click();
+        };
+        const fieldVisibility = panel => {
+          const shown = selector => getComputedStyle(panel.querySelector(selector)).display !== 'none';
+          return {
+            sha: shown('.git-diff-commit-sha'),
+            date: shown('.git-diff-commit-date'),
+            changes: shown('.git-diff-commit-changes'),
+            author: shown('.git-diff-commit-author'),
+            description: shown('.git-diff-commit-description'),
+          };
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + repo + '"]').click();
+          await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + nested + '"]'));
+
+          await chooseFinderAction(repo, 'Diff repo');
+          const rootItem = gitDiffItemFor(repo);
+          const rootPanel = await waitFor(() => {
+            const panel = panelNodes.get(rootItem);
+            return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2 ? panel : null;
+          });
+          const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
+          const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
+          const fieldOrder = Array.from(rootRows[0].children).map(node => node.className.split(' ')[0]);
+          rootRows[0].click();
+          rootRows[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
+          await waitFor(() => document.activeElement === rootRows[1]);
+          const commitRoving = {
+            focused: document.activeElement?.dataset?.gitDiffCommit || '',
+            tabStops: rootRows.filter(row => row.tabIndex === 0).map(row => row.dataset.gitDiffCommit),
+          };
+          rootRows[1].dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true, cancelable: true}));
+          await waitFor(() => (
+            rootPanel.querySelectorAll('.git-diff-commit-detail').length === 2
+            && rootPanel.querySelectorAll('.git-diff-commit-detail .git-diff-file-tree').length === 2
+            && Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).every(row => row.getAttribute('aria-expanded') === 'true')
+          ));
+          const details = Array.from(rootPanel.querySelectorAll('.git-diff-commit-detail'));
+          const firstDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaA);
+          const secondDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaB);
+          const focusAfterAsync = document.activeElement?.dataset?.gitDiffCommit || '';
+          const firstFileTree = firstDetail.querySelector('.git-diff-file-tree');
+          const firstTreeRows = Array.from(firstFileTree.querySelectorAll('.file-tree-row[data-path]'));
+          firstTreeRows[0].focus();
+          firstTreeRows[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'End', bubbles: true, cancelable: true}));
+          await waitFor(() => document.activeElement === firstTreeRows[firstTreeRows.length - 1]);
+          const fileRoving = {
+            focused: document.activeElement?.dataset?.path || '',
+            expected: firstTreeRows[firstTreeRows.length - 1].dataset.path,
+            tabStops: firstTreeRows.filter(row => row.tabIndex === 0).map(row => row.dataset.path),
+          };
+          const changedRows = Object.fromEntries(Array.from(firstDetail.querySelectorAll('.file-tree-row[data-git-diff-commit-path]')).map(row => [
+              row.dataset.gitDiffCommitPath,
+              {
+                text: row.textContent.replace(/\\s+/g, ' ').trim(),
+                name: row.querySelector('.file-tree-name')?.textContent || '',
+                status: row.querySelector('.file-tree-git-status')?.textContent || '',
+                diff: row.querySelector('.file-tree-diff')?.textContent.replace(/\\s+/g, ' ').trim() || '',
+            },
+          ]));
+          const renameRow = firstDetail.querySelector('.file-tree-row[data-git-diff-commit-path="' + historicalPath + '"]');
+          if (!renameRow) throw new Error('renamed historical file row missing: ' + JSON.stringify({
+            expected: historicalPath,
+            rows: Array.from(firstDetail.querySelectorAll('.file-tree-row')).map(row => ({
+              path: row.dataset.gitDiffCommitPath || '',
+              kind: row.dataset.kind || '',
+              text: row.textContent.replace(/\\s+/g, ' ').trim(),
+            })),
+          }));
+          setFileState(historicalPath, {
+            kind: 'text',
+            original: 'working tree\\n',
+            content: 'working tree dirty\\n',
+            dirty: true,
+            externalMissing: true,
+          });
+          const workingItem = fileEditorItemFor(historicalPath);
+          addFileEditorTabItem(historicalPath, workingItem);
+          applyLayoutSlots(layoutWithItems(layoutSlots, [workingItem], slotForItem(rootItem)), {focusSession: rootItem, prune: false});
+          rootPanel.querySelector('.file-tree-row[data-git-diff-commit-path="' + historicalPath + '"]').click();
+
+          const historicalItem = historicalFileEditorItemFor(historicalPath, parentA, shaA);
+          const historicalPanel = await waitFor(() => {
+            const panel = panelNodes.get(historicalItem);
+            const state = fileEditorStateForItem(historicalPath, historicalItem);
+            return panel
+              && state?.diffLoaded === true
+              && state.content === 'export const value = 2;\\n'
+              && editorViewModeFor(historicalPath, historicalItem) === 'diff'
+              ? panel
+              : null;
+          });
+          const historicalState = fileEditorStateForItem(historicalPath, historicalItem);
+          const editButton = historicalPanel.querySelector('[data-editor-mode="edit"]');
+          const previewButton = historicalPanel.querySelector('[data-editor-mode="preview"]');
+          const diffButton = historicalPanel.querySelector('.file-editor-diff-panel');
+          const historicalTab = document.querySelector('[data-pane-tab="' + CSS.escape(historicalItem) + '"]');
+          const historicalBeforePreview = {
+            tabType: tabTypeForItem(historicalItem)?.key,
+            mode: editorViewModeFor(historicalPath, historicalItem),
+            comparison: historicalState.historicalComparisonKind,
+            content: historicalState.content,
+            from: historicalState.diffFromRef,
+            to: historicalState.diffToRef,
+            editDisabled: editButton?.disabled === true,
+            diffSelected: diffButton?.getAttribute('aria-pressed') === 'true',
+            dirtyChrome: historicalTab?.querySelector('.file-tab-dirty') != null,
+            missingChrome: historicalTab?.classList.contains('file-missing') === true,
+            missingAria: historicalTab?.getAttribute('aria-label')?.includes('Missing') === true,
+          };
+          previewButton.click();
+          await waitFor(() => editorViewModeFor(historicalPath, historicalItem) === 'preview');
+          editButton.click();
+          const historicalAfterPreview = {
+            mode: editorViewModeFor(historicalPath, historicalItem),
+            content: fileEditorStateForItem(historicalPath, historicalItem)?.content,
+            dirty: fileEditorStateForItem(historicalPath, historicalItem)?.dirty === true,
+            previewSelected: previewButton.getAttribute('aria-pressed') === 'true',
+          };
+
+          await editorNavBack();
+          await waitFor(() => activeItemForSide(slotForItem(rootItem)) === rootItem);
+
+          let renamePromptCalls = 0;
+          const originalPrompt = window.prompt;
+          window.prompt = () => {
+            renamePromptCalls += 1;
+            return 'renamed.js';
+          };
+          historicalTab.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true}));
+          window.prompt = originalPrompt;
+          await Promise.resolve(closeFileTab(historicalPath, {item: historicalItem}));
+          const historicalAfterClose = {
+            renamePromptCalls,
+            stillInLayout: itemInLayout(historicalItem),
+            historicalState: fileEditorStateForItem(historicalPath, historicalItem) != null,
+            workingContent: fileStateFor(historicalPath)?.content,
+            workingDirty: fileStateFor(historicalPath)?.dirty === true,
+          };
+
+          rootPanel.querySelector('.git-diff-load-older').click();
+          await waitFor(() => rootPanel.querySelectorAll('.git-diff-commit-row').length === 3);
+          const loadedOrder = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).map(row => row.dataset.gitDiffCommit);
+
+          rootPanel.style.width = '900px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const wideRetention = fieldVisibility(rootPanel);
+          rootPanel.style.width = '700px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const mediumRetention = fieldVisibility(rootPanel);
+          rootPanel.style.width = '500px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const narrowRetention = fieldVisibility(rootPanel);
+          rootPanel.style.width = '';
+
+          const darkPaint = getComputedStyle(rootPanel).backgroundColor;
+          globalThemeMode = 'light';
+          applyGlobalThemeMode({updateEditor: true});
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const lightPaint = getComputedStyle(rootPanel).backgroundColor;
+          const lightClass = document.body.classList.contains('theme-light');
+          globalThemeMode = 'dark';
+          applyGlobalThemeMode({updateEditor: true});
+
+          await applyLocale('fr');
+          const french = {
+            heading: rootPanel.querySelector('.git-diff-heading')?.textContent || '',
+            meta: rootPanel.querySelector('.git-diff-meta')?.textContent || '',
+          };
+          await applyLocale('en');
+
+          const frozenSnapshot = layoutUrlStateSnapshot();
+          cleanupGitDiffTab(rootItem);
+          applyLayoutUrlStateSeed(frozenSnapshot);
+          resolveLayoutItem(rootItem);
+          renderGitDiffPanel(rootItem);
+          await waitFor(() => {
+            const state = gitDiffTabState.get(rootItem);
+            return state?.loaded === true && state.details.size === 2;
+          });
+          const restoredRootState = gitDiffTabState.get(rootItem);
+          const restoredSnapshot = {
+            head: restoredRootState.head,
+            snapshotCursor: restoredRootState.snapshotCursor,
+            focusedSha: restoredRootState.focusedSha,
+            expanded: Array.from(restoredRootState.expanded),
+            tabStop: rootPanel.querySelector('.git-diff-commit-row[tabindex="0"]')?.dataset?.gitDiffCommit || '',
+          };
+
+          await selectSession(fileExplorerItemId, {userInitiated: true});
+          const finderRepoRow = await waitFor(() => document.querySelector(
+            '#panel-__finder__ .file-tree-row[data-path="' + repo + '"]',
+          ));
+          if (finderRepoRow.getAttribute('aria-expanded') !== 'true') finderRepoRow.click();
+          await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + nested + '"]'));
+          await chooseFinderAction(nested, 'Diff repo');
+          const nestedItem = gitDiffItemFor(nested);
+          await waitFor(() => {
+            const panel = panelNodes.get(nestedItem);
+            return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2;
+          });
+          await chooseFinderAction(nested, 'Diff repo');
+          await waitFor(() => activeItemForSide(slotForItem(nestedItem)) === nestedItem);
+          const tabs = paneTabs(slotForItem(nestedItem));
+          done({
+            rootItem,
+            nestedItem,
+            commitOrder,
+            loadedOrder,
+            fieldOrder,
+            commitRoving,
+            focusAfterAsync,
+            fileRoving,
+            expanded: Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).map(row => row.getAttribute('aria-expanded')),
+            messages: [firstDetail, secondDetail].map(detail => detail.querySelector('.git-diff-commit-message')?.textContent || ''),
+            refs: firstDetail.querySelector('.git-diff-commit-refs')?.textContent || '',
+            detailRoles: details.map(detail => detail.getAttribute('role')),
+            treeRoles: details.map(detail => detail.querySelector('.git-diff-file-tree')?.getAttribute('role')),
+            changedRows,
+            historicalItem,
+            historicalBeforePreview,
+            historicalAfterPreview,
+            historicalAfterClose,
+            restoredSnapshot,
+            backItem: rootItem,
+            wideRetention,
+            mediumRetention,
+            narrowRetention,
+            darkPaint,
+            lightPaint,
+            lightClass,
+            french,
+            tabs,
+            historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')),
+            detailRequests: requests.filter(request => request.startsWith('/api/fs/git-commit')),
+            diffRequests: requests.filter(request => request.startsWith('/api/fs/diff')),
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {
+          window.fetch = originalFetch;
+        });
+        """,
+        repo,
+        nested,
+        sha_a,
+        parent_a,
+        second_parent,
+        sha_b,
+        parent_b,
+        historical_path,
+        fr_catalog,
+    )
+    assert not metrics.get("error"), metrics
+    root_item = f"gitdiff:{quote(repo, safe='')}"
+    nested_item = f"gitdiff:{quote(nested, safe='')}"
+    historical_item = "filehistory:" + quote(
+        json.dumps([historical_path, parent_a, sha_a], separators=(",", ":")),
+        safe="-_.!~*'()",
+    )
+    assert metrics["rootItem"] == root_item and metrics["nestedItem"] == nested_item, metrics
+    assert metrics["commitOrder"] == [sha_a, sha_b], metrics
+    assert metrics["loadedOrder"] == [sha_a, sha_b, "f" * 40], metrics
+    assert metrics["fieldOrder"] == [
+        "git-diff-commit-caret",
+        "git-diff-commit-sha",
+        "git-diff-commit-date",
+        "git-diff-commit-changes",
+        "git-diff-commit-author",
+        "git-diff-commit-description",
+    ], metrics
+    assert metrics["commitRoving"] == {"focused": sha_b, "tabStops": [sha_b]}, metrics
+    assert metrics["focusAfterAsync"] == sha_b, metrics
+    assert metrics["fileRoving"]["focused"] == metrics["fileRoving"]["expected"], metrics
+    assert metrics["fileRoving"]["tabStops"] == [metrics["fileRoving"]["expected"]], metrics
+    assert metrics["expanded"] == ["true", "true"], metrics
+    assert metrics["messages"] == ["Merge exact history\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
+    assert "FROM bbbbbbbbb" in metrics["refs"] and "TO aaaaaaaaa" in metrics["refs"] and "first parent" in metrics["refs"], metrics
+    assert metrics["detailRoles"] == ["group", "group"] and metrics["treeRoles"] == ["tree", "tree"], metrics
+    assert metrics["changedRows"][historical_path]["name"] == "src/old.js → src/new.js", metrics
+    assert metrics["changedRows"][historical_path]["status"] == "R" and metrics["changedRows"][historical_path]["diff"] == "+5 -2", metrics
+    assert metrics["changedRows"][f"{repo}/assets/data.bin"]["diff"] == "binary", metrics
+    assert metrics["changedRows"][f"{repo}/gone.txt"]["name"] == "gone.txt", metrics
+    assert metrics["changedRows"][f"{repo}/gone.txt"]["status"] == "D" and metrics["changedRows"][f"{repo}/gone.txt"]["diff"] == "-4", metrics
+    assert metrics["historicalItem"] == historical_item, metrics
+    assert metrics["historicalBeforePreview"] == {
+        "tabType": "file-editor",
+        "mode": "diff",
+        "comparison": "merge-first-parent",
+        "content": "export const value = 2;\n",
+        "from": parent_a,
+        "to": sha_a,
+        "editDisabled": True,
+        "diffSelected": True,
+        "dirtyChrome": False,
+        "missingChrome": False,
+        "missingAria": False,
+    }, metrics
+    assert metrics["historicalAfterPreview"] == {
+        "mode": "preview",
+        "content": "export const value = 2;\n",
+        "dirty": False,
+        "previewSelected": True,
+    }, metrics
+    assert metrics["historicalAfterClose"] == {
+        "renamePromptCalls": 0,
+        "stillInLayout": False,
+        "historicalState": False,
+        "workingContent": "working tree dirty\n",
+        "workingDirty": True,
+    }, metrics
+    assert metrics["restoredSnapshot"] == {
+        "head": sha_a,
+        "snapshotCursor": "snapshot-zero",
+        "focusedSha": sha_b,
+        "expanded": [sha_a, sha_b],
+        "tabStop": sha_b,
+    }, metrics
+    assert metrics["wideRetention"] == {"sha": True, "date": True, "changes": True, "author": False, "description": True}, metrics
+    assert metrics["mediumRetention"] == {"sha": True, "date": False, "changes": True, "author": False, "description": True}, metrics
+    assert metrics["narrowRetention"] == {"sha": True, "date": False, "changes": False, "author": False, "description": True}, metrics
+    assert metrics["darkPaint"] != metrics["lightPaint"] and metrics["lightClass"] is True, metrics
+    assert metrics["french"]["heading"] == "Comparer le dépôt" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
+    assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
+    assert metrics["historyRequests"] == [
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=50",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=50&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=50&cursor=snapshot-zero",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=50",
+    ], metrics
+    assert len(metrics["detailRequests"]) == 4, metrics
+    assert metrics["diffRequests"] == [
+        f"/api/fs/diff?path=%2Fhome%2Ftest%2Frepo%2Fsrc%2Fnew.js&from={parent_a}&to={sha_a}"
+    ], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
 def test_finder_context_copy_image_fetches_bytes_and_writes_image_clipboard(browser, tmp_path):

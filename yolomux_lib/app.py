@@ -1845,8 +1845,13 @@ def filesystem_batch_submission(
 
 
 FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
-    "list", "read", "info", "search", "index_status", "count", "diff", "blame",
+    "list", "read", "info", "search", "index_status", "count", "diff", "git_history",
+    "git_commit", "blame",
 })
+
+# Ref-only changes can precede watchd's periodic reconciliation, so separate requests for these
+# operations cannot share stored or in-flight work; only one request's transport retry reuses its key.
+FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 
 # Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
 # result right now (an editor open, a file probe, an index badge).  These are the only filesystem
@@ -14629,13 +14634,14 @@ class TmuxWebtermApp:
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
         generation = self.filesystem_operation_product_generation()
         uncoalesced_reason = ""
-        # A watchd generation is authoritative: its revision advances on any observed change, so a
-        # completed product carrying that generation is safe to reuse.  A stat identity is not --
+        # A watchd generation is authoritative for observed filesystem changes, but Git refs can
+        # move before periodic reconciliation. Git snapshot reads therefore receive unique keys and
+        # bypass stored and in-flight products. A stat identity is also not authoritative --
         # `st_mtime_ns` is only as fine as the filesystem's timestamp tick, so two writes inside one
         # tick that keep the same size produce the same key for different bytes.  Such a submission
         # may still join in-flight work (which has produced nothing yet and so cannot be stale), but
         # it must never accept an already-stored product.
-        fresh_only = False
+        fresh_only = operation in FILESYSTEM_FRESH_ONLY_OPERATIONS
         if not generation and priority == "point":
             # watchd cannot invalidate retained reads right now, and a random key would make every
             # concurrent open of the same file its own job in a lane bounded at two.  The file's own
@@ -14650,6 +14656,11 @@ class TmuxWebtermApp:
                 scope=scope,
                 generation=generation,
             )
+            if operation in FILESYSTEM_FRESH_ONLY_OPERATIONS:
+                # A ref can move while a prior Git read is queued or running but before watchd
+                # reconciles it. A unique product key makes Refresh execute and pin HEAD again.
+                product_key = f"filesystem-operation:{uuid.uuid4().hex}"
+                uncoalesced_reason = "volatile_git_snapshot"
         else:
             job_payload = filesystem_operation_descriptor(operation, path, operation_args)
             product_key = f"filesystem-operation:{uuid.uuid4().hex}"

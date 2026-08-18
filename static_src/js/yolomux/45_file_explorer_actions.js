@@ -122,6 +122,59 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
+function finderPathActionDisabledReason(primaryInfo) {
+  if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
+  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
+  return '';
+}
+
+function finderOpenInNewTabActionsForContext(context = {}) {
+  const fullPath = String(context.fullPath || '');
+  const entry = context.entry || {};
+  const selectedPaths = Array.isArray(context.selectedPaths) ? context.selectedPaths : [];
+  const primaryInfo = context.primaryInfo;
+  const menuState = context.menuState || {};
+  if (selectedPaths.length !== 1) return [];
+  if (entry.kind === 'dir') {
+    if (primaryInfo && !primaryInfo.repo_root) return [];
+    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    const disabled = Boolean(disabledReason);
+    return [{
+      label: t('contextmenu.diffRepo'),
+      item: gitDiffItemFor(fullPath),
+      disabled,
+      disabledReason,
+      action: () => openGitDiffTab(fullPath, {userInitiated: true}),
+    }];
+  }
+  if (entry.kind !== 'file') return [];
+  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
+  const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
+  const diffCapabilityReason = !primaryInfo?.repo_root
+    ? `${t('common.diff')} ${t('common.notAvailable')}`
+    : Number(primaryInfo?.size) > MAX_FILE_PREVIEW_BYTES
+      ? t('editor.fileTooLargeTitle')
+      : primaryInfo?.diff_capable === false || openFileKindForPreviewPath(entry.name || fullPath) !== 'text' || (previewMime && !previewMime.startsWith('text/'))
+        ? t('fs.error.binary')
+        : '';
+  const diffDisabled = baseDisabled || Boolean(diffCapabilityReason);
+  const diffDisabledReason = baseDisabledReason || diffCapabilityReason;
+  const actionForMode = (mode, labelKey, disabled = baseDisabled, disabledReason = baseDisabledReason) => ({
+    label: t(labelKey),
+    mode,
+    canonical: true,
+    disabled,
+    disabledReason: disabled ? disabledReason : '',
+    action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
+  });
+  return [
+    actionForMode('edit', 'contextmenu.editNewTab'),
+    actionForMode('preview', 'contextmenu.previewNewTab'),
+    actionForMode('diff', 'contextmenu.diffNewTab', diffDisabled, diffDisabledReason),
+  ];
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -144,13 +197,20 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   const openInNewTab = typeof options.openInNewTab === 'function'
     ? options.openInNewTab
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
+  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
-    : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
-  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
+    : options.surface === 'finder'
+      ? finderOpenInNewTabActionsForContext(actionContext)
+      : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
-    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+    const disabledReason = action.disabledReason || '';
+    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {
+      disabled: action.disabled ?? menuState.openInNewTabDisabled,
+      title: disabledReason,
+      ariaLabel: disabledReason ? `${label}. ${disabledReason}` : label,
+    });
   }
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), closeFileContextMenu);
@@ -1257,6 +1317,7 @@ function openFilePathHasOwner(path) {
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
@@ -1494,6 +1555,7 @@ function updateOpenFileDirtyFlag(path) {
 }
 
 function syncOpenFileContentFromPanel(path, panel) {
+  if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
   const cmContent = codeMirrorPanelContent(panel);
@@ -1839,14 +1901,18 @@ function refreshOpenFileDiffDecorations(path) {
   }
 }
 
-function primaryEditorItemForPath(path, fallbackItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+function existingPrimaryEditorItemForPath(path) {
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   const activeItem = items.find(item => itemIsActivePaneTab(item)) || items.find(item => item === focusedPanelItem);
-  return activeItem || items[0] || fallbackItem || fileEditorItemFor(path);
+  return activeItem || items[0] || null;
+}
+
+function primaryEditorItemForPath(path, fallbackItem = null) {
+  return existingPrimaryEditorItemForPath(path) || fallbackItem || fileEditorItemFor(path);
 }
 
 function foldDuplicateEditorItemsForPath(path, keepItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   if (items.length <= 1) return null;
   const keeper = items.includes(keepItem) ? keepItem : primaryEditorItemForPath(path);
   let nextSlots = layoutSlots;
@@ -1928,8 +1994,36 @@ function markOpenFileDiffUnavailable(state, error) {
   state.diffError = String(error || t('common.notAvailable'));
 }
 
+function ensureHistoricalDiffPayloadIdentity(state, payload) {
+  if (state?.historical !== true) return;
+  const expectedFromRef = String(state.diffPinnedFromRef || '');
+  const expectedToRef = String(state.diffPinnedToRef || '');
+  if (expectedFromRef && expectedToRef && payload?.from_ref === expectedFromRef && payload?.to_ref === expectedToRef) return;
+  const error = new Error(t('gitDiff.staleSnapshot'));
+  error.code = 'historical_ref_mismatch';
+  throw error;
+}
+
+function applyRequestedWorkingDiffIdentity(state, options = {}) {
+  if (!state || options.resetWorkingDiffRefs !== true) return state;
+  const alreadyCurrent = state.diffLoaded === true && state.diffUnavailable !== true
+    && state.diffFromRef === 'HEAD' && state.diffToRef === 'current';
+  state.diffPinnedFromRef = 'HEAD';
+  state.diffPinnedToRef = 'current';
+  if (!alreadyCurrent) {
+    state.diff = '';
+    state.diffOriginal = '';
+    state.diffWorking = '';
+    state.diffLoaded = false;
+    state.diffUnavailable = false;
+    state.diffError = '';
+  }
+  return state;
+}
+
 async function refreshOpenFileDiff(path, options = {}) {
-  const state = fileState.get(path);
+  const item = options.item || null;
+  const state = options.state || fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return false;
   // Dedup concurrent triggers (renderFileEditorPanel + ensureCodeMirrorDiffPanel both ask): a second
   // caller awaits the SAME in-flight load instead of returning early, so the diff panel never renders
@@ -1956,7 +2050,14 @@ async function refreshOpenFileDiff(path, options = {}) {
         `/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`,
         'diff',
       );
+      ensureHistoricalDiffPayloadIdentity(state, payload);
       applyOpenFileDiffPayload(state, payload);
+      if (state.historical === true) {
+        state.original = String(payload.working || '');
+        state.content = String(payload.working || '');
+        state.dirty = false;
+        state.loading = false;
+      }
       refreshOpenFileDiffDecorations(path);
       return true;
     } catch (error) {
@@ -1973,10 +2074,11 @@ async function refreshOpenFileDiff(path, options = {}) {
       // ignores clicks until some unrelated render happens.
       if (options.updateControlsOnComplete !== false) {
         for (const panel of fileEditorPanelsForPath(path)) {
-          const item = panel.dataset.layoutItem || fileEditorItemFor(path);
-          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
-          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
-          if (options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+          const panelItem = panel.dataset.layoutItem || fileEditorItemFor(path);
+          if (fileEditorStateForItem(path, panelItem) !== state) continue;
+          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panelItem);
+          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, panelItem);
+          if (options.renderOnComplete !== false && editorViewModeFor(path, panelItem) === 'diff') renderFileEditorPanel(panel, panelItem);
         }
       }
     }
@@ -2047,9 +2149,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     ? imageViewerItemFor(fullPath)
     : fileEditorItemFor(fullPath);
   const alreadyOpen = openFileStateHasLoadedEditorPayload(fileState.get(fullPath));
-  const item = identityDedupe && alreadyOpen
+  const item = options.item || (identityDedupe && alreadyOpen
     ? primaryEditorItemForPath(fullPath, options.item || defaultItem)
-    : (options.item || defaultItem);
+    : defaultItem);
   const openOptions = {
     ...options,
     item,
@@ -2059,6 +2161,8 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
+    if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
     await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
@@ -2088,14 +2192,14 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
         return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
       }
     }
-    const state = applyFileGitMetadata({
+    const state = applyRequestedWorkingDiffIdentity(applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-    }, payload);
+    }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   })();
@@ -2124,8 +2228,67 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
 }
 
 async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}) {
-  const item = options.item || fileEditorCopyItemFor(fullPath);
-  return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
+  const canonical = options.canonical === true;
+  const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
+  const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
+  const openedPath = fileItemPath(openedItem) || fullPath;
+  const state = fileEditorStateForItem(openedPath, openedItem);
+  applyRequestedWorkingDiffIdentity(state, options);
+  await refreshOpenFileDiff(openedPath, {
+    item: openedItem,
+    state,
+    fromRef: 'HEAD',
+    toRef: 'current',
+    silent: true,
+    renderOnComplete: false,
+  });
+  return openedItem;
+}
+
+async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
+  const item = options.item || historicalFileEditorItemFor(path, fromRef, toRef);
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity || identity.path !== path) return null;
+  addFileEditorTabItem(path, item);
+  const existingState = fileEditorStateForItem(path, item);
+  const state = existingState || ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+      diffLoaded: false,
+      diffUnavailable: false,
+      diffError: '',
+      gitRoot: normalizeDirectoryPath(options.repo || ''),
+      gitTracked: true,
+    });
+  state.historicalComparisonKind = ['parent', 'root-empty-tree', 'merge-first-parent'].includes(options.historicalComparisonKind)
+    ? options.historicalComparisonKind
+    : 'parent';
+  setFileEditorViewMode(path, 'diff', item);
+  recordEditorNav(item);
+  await showFileEditorPaneForPath(path, {
+    ...options,
+    item,
+    userInitiated: options.userInitiated !== false,
+  });
+  renderOpenFilePath(path);
+  if (existingState?.diffLoaded === true && existingState.diffUnavailable !== true) return item;
+  await refreshOpenFileDiff(path, {
+    item,
+    state,
+    fromRef: identity.fromRef,
+    toRef: identity.toRef,
+    silent: true,
+    renderOnComplete: false,
+    updateControlsOnComplete: false,
+  });
+  state.loading = false;
+  renderOpenFilePath(path);
+  return item;
 }
 
 function textFileStateFromReadPayload(payload) {
@@ -3787,7 +3950,8 @@ function fileEditorStatusSourceText(panel) {
   const viewText = panel?._cmView?.state?.doc?.toString?.();
   if (viewText !== undefined && viewText !== null) return viewText;
   const path = panel?.dataset?.filePath || '';
-  const state = fileState.get(path);
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
   return state?.kind === 'text' ? state.content || '' : '';
 }
 
@@ -3795,7 +3959,8 @@ function updateFileEditorCountStatus(panel) {
   const status = panel?.querySelector?.('.file-editor-count-status');
   if (!status) return;
   const path = panel?.dataset?.filePath || '';
-  const state = path ? fileState.get(path) : null;
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = path ? fileEditorStateForItem(path, item) : null;
   const text = fileEditorStatusSourceText(panel);
   status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
@@ -3878,14 +4043,15 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
 async function removeOpenFile(path, options = {}) {
   const confirmDirty = options.confirmDirty !== false;
   const shouldRender = options.render !== false;
-  if (!path || !fileState.has(path)) return;
-  const state = fileState.get(path);
+  if (!path) return;
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
+  if (!requestedItem && !fileState.has(path)) return;
+  const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
-  if (confirmDirty && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
+  if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
-  clearFileAutosaveTimer(path);
+  if (items.some(item => !isHistoricalFileEditorItem(item))) clearFileAutosaveTimer(path);
   let nextSlots = layoutSlots;
   let wasInLayout = false;
   for (const item of items) {

@@ -56,11 +56,11 @@ async function runTabberSuite() {
     assert.equal(html.includes('No path'), false, 'the missing-path placeholder is not rendered when tmux supplies the working directory');
   });
 
-  test('shared tree controller is the Finder, Tabber, and Differ interaction parent', () => {
+  test('shared tree controller is the Finder, Tabber, Differ, and Git history interaction parent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
-    assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'tabber'], 'Finder, Tabber, and Differ register through the shared tree interaction controller');
+    assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'git-diff-commits', 'git-diff-files', 'tabber'], 'Finder, Tabber, Differ, and both Git history trees register through the shared interaction controller');
     // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
     // shard keeps the observable controller registration and keyboard behavior contract.
     assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerViewForItem\(panel\?\.dataset\?\.panelItem\)[\s\S]*view === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*view === 'differ'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'per-panel key dispatch routes fixed Tabber/Differ views through the shared parent before Finder fallback');

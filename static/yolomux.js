@@ -332,9 +332,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
   }}),
-  // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
-  // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
+  // Finder exposes Edit, Preview, and Diff as modes of one file tab, so generic text/code files need
+  // the existing syntax-highlighted Preview surface too; commit snapshots reuse this same renderer.
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -417,6 +417,8 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
 const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame/identity/open-promise state
+const historicalFileState = new Map();  // exact filehistory item -> immutable commit-side editor state
+const gitDiffTabState = new Map();  // exact gitdiff item -> frozen history snapshot, disclosures, and requests
 const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
@@ -888,6 +890,9 @@ const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
+const historicalFileEditorItemPrefix = 'filehistory:';
+const gitDiffItemPrefix = 'gitdiff:';
+const gitDiffHistoryPageSize = 50;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -1098,6 +1103,37 @@ function makeGenerationGuard() {
   });
 }
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function gitDiffItemFor(path) {
+  const normalized = normalizeDirectoryPath(String(path || ''));
+  return normalized ? `${gitDiffItemPrefix}${encodeURIComponent(normalized)}` : '';
+}
+function gitDiffItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(gitDiffItemPrefix)) return null;
+  const path = safeDecodeURIComponent(text.slice(gitDiffItemPrefix.length));
+  return path.startsWith('/') ? normalizeDirectoryPath(path) : null;
+}
+function historicalFileEditorItemFor(path, fromRef, toRef) {
+  const normalizedPath = String(path || '').trim();
+  const normalizedFrom = String(fromRef || '').trim();
+  const normalizedTo = String(toRef || '').trim();
+  if (!normalizedPath.startsWith('/') || !normalizedFrom || !normalizedTo) return '';
+  return `${historicalFileEditorItemPrefix}${encodeURIComponent(JSON.stringify([normalizedPath, normalizedFrom, normalizedTo]))}`;
+}
+function historicalFileEditorIdentity(item) {
+  const text = String(item || '');
+  if (!text.startsWith(historicalFileEditorItemPrefix)) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(text.slice(historicalFileEditorItemPrefix.length)));
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [path, fromRef, toRef] = parsed.map(value => String(value || '').trim());
+    if (!path.startsWith('/') || !fromRef || !toRef) return null;
+    return {path, fromRef, toRef};
+  } catch (_error) {
+    return null;
+  }
+}
+function isHistoricalFileEditorItem(item) { return historicalFileEditorIdentity(item) !== null; }
 function fileEditorDiffPreviewItemFor(path) { return fileEditorDiffPreviewItemPrefix + path; }
 function isFileEditorDiffPreviewItem(item) {
   return typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix);
@@ -1148,13 +1184,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     createPanel: item => createFileEditorPanel(item),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
-      return Boolean(path && editorPreviewModeAvailable(path, fileState.get(path)));
+      return Boolean(path && editorPreviewModeAvailable(path, fileEditorStateForItem(path, item)));
     },
-    popoutDisabledReason: item => t(fileItemPath(item)
-      ? 'pane.popout.filePreviewRequired'
-      : 'pane.popout.filePathRequired'),
+    popoutDisabledReason: item => t(isHistoricalFileEditorItem(item)
+      ? 'editor.historicalReadOnly'
+      : fileItemPath(item)
+        ? 'pane.popout.filePreviewRequired'
+        : 'pane.popout.filePathRequired'),
     openPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
@@ -1349,6 +1389,23 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
+  virtualPanelTabType({
+    key: 'git-diff',
+    prefix: gitDiffItemPrefix,
+    label: item => gitDiffTabLabel(item),
+    shortLabel: () => t('contextmenu.diffRepo'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('contextmenu.diffRepo')}),
+    sortRank: 0.73,
+    param: item => item,
+    detail: item => compactHomePath(gitDiffItemPath(item) || ''),
+    createPanel: item => createGitDiffPanel(item),
+    renderAttached: item => renderGitDiffPanel(item),
+    cleanup: item => cleanupGitDiffTab(item),
+    relocalize: (item, panel) => relocalizeGitDiffPanel(item, panel),
+    className: () => 'git-diff-item',
+    icon: 'changes',
+    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1360,7 +1417,7 @@ const TAB_TYPES = [
   filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
-    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
+    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix, historicalFileEditorItemPrefix],
     shortLabel: () => t('common.edit'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
@@ -1407,6 +1464,7 @@ function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
   if (typeof item === 'string' && item.startsWith(fileEditorCopyItemPrefix)) return fileEditorCopyItemPath(item);
   if (typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix)) return fileEditorDiffPreviewItemPath(item);
+  if (typeof item === 'string' && item.startsWith(historicalFileEditorItemPrefix)) return historicalFileEditorIdentity(item)?.path || null;
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {
@@ -5082,6 +5140,51 @@ function ensureFileState(path, defaults = null) {
 function fileStateFor(path) {
   const state = path ? fileState.get(path) : null;
   return state ? normalizeFileStateRecord(state) : null;
+}
+
+function ensureHistoricalFileState(item, defaults = null) {
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity) return null;
+  let state = historicalFileState.get(item);
+  if (!state) {
+    state = defaults && typeof defaults === 'object' ? defaults : {};
+    historicalFileState.set(item, state);
+  }
+  Object.assign(state, {
+    historical: true,
+    immutable: true,
+    readOnly: true,
+    path: identity.path,
+    diffPinnedFromRef: identity.fromRef,
+    diffPinnedToRef: identity.toRef,
+  });
+  return normalizeFileStateRecord(state);
+}
+
+function fileEditorStateForItem(path, item = null, create = false) {
+  if (isHistoricalFileEditorItem(item)) {
+    return create ? ensureHistoricalFileState(item) : (historicalFileState.has(item) ? ensureHistoricalFileState(item) : null);
+  }
+  return create ? ensureFileState(path) : fileStateFor(path);
+}
+
+function fileEditorTabState(item, create = false) {
+  const path = fileItemPath(item);
+  return path ? fileEditorStateForItem(path, item, create) : null;
+}
+
+function fileEditorTabIsMissing(item) {
+  return fileEditorTabState(item)?.externalMissing === true;
+}
+
+function setHistoricalFileState(item, state) {
+  if (!historicalFileEditorIdentity(item) || !state || typeof state !== 'object') return null;
+  historicalFileState.set(item, state);
+  return ensureHistoricalFileState(item);
+}
+
+function deleteHistoricalFileState(item) {
+  return historicalFileState.delete(item);
 }
 
 function setFileState(path, state) {
@@ -10740,7 +10843,8 @@ function layoutTabStatesFromParam(raw) {
 }
 
 function readableItemParam(item) {
-  return readableParamComponent(itemParam(item));
+  // Protect canonical item percent escapes because URLSearchParams and the per-tab parser each decode once.
+  return readableParamComponent(String(itemParam(item)).replaceAll('%', '%25'));
 }
 
 function readableParamComponent(value) {
@@ -10874,8 +10978,8 @@ function layoutUrlEditorModesSnapshot() {
     if (seen.has(key)) return;
     seen.add(key);
     const entry = {path: cleanPath, item: cleanItem, mode: cleanMode};
-    const state = fileState.get(cleanPath);
     const itemKey = cleanItem || fileEditorItemFor(cleanPath);
+    const state = fileEditorStateForItem(cleanPath, itemKey);
     const viewState = fileEditorViewState.get(itemKey);
     if (viewState) {
       entry.viewState = {
@@ -10891,6 +10995,7 @@ function layoutUrlEditorModesSnapshot() {
       entry.diffFromRef = cleanDiffRef(state?.diffPinnedFromRef || state?.diffFromRef || refs.from || 'HEAD', 'HEAD');
       entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
       entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
+      if (state?.historicalComparisonKind) entry.historicalComparisonKind = state.historicalComparisonKind;
     }
     modes.push(entry);
   };
@@ -10942,10 +11047,11 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
     if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
   }
   if (mode === 'diff') {
-    const state = fileState.get(path) || (cleanItem ? ensureFileState(path) : null);
+    const state = fileEditorStateForItem(path, cleanItem || null, Boolean(cleanItem));
     if (state) {
       state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
       state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
+      if (state.historical === true && ['parent', 'root-empty-tree', 'merge-first-parent'].includes(entry.historicalComparisonKind)) state.historicalComparisonKind = entry.historicalComparisonKind;
     }
     if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
   }
@@ -11207,6 +11313,7 @@ function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
   applyEditorStateFields(state.editor || {}, {applyModeEntry: applyLayoutUrlEditorModeEntry});
+  applyLayoutUrlGitDiffState(state.gitDiff);
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;
@@ -11231,6 +11338,8 @@ function layoutUrlStateSnapshot() {
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
   if (editor.modes.length) state.editor = editor;
+  const gitDiff = layoutUrlGitDiffStateSnapshot();
+  if (gitDiff.length) state.gitDiff = gitDiff;
   if (paneItems(layoutSlots).includes(prefsItemId)) state.preferences = layoutUrlPreferencesStateSnapshot();
   const scroll = layoutUrlScrollStateSnapshot();
   if (scroll.length) state.scroll = scroll;
@@ -12108,6 +12217,18 @@ function registerFileEditorLayoutItem(path, options = {}) {
   const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
   const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+    syncFileLayoutItems();
+    return item;
+  }
   if (fileState.get(path)?.loading !== true && fileState.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
@@ -12163,6 +12284,7 @@ function resolveLayoutItem(value) {
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
+  if (type?.prefix === gitDiffItemPrefix) return gitDiffItemPath(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -16473,7 +16595,7 @@ function updateSessionList(nextSessions, options = {}) {
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
-  const previousActive = activeSessions.slice();
+  const previousActive = activeSessions.slice(), previousItems = new Set(paneItems(layoutSlots));
   const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
   runtimeState.consumePendingLayoutMutation(completionGeneration);
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
@@ -16487,6 +16609,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     preserveMissingSidePane: options.preserveMissingSidePane === true,
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
+  cleanupRemovedDynamicLayoutItems(previousItems, new Set(paneItems(layoutSlots)));
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -16525,6 +16648,19 @@ function applyLayoutSlots(nextSlots, options = {}) {
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
+  for (const item of previousItems || []) {
+    if (!dynamicVirtualLayoutItems.has(item) || nextItems?.has(item)) continue;
+    const panel = panelNodes.get(item);
+    if (panel) removePanelForItem(item);
+    else tabTypeForItem(item)?.cleanup?.(item, null);
+    dynamicVirtualLayoutItems.delete(item);
+    paneViewState.delete(item);
+    tabLastActivatedAt.delete(item);
+  }
+  syncFileLayoutItems();
 }
 
 function layoutRenderRequest(request = {}) {
@@ -23541,7 +23677,7 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     : entry.kind === 'file'
     ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const displayName = differMode ? {text: entry.display_name || entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const directoryDiffParts = entry.kind === 'dir'
     ? (differMode
       ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
@@ -23743,7 +23879,7 @@ function bindFinderRowHandlers(row, state) {
     event.preventDefault();
     event.stopPropagation();
     closeFileImagePreview();
-    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
   row.ondragstart = event => {
     row.__fileTreeDragging = true;
@@ -23871,7 +24007,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  bindFinderRowHandlers(row, rowState);
+  if (typeof options.rowBinding === 'function') options.rowBinding(row, rowState);
+  else bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
 
@@ -24266,38 +24403,41 @@ function sharedTreeChildRow(rows, row) {
 
 function sharedTreeSelectionApi(controller, state, options = {}) {
   return {
-    selectedIds() {
+    selectedIds(panel = null) {
       if (typeof options.selectedIds === 'function') {
-        const selected = options.selectedIds();
+        const selected = options.selectedIds(panel);
         if (selected instanceof Set) return selected;
         if (Array.isArray(selected)) return new Set(selected.map(String));
       }
       return state.selectedIds;
     },
-    leadId() {
-      return typeof options.getLeadId === 'function' ? String(options.getLeadId() || '') : state.leadId;
+    leadId(panel = null) {
+      return typeof options.getLeadId === 'function' ? String(options.getLeadId(panel) || '') : state.leadId;
     },
-    setLeadId(id) {
+    setLeadId(id, panel = null) {
       const value = String(id || '');
       state.leadId = value;
-      if (typeof options.setLeadId === 'function') options.setLeadId(value);
+      if (typeof options.setLeadId === 'function') options.setLeadId(value, panel);
     },
-    currentId() {
-      return typeof options.currentRowId === 'function' ? String(options.currentRowId() || '') : '';
+    currentId(panel = null) {
+      return typeof options.currentRowId === 'function' ? String(options.currentRowId(panel) || '') : '';
     },
-    rowIsCurrent(row) {
+    rowIsCurrent(row, panel = null) {
       const id = sharedTreeRowId(row);
-      return Boolean(id && id === controller.currentId());
+      return Boolean(id && id === controller.currentId(panel));
     },
     applyState(panel, stateOptions = {}) {
       let currentRow = null;
-      const selectedIds = controller.selectedIds();
-      for (const row of controller.rows(panel)) {
+      const rows = controller.rows(panel);
+      const selectedIds = controller.selectedIds(panel);
+      const lead = controller.leadRow(panel);
+      for (const row of rows) {
         const id = sharedTreeRowId(row);
         const selected = selectedIds.has(id);
-        const current = controller.rowIsCurrent(row);
+        const current = controller.rowIsCurrent(row, panel);
         row.classList.toggle(CLS.selected, selected);
         row.setAttribute('aria-selected', selected ? 'true' : 'false');
+        if (options.rovingFocus === true) row.tabIndex = row === lead ? 0 : -1;
         if (options.applyCurrentClasses !== false) {
           row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
           row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
@@ -24307,32 +24447,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
         if (current) currentRow = row;
       }
       if (stateOptions.scrollCurrent === true && currentRow) sharedTreeScrollRowIntoView(panel, currentRow, options);
+      if (stateOptions.focusLead === true && lead) lead.focus?.({preventScroll: true});
     },
     selectRow(panel, row, event = null, selectOptions = {}) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRow === 'function') {
-        options.selectRow(row, id, event, selectOptions);
+        options.selectRow(row, id, event, selectOptions, panel);
       } else {
-        const selectedIds = controller.selectedIds();
+        const selectedIds = controller.selectedIds(panel);
         selectedIds.clear();
         selectedIds.add(id);
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectRange(panel, row, event = null) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRange === 'function') {
-        options.selectRange(row, id, event);
+        options.selectRange(row, id, event, panel);
       } else {
         const rows = controller.rows(panel);
-        const selectedIds = controller.selectedIds();
-        const anchorId = selectedIds.values().next().value || controller.leadId() || id;
+        const selectedIds = controller.selectedIds(panel);
+        const anchorId = selectedIds.values().next().value || controller.leadId(panel) || id;
         const anchorIndex = rows.findIndex(item => sharedTreeRowId(item) === anchorId);
         const targetIndex = rows.indexOf(row);
         selectedIds.clear();
@@ -24344,33 +24485,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
           selectedIds.add(id);
         }
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectFromClick(panel, row, event) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       const selectionOnly = typeof options.selectFromClick === 'function'
-        ? options.selectFromClick(row, id, event)
+        ? options.selectFromClick(row, id, event, panel)
         : (controller.selectRow(panel, row, event), false);
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       return selectionOnly === true;
     },
     leadRow(panel) {
       const rows = controller.rows(panel);
-      const leadId = controller.leadId();
+      const leadId = controller.leadId(panel);
       return rows.find(row => sharedTreeRowId(row) === leadId)
-        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
-        || rows.find(row => controller.rowIsCurrent(row))
+        || rows.find(row => controller.selectedIds(panel).has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row, panel))
         || rows[0]
         || null;
     },
     syncCurrent(panel, syncOptions = {}) {
-      const currentId = controller.currentId();
+      const currentId = controller.currentId(panel);
       if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
-      controller.setLeadId(currentId || controller.leadId());
+      controller.setLeadId(currentId || controller.leadId(panel), panel);
       controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
       return Boolean(currentId);
     },
@@ -24379,13 +24520,13 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
 
 function sharedTreeExpansionApi(controller, options = {}) {
   return {
-    isExpanded(row) {
-      if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
+    isExpanded(row, panel = null) {
+      if (typeof options.isExpanded === 'function') return options.isExpanded(row, panel) === true;
       return row?.getAttribute?.('aria-expanded') === 'true';
     },
     setExpanded(panel, row, expanded) {
       if (typeof options.setExpanded === 'function') {
-        options.setExpanded(row, expanded === true);
+        options.setExpanded(row, expanded === true, panel);
         return true;
       }
       return false;
@@ -24407,7 +24548,7 @@ function sharedTreeClickHandler(controller, options = {}) {
     consumeSharedTreeEvent(event);
     const selectionOnly = controller.selectFromClick(panel, row, event);
     if (row.dataset.kind === 'dir' && onDisclosure) {
-      controller.setExpanded(panel, row, !controller.isExpanded(row));
+      controller.setExpanded(panel, row, !controller.isExpanded(row, panel));
       return true;
     }
     if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
@@ -24428,10 +24569,10 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
       consumeSharedTreeEvent(event);
-      const selectedIds = controller.selectedIds();
+      const selectedIds = controller.selectedIds(panel);
       selectedIds.clear();
       for (const row of rows) selectedIds.add(sharedTreeRowId(row));
-      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]), panel);
       if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
       controller.applyState(panel);
       return true;
@@ -24446,7 +24587,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     if (intent === 'expand' || intent === 'collapse') {
       if (!lead) return false;
       consumeSharedTreeEvent(event);
-      const expanded = controller.isExpanded(lead);
+      const expanded = controller.isExpanded(lead, panel);
       if (intent === 'expand') {
         if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
         else {
@@ -24489,7 +24630,7 @@ function createSharedTreeInteractionController(options = {}) {
     },
     activateRow(panel, row, event = null) {
       if (typeof options.activateRow === 'function') {
-        options.activateRow(row, event);
+        options.activateRow(row, event, panel);
         controller.applyState(panel);
         return true;
       }
@@ -26034,7 +26175,7 @@ function bindTabberPanel(panel) {
     if (!row || !panel.contains(row) || !abs) return;
     event.preventDefault();
     event.stopPropagation();
-    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY, {surface: 'tabber'});
   });
   });
 }
@@ -26162,6 +26303,59 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
+function finderPathActionDisabledReason(primaryInfo) {
+  if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
+  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
+  return '';
+}
+
+function finderOpenInNewTabActionsForContext(context = {}) {
+  const fullPath = String(context.fullPath || '');
+  const entry = context.entry || {};
+  const selectedPaths = Array.isArray(context.selectedPaths) ? context.selectedPaths : [];
+  const primaryInfo = context.primaryInfo;
+  const menuState = context.menuState || {};
+  if (selectedPaths.length !== 1) return [];
+  if (entry.kind === 'dir') {
+    if (primaryInfo && !primaryInfo.repo_root) return [];
+    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    const disabled = Boolean(disabledReason);
+    return [{
+      label: t('contextmenu.diffRepo'),
+      item: gitDiffItemFor(fullPath),
+      disabled,
+      disabledReason,
+      action: () => openGitDiffTab(fullPath, {userInitiated: true}),
+    }];
+  }
+  if (entry.kind !== 'file') return [];
+  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
+  const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
+  const diffCapabilityReason = !primaryInfo?.repo_root
+    ? `${t('common.diff')} ${t('common.notAvailable')}`
+    : Number(primaryInfo?.size) > MAX_FILE_PREVIEW_BYTES
+      ? t('editor.fileTooLargeTitle')
+      : primaryInfo?.diff_capable === false || openFileKindForPreviewPath(entry.name || fullPath) !== 'text' || (previewMime && !previewMime.startsWith('text/'))
+        ? t('fs.error.binary')
+        : '';
+  const diffDisabled = baseDisabled || Boolean(diffCapabilityReason);
+  const diffDisabledReason = baseDisabledReason || diffCapabilityReason;
+  const actionForMode = (mode, labelKey, disabled = baseDisabled, disabledReason = baseDisabledReason) => ({
+    label: t(labelKey),
+    mode,
+    canonical: true,
+    disabled,
+    disabledReason: disabled ? disabledReason : '',
+    action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
+  });
+  return [
+    actionForMode('edit', 'contextmenu.editNewTab'),
+    actionForMode('preview', 'contextmenu.previewNewTab'),
+    actionForMode('diff', 'contextmenu.diffNewTab', diffDisabled, diffDisabledReason),
+  ];
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -26184,13 +26378,20 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   const openInNewTab = typeof options.openInNewTab === 'function'
     ? options.openInNewTab
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
+  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
-    : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
-  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
+    : options.surface === 'finder'
+      ? finderOpenInNewTabActionsForContext(actionContext)
+      : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
-    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+    const disabledReason = action.disabledReason || '';
+    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {
+      disabled: action.disabled ?? menuState.openInNewTabDisabled,
+      title: disabledReason,
+      ariaLabel: disabledReason ? `${label}. ${disabledReason}` : label,
+    });
   }
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), closeFileContextMenu);
@@ -27297,6 +27498,7 @@ function openFilePathHasOwner(path) {
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
@@ -27534,6 +27736,7 @@ function updateOpenFileDirtyFlag(path) {
 }
 
 function syncOpenFileContentFromPanel(path, panel) {
+  if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
   const cmContent = codeMirrorPanelContent(panel);
@@ -27879,14 +28082,18 @@ function refreshOpenFileDiffDecorations(path) {
   }
 }
 
-function primaryEditorItemForPath(path, fallbackItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+function existingPrimaryEditorItemForPath(path) {
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   const activeItem = items.find(item => itemIsActivePaneTab(item)) || items.find(item => item === focusedPanelItem);
-  return activeItem || items[0] || fallbackItem || fileEditorItemFor(path);
+  return activeItem || items[0] || null;
+}
+
+function primaryEditorItemForPath(path, fallbackItem = null) {
+  return existingPrimaryEditorItemForPath(path) || fallbackItem || fileEditorItemFor(path);
 }
 
 function foldDuplicateEditorItemsForPath(path, keepItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   if (items.length <= 1) return null;
   const keeper = items.includes(keepItem) ? keepItem : primaryEditorItemForPath(path);
   let nextSlots = layoutSlots;
@@ -27968,8 +28175,36 @@ function markOpenFileDiffUnavailable(state, error) {
   state.diffError = String(error || t('common.notAvailable'));
 }
 
+function ensureHistoricalDiffPayloadIdentity(state, payload) {
+  if (state?.historical !== true) return;
+  const expectedFromRef = String(state.diffPinnedFromRef || '');
+  const expectedToRef = String(state.diffPinnedToRef || '');
+  if (expectedFromRef && expectedToRef && payload?.from_ref === expectedFromRef && payload?.to_ref === expectedToRef) return;
+  const error = new Error(t('gitDiff.staleSnapshot'));
+  error.code = 'historical_ref_mismatch';
+  throw error;
+}
+
+function applyRequestedWorkingDiffIdentity(state, options = {}) {
+  if (!state || options.resetWorkingDiffRefs !== true) return state;
+  const alreadyCurrent = state.diffLoaded === true && state.diffUnavailable !== true
+    && state.diffFromRef === 'HEAD' && state.diffToRef === 'current';
+  state.diffPinnedFromRef = 'HEAD';
+  state.diffPinnedToRef = 'current';
+  if (!alreadyCurrent) {
+    state.diff = '';
+    state.diffOriginal = '';
+    state.diffWorking = '';
+    state.diffLoaded = false;
+    state.diffUnavailable = false;
+    state.diffError = '';
+  }
+  return state;
+}
+
 async function refreshOpenFileDiff(path, options = {}) {
-  const state = fileState.get(path);
+  const item = options.item || null;
+  const state = options.state || fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return false;
   // Dedup concurrent triggers (renderFileEditorPanel + ensureCodeMirrorDiffPanel both ask): a second
   // caller awaits the SAME in-flight load instead of returning early, so the diff panel never renders
@@ -27996,7 +28231,14 @@ async function refreshOpenFileDiff(path, options = {}) {
         `/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`,
         'diff',
       );
+      ensureHistoricalDiffPayloadIdentity(state, payload);
       applyOpenFileDiffPayload(state, payload);
+      if (state.historical === true) {
+        state.original = String(payload.working || '');
+        state.content = String(payload.working || '');
+        state.dirty = false;
+        state.loading = false;
+      }
       refreshOpenFileDiffDecorations(path);
       return true;
     } catch (error) {
@@ -28013,10 +28255,11 @@ async function refreshOpenFileDiff(path, options = {}) {
       // ignores clicks until some unrelated render happens.
       if (options.updateControlsOnComplete !== false) {
         for (const panel of fileEditorPanelsForPath(path)) {
-          const item = panel.dataset.layoutItem || fileEditorItemFor(path);
-          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
-          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
-          if (options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+          const panelItem = panel.dataset.layoutItem || fileEditorItemFor(path);
+          if (fileEditorStateForItem(path, panelItem) !== state) continue;
+          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panelItem);
+          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, panelItem);
+          if (options.renderOnComplete !== false && editorViewModeFor(path, panelItem) === 'diff') renderFileEditorPanel(panel, panelItem);
         }
       }
     }
@@ -28087,9 +28330,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     ? imageViewerItemFor(fullPath)
     : fileEditorItemFor(fullPath);
   const alreadyOpen = openFileStateHasLoadedEditorPayload(fileState.get(fullPath));
-  const item = identityDedupe && alreadyOpen
+  const item = options.item || (identityDedupe && alreadyOpen
     ? primaryEditorItemForPath(fullPath, options.item || defaultItem)
-    : (options.item || defaultItem);
+    : defaultItem);
   const openOptions = {
     ...options,
     item,
@@ -28099,6 +28342,8 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
+    if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
     await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
@@ -28128,14 +28373,14 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
         return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
       }
     }
-    const state = applyFileGitMetadata({
+    const state = applyRequestedWorkingDiffIdentity(applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-    }, payload);
+    }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   })();
@@ -28164,8 +28409,67 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
 }
 
 async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}) {
-  const item = options.item || fileEditorCopyItemFor(fullPath);
-  return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
+  const canonical = options.canonical === true;
+  const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
+  const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
+  const openedPath = fileItemPath(openedItem) || fullPath;
+  const state = fileEditorStateForItem(openedPath, openedItem);
+  applyRequestedWorkingDiffIdentity(state, options);
+  await refreshOpenFileDiff(openedPath, {
+    item: openedItem,
+    state,
+    fromRef: 'HEAD',
+    toRef: 'current',
+    silent: true,
+    renderOnComplete: false,
+  });
+  return openedItem;
+}
+
+async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
+  const item = options.item || historicalFileEditorItemFor(path, fromRef, toRef);
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity || identity.path !== path) return null;
+  addFileEditorTabItem(path, item);
+  const existingState = fileEditorStateForItem(path, item);
+  const state = existingState || ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+      diffLoaded: false,
+      diffUnavailable: false,
+      diffError: '',
+      gitRoot: normalizeDirectoryPath(options.repo || ''),
+      gitTracked: true,
+    });
+  state.historicalComparisonKind = ['parent', 'root-empty-tree', 'merge-first-parent'].includes(options.historicalComparisonKind)
+    ? options.historicalComparisonKind
+    : 'parent';
+  setFileEditorViewMode(path, 'diff', item);
+  recordEditorNav(item);
+  await showFileEditorPaneForPath(path, {
+    ...options,
+    item,
+    userInitiated: options.userInitiated !== false,
+  });
+  renderOpenFilePath(path);
+  if (existingState?.diffLoaded === true && existingState.diffUnavailable !== true) return item;
+  await refreshOpenFileDiff(path, {
+    item,
+    state,
+    fromRef: identity.fromRef,
+    toRef: identity.toRef,
+    silent: true,
+    renderOnComplete: false,
+    updateControlsOnComplete: false,
+  });
+  state.loading = false;
+  renderOpenFilePath(path);
+  return item;
 }
 
 function textFileStateFromReadPayload(payload) {
@@ -29827,7 +30131,8 @@ function fileEditorStatusSourceText(panel) {
   const viewText = panel?._cmView?.state?.doc?.toString?.();
   if (viewText !== undefined && viewText !== null) return viewText;
   const path = panel?.dataset?.filePath || '';
-  const state = fileState.get(path);
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
   return state?.kind === 'text' ? state.content || '' : '';
 }
 
@@ -29835,7 +30140,8 @@ function updateFileEditorCountStatus(panel) {
   const status = panel?.querySelector?.('.file-editor-count-status');
   if (!status) return;
   const path = panel?.dataset?.filePath || '';
-  const state = path ? fileState.get(path) : null;
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = path ? fileEditorStateForItem(path, item) : null;
   const text = fileEditorStatusSourceText(panel);
   status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
@@ -29918,14 +30224,15 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
 async function removeOpenFile(path, options = {}) {
   const confirmDirty = options.confirmDirty !== false;
   const shouldRender = options.render !== false;
-  if (!path || !fileState.has(path)) return;
-  const state = fileState.get(path);
+  if (!path) return;
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
+  if (!requestedItem && !fileState.has(path)) return;
+  const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
-  if (confirmDirty && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
+  if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
-  clearFileAutosaveTimer(path);
+  if (items.some(item => !isHistoricalFileEditorItem(item))) clearFileAutosaveTimer(path);
   let nextSlots = layoutSlots;
   let wasInLayout = false;
   for (const item of items) {
@@ -30595,8 +30902,9 @@ function editorViewModeFor(path, item = null) {
   const modes = fileEditorViewModesForPath(path);
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
-  if (!editorPreviewModeAvailable(path)) return 'edit';
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview') return 'diff';
+  if (!editorPreviewModeAvailable(path, state)) return 'edit';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -30604,10 +30912,12 @@ function editorViewModeFor(path, item = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
   const previousMode = editorViewModeFor(path, item);
-  if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
-  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, fileState.get(path)))) {
+  if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, state))) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
@@ -30621,10 +30931,13 @@ function updateEditorModeControl(control, path, state, item = null) {
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
     const nextMode = button.dataset.editorMode;
-    button.hidden = state?.kind !== 'text' && nextMode !== 'preview';
+    button.hidden = (state?.kind !== 'text' && nextMode !== 'preview') || (state?.historical === true && nextMode === 'split');
+    button.disabled = state?.historical === true && nextMode === 'edit';
+    if (button.disabled) button.title = t('editor.historicalReadOnly');
     const label = editorModeLabel(nextMode);
+    const visibleLabel = button.disabled ? `${label} (${t('common.readOnly')})` : label;
     const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
-    syncPressedButton(button, active, {labelOn: label, labelOff: label});
+    syncPressedButton(button, active, {labelOn: visibleLabel, labelOff: visibleLabel});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
 }
@@ -30798,8 +31111,8 @@ function refreshOpenEditorThemePanels() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    if (!path || fileState.get(path)?.kind !== 'text') return;
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
+    if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
@@ -31131,7 +31444,8 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   }
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = fileEditorPreviewSelectionOffsets(pane);
-  const rendered = renderEditorPreviewPane(pane, path, text, options);
+  const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   refreshPreviewFind(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -31252,7 +31566,7 @@ async function openEditorFindShortcut(host = null) {
 
 async function focusFileEditorSearch(panel = null) {
   const opened = await openEditorFindShortcut(panel);
-  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(fileEditorPanelPath(panel)), panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
   return opened;
 }
 
@@ -31263,10 +31577,11 @@ function applyEditorWrapPreference() {
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
     updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
-      if (liveText !== null && state.content !== liveText) state.content = liveText;
+      if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
@@ -31274,7 +31589,7 @@ function applyEditorWrapPreference() {
       // Re-render each panel with its OWN layout item: passing the editor item flipped
       // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
       // for raw/preview panels or browsers without CodeMirror compartments.
-      renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+      renderFileEditorPanel(panel, item);
     }
   });
 }
@@ -31291,8 +31606,8 @@ async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
     if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
@@ -31324,7 +31639,7 @@ function setDiffExpandUnchanged(enabled) {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
     if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
       renderFileEditorPanel(panel, item);
@@ -31341,7 +31656,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (!isFileEditorItem(item)) return;
   fileEditorDiffExpandOverrides.set(item, enabled === true);
   const panel = panelNodes.get(item);
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
@@ -33107,7 +33422,7 @@ function pathBasename(path) {
 
 function filePopoverHtml(item) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
+  const state = fileEditorTabState(item) || {};
   const rows = filePopoverRows(path, state);
   return `<div class="session-popover file-popover" role="tooltip">
     <div class="popover-head">
@@ -34200,7 +34515,7 @@ function tabIsEvictableForCap(item, keepItem) {
   const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
   if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
-    const state = fileState.get(fileItemPath(item));
+    const state = fileEditorTabState(item);
     if (state && state.dirty) return false;
   }
   return true;
@@ -40503,7 +40818,7 @@ function createDockviewTabRenderer() {
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
-    if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+    if (isHistoricalFileEditorItem(item) || event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
@@ -40536,7 +40851,7 @@ function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
-  tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
+  tab.classList.toggle('file-missing', isFileEditorItem(item) && fileEditorTabIsMissing(item));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
   applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMetadataState.payload.sessions?.[item]));
   tab.setAttribute('aria-label', dockviewTabAriaLabel(item));
@@ -41542,7 +41857,7 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
-  const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
+  const missingFileClass = isEditor && fileEditorTabIsMissing(item) ? 'file-missing' : '';
   const tmuxTabClass = !isVirtual && !isEditor ? 'tmux-pane-tab-token' : '';
   tab.className = `pane-tab session-popover-host ${tmuxTabClass} ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
@@ -41551,7 +41866,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
   tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    bindFilePopoverActions(tab);
+    if (!isHistoricalFileEditorItem(item)) bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
@@ -41590,7 +41905,7 @@ function createPaneTab(side, item, displayContext = {}) {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
-  if (isEditor) {
+  if (isEditor && !isHistoricalFileEditorItem(item)) {
     tab.addEventListener('dblclick', event => {
       if (event.target.closest('[data-pane-tab-close]')) return;
       event.preventDefault();
@@ -41611,7 +41926,7 @@ function createPaneTab(side, item, displayContext = {}) {
 
 function paneTabAriaLabel(item) {
   if (isFileEditorItem(item)) {
-    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    const missing = fileEditorTabIsMissing(item) ? ` ${t('filetab.missingTitle')}` : '';
     return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
   }
   const type = tabTypeForItem(item);
@@ -41628,6 +41943,7 @@ function beginPaneTabRename(tab, session) {
 }
 
 function beginFileTabRename(tab, item) {
+  if (isHistoricalFileEditorItem(item)) return;
   const path = fileItemPath(item);
   if (!path) return;
   const entry = {kind: 'file', name: basenameOf(path)};
@@ -41696,6 +42012,16 @@ function ensureFileTabStateForItem(item) {
   const path = fileItemPath(item);
   if (!path) return null;
   if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    return ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
   let state = fileStateFor(path);
   if (!state || !state.kind) {
     state = ensureFileState(path, {
@@ -41721,7 +42047,7 @@ function refreshFileTabPopover(tab, item) {
   const popover = tab?.querySelector?.(':scope > .file-popover') || detached;
   if (!popover) return;
   const path = fileItemPath(item);
-  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  const rows = filePopoverRows(path, fileEditorTabState(item) || {});
   popover.innerHTML = `
     <div class="popover-head">
       <div>
@@ -41830,13 +42156,13 @@ function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
 
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
-  const owners = openFileOwnerSessionsForPath(path);
+  const state = fileEditorTabState(item) || {};
+  const owners = isHistoricalFileEditorItem(item) ? [] : openFileOwnerSessionsForPath(path);
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
-  const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
+  const missing = fileEditorTabIsMissing(item) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
@@ -62006,6 +62332,716 @@ registerDebugRuntimeFacade('panel', {
   renderDebugPanels,
   renderYoCostPanels,
 });
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Finder repository-history tab. Historical files continue through the existing Editor renderer.
+
+function gitDiffTabLabel(item) {
+  const path = gitDiffItemPath(item);
+  return path ? `${t('contextmenu.diffRepo')} · ${basenameOf(path)}` : t('contextmenu.diffRepo');
+}
+
+function newGitDiffTabState(item, defaults = {}) {
+  const path = gitDiffItemPath(item);
+  return {
+    item,
+    path,
+    repo: '',
+    relativePath: '',
+    head: '',
+    snapshotCursor: '',
+    commits: [],
+    nextCursor: '',
+    truncated: false,
+    truncationReason: '',
+    loaded: false,
+    loadAttempted: false,
+    loading: false,
+    loadingOlder: false,
+    error: null,
+    expanded: new Set(),
+    details: new Map(),
+    detailErrors: new Map(),
+    detailLoading: new Map(),
+    detailGuards: new Map(),
+    detailControllers: new Map(),
+    detailCollapsedDirectories: new Map(),
+    focusedFilePaths: new Map(),
+    historyGuard: makeGenerationGuard(),
+    historyController: null,
+    focusedSha: '',
+    ...defaults,
+  };
+}
+
+function ensureGitDiffTabState(item, defaults = null) {
+  const path = gitDiffItemPath(item);
+  if (!path) return null;
+  let state = gitDiffTabState.get(item);
+  if (!state) {
+    state = newGitDiffTabState(item, defaults || {});
+    gitDiffTabState.set(item, state);
+  } else if (defaults && typeof defaults === 'object') {
+    Object.assign(state, defaults);
+  }
+  return state;
+}
+
+function invalidateGitDiffDetailRequests(state) {
+  for (const controller of state?.detailControllers?.values?.() || []) controller?.abort?.();
+  for (const guard of state?.detailGuards?.values?.() || []) guard?.invalidate?.();
+  state?.detailControllers?.clear?.();
+  state?.detailLoading?.clear?.();
+}
+
+function cleanupGitDiffTab(item) {
+  const state = gitDiffTabState.get(item);
+  state?.historyController?.abort?.();
+  state?.historyGuard?.invalidate?.();
+  invalidateGitDiffDetailRequests(state);
+  gitDiffTabState.delete(item);
+}
+
+function gitDiffHistoryUrl(path, cursor = '') {
+  const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryPageSize}${suffix}`;
+}
+
+function gitDiffCommitUrl(path, sha, head) {
+  return `/api/fs/git-commit?path=${encodeURIComponent(path)}&commit=${encodeURIComponent(sha)}&head=${encodeURIComponent(head)}`;
+}
+
+function gitDiffErrorSnapshot(error) {
+  return userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: t('common.requestFailed')});
+}
+
+function gitDiffHistoryPayloadIsValid(payload) {
+  return Boolean(payload && typeof payload === 'object'
+    && typeof payload.path === 'string'
+    && typeof payload.repo === 'string'
+    && typeof payload.relative_path === 'string'
+    && typeof payload.head === 'string'
+    && (payload.snapshot_cursor === undefined || typeof payload.snapshot_cursor === 'string')
+    && Array.isArray(payload.commits)
+    && typeof payload.next_cursor === 'string');
+}
+
+function gitDiffCommitPayloadIsValid(payload, sha) {
+  return Boolean(payload && typeof payload === 'object'
+    && payload.sha === sha
+    && typeof payload.repo === 'string'
+    && typeof payload.from_ref === 'string'
+    && typeof payload.to_ref === 'string'
+    && Array.isArray(payload.parents)
+    && Array.isArray(payload.files)
+    && typeof payload.message === 'string');
+}
+
+function gitDiffInvalidResponseError() {
+  const error = new Error('invalid_response_contract');
+  error.code = 'invalid_response_contract';
+  return error;
+}
+
+function mergeGitDiffCommits(current, incoming) {
+  const seen = new Set();
+  return [...(current || []), ...(incoming || [])].filter(commit => {
+    const sha = String(commit?.sha || '');
+    if (!sha || seen.has(sha)) return false;
+    seen.add(sha);
+    return true;
+  });
+}
+
+function pruneGitDiffShaState(state, shas) {
+  for (const sha of [...state.expanded]) if (!shas.has(sha)) state.expanded.delete(sha);
+  for (const map of [state.details, state.detailErrors, state.detailLoading, state.detailGuards, state.detailControllers, state.detailCollapsedDirectories, state.focusedFilePaths]) {
+    for (const sha of [...map.keys()]) if (!shas.has(sha)) map.delete(sha);
+  }
+  if (state.focusedSha && !shas.has(state.focusedSha)) state.focusedSha = '';
+}
+
+async function refreshGitDiffHistory(item, options = {}) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return false;
+  const append = options.append === true;
+  if (append && (!state.nextCursor || state.loading || state.loadingOlder)) return false;
+  state.historyController?.abort?.();
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  state.historyController = controller;
+  const isCurrent = state.historyGuard.begin();
+  const frozenHead = state.head;
+  const cursor = append ? state.nextCursor : (!options.refresh && !state.loaded ? state.snapshotCursor : '');
+  if (!append) {
+    invalidateGitDiffDetailRequests(state);
+    state.loadAttempted = true;
+    state.loading = true;
+  } else {
+    state.loadingOlder = true;
+  }
+  state.error = null;
+  renderGitDiffPanel(item);
+  try {
+    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor), {
+      cache: 'no-store',
+      ...(controller ? {signal: controller.signal} : {}),
+    });
+    if (!isCurrent()) return false;
+    if (!gitDiffHistoryPayloadIsValid(payload)) throw gitDiffInvalidResponseError();
+    if (append && payload.head !== frozenHead) {
+      const error = new Error(t('gitDiff.staleSnapshot'));
+      error.code = 'git_history_stale';
+      throw error;
+    }
+    state.path = normalizeDirectoryPath(payload.path) || state.path;
+    state.repo = normalizeDirectoryPath(payload.repo);
+    state.relativePath = payload.relative_path;
+    state.head = payload.head;
+    state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
+    state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
+    state.nextCursor = payload.next_cursor;
+    state.truncated = payload.truncated === true;
+    state.truncationReason = String(payload.truncation_reason || '');
+    state.loaded = true;
+    state.error = null;
+    if (!append) pruneGitDiffShaState(state, new Set(state.commits.map(commit => String(commit?.sha || '')).filter(Boolean)));
+    for (const sha of state.expanded) if (!state.details.has(sha) && !state.detailLoading.has(sha)) void loadGitDiffCommitDetail(item, sha);
+    refreshLayoutUrlStateSoon();
+    return true;
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return false;
+    state.error = gitDiffErrorSnapshot(error);
+    return false;
+  } finally {
+    if (isCurrent()) {
+      state.loading = false;
+      state.loadingOlder = false;
+      if (state.historyController === controller) state.historyController = null;
+      renderGitDiffPanel(item);
+    }
+  }
+}
+
+function loadOlderGitDiffHistory(item) {
+  return refreshGitDiffHistory(item, {append: true});
+}
+
+function gitDiffDetailGuard(state, sha) {
+  let guard = state.detailGuards.get(sha);
+  if (!guard) {
+    guard = makeGenerationGuard();
+    state.detailGuards.set(sha, guard);
+  }
+  return guard;
+}
+
+async function loadGitDiffCommitDetail(item, sha) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || !state.head || !sha) return false;
+  if (state.details.has(sha)) return true;
+  if (state.detailLoading.has(sha)) return state.detailLoading.get(sha);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const requestedHead = state.head;
+  const isCurrent = gitDiffDetailGuard(state, sha).begin();
+  if (controller) state.detailControllers.set(sha, controller);
+  state.detailErrors.delete(sha);
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(gitDiffCommitUrl(state.path, sha, requestedHead), {
+        cache: 'no-store',
+        ...(controller ? {signal: controller.signal} : {}),
+      });
+      if (!isCurrent() || state.head !== requestedHead) return false;
+      if (!gitDiffCommitPayloadIsValid(payload, sha)) throw gitDiffInvalidResponseError();
+      state.details.set(sha, payload);
+      state.detailErrors.delete(sha);
+      return true;
+    } catch (error) {
+      if (!isCurrent() || state.head !== requestedHead || error?.name === 'AbortError') return false;
+      state.detailErrors.set(sha, gitDiffErrorSnapshot(error));
+      return false;
+    } finally {
+      if (isCurrent() && state.head === requestedHead) {
+        state.detailLoading.delete(sha);
+        if (state.detailControllers.get(sha) === controller) state.detailControllers.delete(sha);
+        renderGitDiffPanel(item);
+      }
+    }
+  })();
+  state.detailLoading.set(sha, request);
+  renderGitDiffPanel(item);
+  return request;
+}
+
+function setGitDiffCommitExpanded(item, sha, expanded) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || !sha) return Promise.resolve(false);
+  if (expanded) state.expanded.add(sha);
+  else state.expanded.delete(sha);
+  state.focusedSha = sha;
+  refreshLayoutUrlStateSoon();
+  renderGitDiffPanel(item);
+  if (!expanded || state.details.has(sha)) return Promise.resolve(true);
+  return loadGitDiffCommitDetail(item, sha);
+}
+
+function toggleGitDiffCommit(item, sha) {
+  const state = ensureGitDiffTabState(item);
+  return setGitDiffCommitExpanded(item, sha, !state?.expanded?.has(sha));
+}
+
+function gitDiffTextNode(className, text = '') {
+  const node = document.createElement('span');
+  node.className = className;
+  node.textContent = String(text || '');
+  return node;
+}
+
+function gitDiffCommitChangesText(commit) {
+  const files = Math.max(0, Number(commit?.files) || 0);
+  const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
+  const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
+  const binary = Math.max(0, Number(commit?.binary_files) || 0);
+  return `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`;
+}
+
+function gitDiffCommitDateText(commit) {
+  return localizedDateTimeFormat(commit?.authored_at, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  });
+}
+
+function gitDiffCommitRow(item, commit, row = null) {
+  const state = ensureGitDiffTabState(item);
+  const sha = String(commit?.sha || '');
+  const expanded = state?.expanded?.has(sha) === true;
+  const control = row || makeButton({className: 'git-diff-commit-row'});
+  control.type = 'button';
+  control.className = 'git-diff-commit-row';
+  control.dataset.gitDiffCommit = sha;
+  control.dataset.path = `/commit/${sha}`;
+  control.dataset.kind = 'dir';
+  control.dataset.name = String(commit?.subject || sha);
+  control.setAttribute('role', 'treeitem');
+  control.setAttribute('aria-level', '1');
+  control.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const caret = gitDiffTextNode('git-diff-commit-caret ui-disclosure-triangle', disclosureTriangleGlyph(expanded));
+  caret.dataset.disclosureExpanded = expanded ? 'true' : 'false';
+  caret.setAttribute('aria-hidden', 'true');
+  const shortSha = gitDiffTextNode('git-diff-commit-sha', commit?.short || sha.slice(0, 9));
+  const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
+  date.title = localizedExactDateTimeFormat(commit?.authored_at);
+  const changes = gitDiffTextNode('git-diff-commit-changes', gitDiffCommitChangesText(commit));
+  const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
+  const description = gitDiffTextNode('git-diff-commit-description', commit?.subject || '');
+  control.setAttribute('aria-label', [shortSha.textContent, date.textContent, changes.textContent, author.textContent, description.textContent].filter(Boolean).join(' '));
+  control.replaceChildren(caret, shortSha, date, changes, author, description);
+  return control;
+}
+
+function gitDiffTreeItem(tree) {
+  return String(tree?.closest?.('.git-diff-panel')?.dataset?.layoutItem || '');
+}
+
+function gitDiffCommitShaFromRow(row) {
+  return String(row?.dataset?.gitDiffCommit || '');
+}
+
+const gitDiffCommitTreeInteractionController = createSharedTreeInteractionController({
+  name: 'git-diff-commits',
+  rowSelector: '.git-diff-commit-row[data-path]',
+  rovingFocus: true,
+  applyCurrentClasses: false,
+  selectedIds: tree => {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    return new Set(state?.focusedSha ? [`/commit/${state.focusedSha}`] : []);
+  },
+  getLeadId: tree => {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    return state?.focusedSha ? `/commit/${state.focusedSha}` : '';
+  },
+  setLeadId(id, tree) {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    if (!state) return;
+    state.focusedSha = String(id || '').replace(/^\/commit\//, '');
+    refreshLayoutUrlStateSoon();
+  },
+  isExpanded: row => row?.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded, tree) {
+    const item = gitDiffTreeItem(tree);
+    const sha = gitDiffCommitShaFromRow(row);
+    if (item && sha) void setGitDiffCommitExpanded(item, sha, expanded);
+  },
+  activateRow(row, _event, tree) {
+    const item = gitDiffTreeItem(tree);
+    const sha = gitDiffCommitShaFromRow(row);
+    if (item && sha) void toggleGitDiffCommit(item, sha);
+  },
+});
+
+function bindGitDiffCommitTree(tree) {
+  bindScopedOnce(tree, 'git-diff-commit-tree', scope => {
+    scope.ownEvent('click', tree, 'click', event => gitDiffCommitTreeInteractionController.handleClick(event, tree));
+    scope.ownEvent('keydown', tree, 'keydown', event => gitDiffCommitTreeInteractionController.handleKeydown(event, tree));
+    scope.ownEvent('focusin', tree, 'focusin', event => {
+      const row = event.target?.closest?.('.git-diff-commit-row[data-path]');
+      if (row && tree.contains(row)) gitDiffCommitTreeInteractionController.selectRow(tree, row, event);
+    });
+  });
+}
+
+function gitDiffCommitMessage(detail) {
+  const message = document.createElement('pre');
+  message.className = 'git-diff-commit-message';
+  message.textContent = String(detail?.message || '');
+  return message;
+}
+
+function gitDiffCommitFilesTree(detail) {
+  const repo = normalizeDirectoryPath(detail?.repo || '');
+  const files = (Array.isArray(detail?.files) ? detail.files : []).map(file => ({
+    ...file,
+    path: String(file?.path || ''),
+    old_path: String(file?.old_path || ''),
+    abs_path: normalizeDirectoryPath(`${repo}/${String(file?.path || '')}`),
+    repo,
+    mtime: Number(detail?.authored_at || 0),
+    missing: false,
+  }));
+  return buildSessionFileTree(repo, files);
+}
+
+function gitDiffHistoricalFileItem(detail, file) {
+  const path = normalizeDirectoryPath(file?.abs_path || `${detail?.repo || ''}/${file?.path || ''}`);
+  return historicalFileEditorItemFor(path, detail?.from_ref || '', detail?.to_ref || '');
+}
+
+function gitDiffHistoricalComparisonKind(detail) {
+  const parents = Array.isArray(detail?.parents) ? detail.parents : [];
+  if (!parents.length) return 'root-empty-tree';
+  return parents.length > 1 ? 'merge-first-parent' : 'parent';
+}
+
+async function openGitDiffHistoricalFile(detail, file, options = {}) {
+  const item = gitDiffHistoricalFileItem(detail, file);
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity) return null;
+  return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
+    item,
+    repo: detail.repo,
+    historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
+    userInitiated: options.userInitiated !== false,
+  });
+}
+
+function gitDiffDetailCollapsedDirectories(state, sha) {
+  let collapsed = state.detailCollapsedDirectories.get(sha);
+  if (!collapsed) {
+    collapsed = new Set();
+    state.detailCollapsedDirectories.set(sha, collapsed);
+  }
+  return collapsed;
+}
+
+function bindGitDiffFileTreeRow(row, rowState, item, sha, detail) {
+  row.dataset.gitDiffCommitSha = sha;
+  row.dataset.gitDiffCommitPath = rowState.fullPath;
+  row.dataset.gitDiffItem = item;
+  row.dataset.gitDiffDetailRepo = String(detail?.repo || '');
+}
+
+function gitDiffFileTreeContext(tree) {
+  const item = gitDiffTreeItem(tree);
+  const sha = String(tree?.dataset?.gitDiffCommitSha || '');
+  const state = ensureGitDiffTabState(item);
+  return {item, sha, state, detail: state?.details?.get(sha) || null};
+}
+
+const gitDiffFileTreeInteractionController = createSharedTreeInteractionController({
+  name: 'git-diff-files',
+  rowSelector: '.file-tree-row[data-path]',
+  rovingFocus: true,
+  applyCurrentClasses: false,
+  selectedIds: tree => {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    const path = state?.focusedFilePaths?.get(sha) || '';
+    return new Set(path ? [path] : []);
+  },
+  getLeadId: tree => {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    return state?.focusedFilePaths?.get(sha) || '';
+  },
+  setLeadId(id, tree) {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    if (!state || !sha) return;
+    state.focusedFilePaths.set(sha, String(id || ''));
+    refreshLayoutUrlStateSoon();
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && row.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded, tree) {
+    const {item, sha, state} = gitDiffFileTreeContext(tree);
+    if (!item || !sha || !state || row?.dataset?.kind !== 'dir') return;
+    const collapsed = gitDiffDetailCollapsedDirectories(state, sha);
+    if (expanded) collapsed.delete(row.dataset.path);
+    else collapsed.add(row.dataset.path);
+    refreshLayoutUrlStateSoon();
+    renderGitDiffPanel(item);
+  },
+  activateRow(row, _event, tree) {
+    const context = gitDiffFileTreeContext(tree);
+    if (row?.dataset?.kind === 'dir') {
+      gitDiffFileTreeInteractionController.setExpanded(tree, row, !gitDiffFileTreeInteractionController.isExpanded(row, tree));
+      return;
+    }
+    const file = context.detail ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '') : null;
+    if (file) void openGitDiffHistoricalFile(context.detail, file);
+  },
+});
+
+function bindGitDiffFileTree(tree) {
+  bindScopedOnce(tree, 'git-diff-file-tree', scope => {
+    scope.ownEvent('click', tree, 'click', event => gitDiffFileTreeInteractionController.handleClick(event, tree));
+    scope.ownEvent('keydown', tree, 'keydown', event => gitDiffFileTreeInteractionController.handleKeydown(event, tree));
+    scope.ownEvent('focusin', tree, 'focusin', event => {
+      const row = event.target?.closest?.('.file-tree-row[data-path]');
+      if (row && tree.contains(row)) gitDiffFileTreeInteractionController.selectRow(tree, row, event);
+    });
+  });
+}
+
+function gitDiffStatusNode(className, text, role = '') {
+  const node = document.createElement('div');
+  node.className = className;
+  node.textContent = String(text || '');
+  if (role) node.setAttribute('role', role);
+  return node;
+}
+
+function renderGitDiffCommitDetail(item, sha, detailNode) {
+  const state = ensureGitDiffTabState(item);
+  const detail = state.details.get(sha);
+  const error = state.detailErrors.get(sha);
+  const existingTree = detailNode.querySelector?.(':scope > .git-diff-file-tree');
+  const restoreFileFocus = Boolean(existingTree?.contains?.(document.activeElement));
+  detailNode.className = 'git-diff-commit-detail';
+  detailNode.dataset.gitDiffCommitDetail = sha;
+  detailNode.setAttribute('role', 'group');
+  if (!detail) {
+    detailNode.replaceChildren(gitDiffStatusNode(
+      error ? 'git-diff-state git-diff-state-error' : 'git-diff-state git-diff-state-loading',
+      error ? userMessageText(error, t('common.requestFailed')) : t('common.loading'),
+      error ? 'alert' : 'status',
+    ));
+    return detailNode;
+  }
+  const nodes = [];
+  const refs = gitDiffStatusNode('git-diff-commit-refs', `${t('diff.ref.from')} ${String(detail.from_ref).slice(0, 9)} → ${t('diff.ref.to')} ${String(detail.to_ref).slice(0, 9)}`);
+  if (detail.parents.length > 1) refs.textContent += ` · ${t('gitDiff.firstParent')}`;
+  nodes.push(refs, gitDiffCommitMessage(detail));
+  if (detail.message_truncated === true) nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.messageTruncated'), 'status'));
+  const model = gitDiffCommitFilesTree(detail);
+  const tree = existingTree || document.createElement('div');
+  tree.className = 'git-diff-file-tree file-tree';
+  tree.dataset.gitDiffCommitSha = sha;
+  tree.setAttribute('role', 'tree');
+  tree.setAttribute('aria-label', t('gitDiff.changedFiles'));
+  renderTreeChildren(tree, normalizeDirectoryPath(detail.repo), model.entries, 0, {
+    entriesByDir: model.entriesByDir,
+    sessionFilesMap: model.sessionFilesMap,
+    directoryStatusCounts: model.directoryStatusCounts,
+    differMode: true,
+    compact: true,
+    repoForDiffer: normalizeDirectoryPath(detail.repo),
+    view: 'differ',
+    treeSortMode: 'az',
+    includeHidden: true,
+    collapsedSet: gitDiffDetailCollapsedDirectories(state, sha),
+    rowBinding: (row, rowState) => bindGitDiffFileTreeRow(row, rowState, item, sha, detail),
+  });
+  bindGitDiffFileTree(tree);
+  nodes.push(tree);
+  if (detail.files_truncated === true) nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.filesTruncated'), 'status'));
+  detailNode.replaceChildren(...nodes);
+  gitDiffFileTreeInteractionController.applyState(tree, {focusLead: restoreFileFocus});
+  return detailNode;
+}
+
+function renderGitDiffCommitList(item, list, state) {
+  const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
+  const existing = new Map(Array.from(list.children || []).map(group => [group.dataset?.gitDiffCommitGroup || '', group]));
+  const groups = [];
+  for (const commit of state.commits) {
+    const sha = String(commit?.sha || '');
+    if (!sha) continue;
+    const group = existing.get(sha) || document.createElement('section');
+    group.className = 'git-diff-commit';
+    group.dataset.gitDiffCommitGroup = sha;
+    group.setAttribute('role', 'none');
+    let row = group.querySelector?.(':scope > .git-diff-commit-row');
+    row = gitDiffCommitRow(item, commit, row);
+    const nodes = [row];
+    if (state.expanded.has(sha)) {
+      const detail = group.querySelector?.(':scope > .git-diff-commit-detail') || document.createElement('div');
+      nodes.push(renderGitDiffCommitDetail(item, sha, detail));
+    }
+    group.replaceChildren(...nodes);
+    groups.push(group);
+  }
+  reconcileChildNodes(list, groups);
+  list.setAttribute('role', 'tree');
+  bindGitDiffCommitTree(list);
+  gitDiffCommitTreeInteractionController.applyState(list, {focusLead: restoreCommitFocus});
+}
+
+function createGitDiffPanel(item) {
+  const panel = document.createElement('section');
+  panel.className = 'git-diff-panel';
+  panel.dataset.layoutItem = item;
+  panel.setAttribute('aria-label', gitDiffTabLabel(item));
+  const toolbar = document.createElement('header');
+  toolbar.className = 'git-diff-toolbar';
+  const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.diffRepo'));
+  const path = gitDiffTextNode('git-diff-path');
+  const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => void refreshGitDiffHistory(item, {refresh: true})});
+  toolbar.append(heading, path, refresh);
+  const meta = document.createElement('div');
+  meta.className = 'git-diff-meta';
+  const body = document.createElement('div');
+  body.className = 'git-diff-panel-body';
+  body.setAttribute('aria-label', gitDiffTabLabel(item));
+  panel.append(toolbar, meta, body);
+  ensureGitDiffTabState(item);
+  return panel;
+}
+
+function renderGitDiffPanel(item, options = {}) {
+  const panel = panelNodes.get(item) || options.panel || null;
+  const state = ensureGitDiffTabState(item);
+  if (!panel || !state) return state;
+  panel.setAttribute('aria-label', gitDiffTabLabel(item));
+  const path = panel.querySelector?.('.git-diff-path');
+  if (path) {
+    path.textContent = compactHomePath(state.path);
+    path.title = state.path;
+  }
+  const refresh = panel.querySelector?.('.git-diff-refresh');
+  if (refresh) {
+    refresh.textContent = t('common.refresh');
+    refresh.setAttribute('aria-label', t('common.refresh'));
+    refresh.disabled = state.loading === true;
+  }
+  const meta = panel.querySelector?.('.git-diff-meta');
+  if (meta) {
+    const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
+    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.commits.length || gitDiffHistoryPageSize})}`;
+  }
+  const body = panel.querySelector?.('.git-diff-panel-body');
+  if (!body) return state;
+  body.setAttribute('aria-label', gitDiffTabLabel(item));
+  const list = body.querySelector?.(':scope > .git-diff-commits') || document.createElement('div');
+  const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
+  list.className = 'git-diff-commits';
+  renderGitDiffCommitList(item, list, state);
+  const nodes = [];
+  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status'));
+  if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
+  if (state.commits.length) nodes.push(list);
+  else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
+  if (state.nextCursor) {
+    nodes.push(makeButton({
+      className: 'git-diff-load-older',
+      label: state.loadingOlder ? t('common.loading') : t('gitDiff.loadOlder'),
+      disabled: state.loadingOlder,
+      onClick: () => void loadOlderGitDiffHistory(item),
+    }));
+  } else if (state.truncated) {
+    nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
+  }
+  body.replaceChildren(...nodes);
+  if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
+  if (!state.loadAttempted) void refreshGitDiffHistory(item);
+  return state;
+}
+
+function relocalizeGitDiffPanel(item, panel) {
+  panel?.setAttribute?.('aria-label', gitDiffTabLabel(item));
+  const heading = panel?.querySelector?.('.git-diff-heading');
+  if (heading) heading.textContent = t('contextmenu.diffRepo');
+  renderGitDiffPanel(item, {panel});
+}
+
+function gitDiffLayoutOid(value) {
+  const oid = String(value || '').trim();
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(oid) ? oid : '';
+}
+
+function layoutUrlGitDiffStateSnapshot() {
+  const result = [];
+  for (const item of paneItems(layoutSlots)) {
+    if (!gitDiffItemPath(item) || result.some(entry => entry.item === item)) continue;
+    const state = gitDiffTabState.get(item);
+    if (!state?.head || !state.snapshotCursor) continue;
+    result.push({
+      item,
+      head: state.head,
+      snapshotCursor: state.snapshotCursor,
+      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryPageSize),
+      focusedSha: state.focusedSha || '',
+      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryPageSize),
+      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryPageSize),
+    });
+    if (result.length >= 32) break;
+  }
+  return result;
+}
+
+function applyLayoutUrlGitDiffState(entries) {
+  if (!Array.isArray(entries)) return 0;
+  let applied = 0;
+  for (const entry of entries.slice(0, 32)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = String(entry.item || '');
+    const head = gitDiffLayoutOid(entry.head);
+    const snapshotCursor = String(entry.snapshotCursor || '').slice(0, 4096);
+    if (!gitDiffItemPath(item) || !head || !snapshotCursor) continue;
+    const state = ensureGitDiffTabState(item);
+    state.historyController?.abort?.();
+    state.historyGuard.invalidate();
+    invalidateGitDiffDetailRequests(state);
+    state.head = head;
+    state.snapshotCursor = snapshotCursor;
+    state.commits = [];
+    state.nextCursor = '';
+    state.loaded = false;
+    state.loadAttempted = false;
+    state.error = null;
+    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryPageSize));
+    state.focusedSha = gitDiffLayoutOid(entry.focusedSha);
+    state.details.clear();
+    state.detailErrors.clear();
+    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+      const sha = gitDiffLayoutOid(pair?.[0]);
+      const paths = Array.isArray(pair?.[1]) ? pair[1].map(path => normalizeDirectoryPath(String(path || ''))).filter(Boolean).slice(0, 500) : [];
+      return sha ? [[sha, new Set(paths)]] : [];
+    }));
+    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+      const sha = gitDiffLayoutOid(pair?.[0]);
+      const path = normalizeDirectoryPath(String(pair?.[1] || ''));
+      return sha && path ? [[sha, path]] : [];
+    }));
+    applied += 1;
+  }
+  return applied;
+}
+
+function openGitDiffTab(path, options = {}) {
+  const item = resolveLayoutItem(options.item || gitDiffItemFor(path));
+  if (!item) return null;
+  ensureGitDiffTabState(item, {path: gitDiffItemPath(item)});
+  recordEditorNav(item);
+  void Promise.resolve(selectSession(item, {userInitiated: options.userInitiated === true})).then(() => renderGitDiffPanel(item));
+  return item;
+}
 const changesOutsideRepoKey = 'Outside repo';
 
 function sessionForFileRepo(path) {
@@ -62757,6 +63793,19 @@ function diffRefControlsHtml(options = {}) {
   </span>`;
 }
 
+function historicalDiffRefControlsHtml(state) {
+  const fromRef = String(state?.diffPinnedFromRef || state?.diffFromRef || '');
+  const toRef = String(state?.diffPinnedToRef || state?.diffToRef || '');
+  const comparison = state?.historicalComparisonKind === 'merge-first-parent'
+    ? `<span class="diff-ref-historical-note">${esc(t('gitDiff.firstParent'))}</span>`
+    : '';
+  return `<span class="diff-ref-controls compact historical" data-diff-ref-controls data-diff-ref-historical>
+    <span class="diff-ref-control">${esc(t('diff.ref.from'))} <span class="diff-ref-static-value" title="${esc(fromRef)}">${esc(fromRef.slice(0, 9))}</span></span>
+    <span class="diff-ref-control">${esc(t('diff.ref.to'))} <span class="diff-ref-static-value" title="${esc(toRef)}">${esc(toRef.slice(0, 9))}</span></span>
+    ${comparison}
+  </span>`;
+}
+
 function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
@@ -63456,6 +64505,8 @@ function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
 }
 
 function sessionFileDiffText(item) {
+  if (item?.binary === true) return [{kind: 'file-label', text: t('gitDiff.binary')}];
+  if (item?.counts_available === false) return [{kind: 'file-label', text: t('common.notAvailable')}];
   const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
     Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
@@ -63830,7 +64881,15 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
       // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
       // file created and then removed is missing but still displays A.
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, deleted: status === 'D', changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
+      siblings.push({
+        name: fileName,
+        display_name: item.old_path ? `${item.old_path} → ${item.path}` : '',
+        kind: 'file',
+        mtime: item.mtime,
+        size: item.size,
+        deleted: status === 'D',
+        changedFileMissingTime: sessionFileDatePlaceholderNeeded(item),
+      });
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
@@ -64221,8 +65280,9 @@ function activeChangesControl(panel) {
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
+  const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
-    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
+    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -65124,8 +66184,8 @@ function bindFileExplorerChangesResizer(panel) {
 }
 
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.kind !== 'text' || state.historical === true) return;
   state.content = String(content ?? '');
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
@@ -65157,7 +66217,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
 }
 
 async function enterFileEditorDiffMode(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return;
   if (!fileStateHasRepo(path, state)) {
     setFileEditorViewMode(path, 'edit', item);
@@ -65169,10 +66229,10 @@ async function enterFileEditorDiffMode(path, panel, item) {
     renderFileEditorPanel(panel, item);
     return;
   }
-  const loadPromise = refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+  const loadPromise = refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
   renderFileEditorPanel(panel, item);
   await loadPromise;
-  const current = fileState.get(path);
+  const current = fileEditorStateForItem(path, item);
   if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
   if (fileStateHasRepo(path, current) && (openFileDiffAvailable(current) || fileStateHasUsefulGitHistory(current))) {
     setFileEditorViewMode(path, 'diff', item);
@@ -65474,7 +66534,10 @@ function createFileEditorPanel(item) {
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   bindActionDispatcher(panel, {
     'editor-save': () => saveFileEditor(path, panel),
-    'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-reload': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return false;
+      return reloadOpenFileFromDisk(path);
+    },
     'editor-upload': () => openFileUploadChooserForEditor(panel, path),
     'editor-mode': (_event, target) => {
       const mode = target?.dataset?.editorMode;
@@ -65493,7 +66556,7 @@ function createFileEditorPanel(item) {
     'editor-toggle-wrap': () => toggleEditorWrap(),
     'editor-find': async () => {
       await toggleEditorFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     },
     'editor-blame': (_event, target) => {
       if (target?.disabled) return;
@@ -65513,6 +66576,7 @@ function createFileEditorPanel(item) {
       toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
     },
     'editor-popout-preview': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return;
       if (openFilePreviewPopout(path, panel)) {
         setFileEditorViewMode(path, 'edit', item);
         renderFileEditorPanel(panel, item);
@@ -65586,14 +66650,14 @@ function createFileEditorPanel(item) {
     }
     if (event.target.closest('[data-preview-find-close]')) {
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     }
   });
   previewFindPanel?.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     } else if (event.key === 'Enter') {
       event.preventDefault();
       const state = previewFindStateForHost(panel, true);
@@ -65874,9 +66938,17 @@ async function activateNavItem(item) {
     activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
     return true;
   }
+  if (gitDiffItemPath(item)) {
+    return Boolean(openGitDiffTab(gitDiffItemPath(item), {item, userInitiated: false}));
+  }
   if (isFileEditorItem(item)) {
     const path = fileItemPath(item);
     if (path) {
+      const identity = historicalFileEditorIdentity(item);
+      if (identity) {
+        await openHistoricalFileInEditor(path, identity.fromRef, identity.toRef, {item, userInitiated: false});
+        return true;
+      }
       await openFileInEditor(path, basenameOf(path), {item});
       return true;
     }
@@ -66541,13 +67613,16 @@ function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
 function updateMarkdownTaskFromPreview(container, input) {
   const path = container?.dataset?.mdPath || '';
   const sourceLine = Number(input?.dataset?.sourceLine || 0);
-  const state = fileState.get(path);
+  const panels = fileEditorPanelsForPath(path);
+  const sourcePanel = container.closest?.('.file-editor-panel') || panels.find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (state?.historical === true) return false;
   if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
   const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
   if (next === null || next === state.content) return false;
-  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
   handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
-  for (const panel of fileEditorPanelsForPath(path)) {
+  for (const panel of panels) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
   }
   return true;
@@ -66562,9 +67637,10 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
     input.dataset.sourceLine = String(task.line);
     input.classList.add('markdown-task-checkbox');
     input.checked = task.checked;
-    if (markdownPath && !readOnlyMode) {
-      input.disabled = false;
-      input.removeAttribute('disabled');
+    if (markdownPath) {
+      input.disabled = readOnlyMode || container._markdownReadOnly === true;
+      if (input.disabled) input.setAttribute('disabled', 'disabled');
+      else input.removeAttribute('disabled');
       input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
@@ -66887,6 +67963,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     isCurrent: () => container._markdownPreviewGeneration === generation,
     previewContainer: container,
   });
+  container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
@@ -68524,14 +69601,14 @@ function mermaidPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
 }
 
-function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+function renderMarkdownPreviewStrategy({container, path, text, state, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
   if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true});
   return true;
 }
 
@@ -68679,7 +69756,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const scrollOwner = createPassiveDeferredElementScrollOwner(container);
-  const state = fileState.get(path) || null;
+  const state = options.state || fileState.get(path) || null;
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
@@ -69016,7 +70093,7 @@ function closePanePopout(item) {
 
 function closePopoutsForLayoutItem(item) {
   let closed = closePanePopout(item);
-  if (isFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
+  if (isFileEditorItem(item) && !isHistoricalFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
     closed = closeFilePreviewPopout(fileItemPath(item)) || closed;
   }
   return closed;
@@ -69400,7 +70477,7 @@ function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
 
 function syncFilePreviewPopoutsFromPanel(panel, source) {
   const path = fileEditorPanelPath(panel);
-  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
+  if (!path || fileEditorPanelState(panel)?.historical === true || !fileEditorSourceCanDrive(panel, source)) return false;
   let synced = false;
   for (const record of filePreviewPopoutsForPath(path)) {
     synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
@@ -69421,6 +70498,7 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
   }
   let synced = false;
   for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     setFileEditorScrollSyncGuard(panel);
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
@@ -70235,6 +71313,7 @@ function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
 }
 
 function openFilePreviewPopout(path, panel = null) {
+  if (panel && fileEditorPanelState(panel)?.historical === true) return false;
   if (!path || !editorPreviewModeAvailable(path)) return false;
   const initialState = fileState.get(path);
   if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
@@ -70422,7 +71501,7 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   if (!view) return;
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
-  if (options.cleanOnly && fileState.get(options.path)?.dirty) return;
+  if (options.cleanOnly && (options.state || fileState.get(options.path))?.dirty) return;
   const selection = view.state.selection;
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
@@ -71107,15 +72186,17 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     if (panel._cmGeneration !== generation) return null;
   } else if (!state.diffLoaded && !state.diffUnavailable) {
     setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
-    await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+    await refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;
   }
   if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
       const msg = t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')});
       setFileEditorPanelStatus(panel, msg, 'warn');
+      if (state.historical === true) return false;
       return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
     }
+    if (state.historical === true) return false;
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
@@ -71130,16 +72211,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     const expandUnchanged = fileEditorDiffExpandUnchangedForItem(item);
     const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
     const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
-    const diffEditsAllowed = diffTargetIsCurrent;
+    const diffEditsAllowed = diffTargetIsCurrent && state.historical !== true;
     const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: expandUnchanged});
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
       if (layout === 'side') {
         syncCodeMirrorDocument(panel._cmMergeView?.a, original);
-        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path, state});
       } else {
-        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path, state});
       }
       updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
       scheduleDiffOverviewSettledRebuild(panel);
@@ -71362,7 +72443,8 @@ function renderFileEditorRawPane(rawPane, path, content) {
 // ARBITRARY refs. Force-exiting on an empty default diff (the old behavior) hid the picker entirely on
 // clean files — the recurring "press DIFF, no FROM/TO menu" bug.
 function diffModeShouldFallBackToEdit(path, state, item = null) {
-  return state?.kind === 'text'
+  return state?.historical !== true
+    && state?.kind === 'text'
     && editorViewModeFor(path, item) === 'diff'
     && (!fileStateHasRepo(path, state)
       || (state.diffLoaded === true
@@ -71481,6 +72563,16 @@ function syncEditorDiffRefPanel(path, state, item, parts, mode) {
   const diffRefPanel = parts.diffRefPanel;
   if (!diffRefPanel) return;
   diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+  if (state.historical === true) {
+    const historySignature = JSON.stringify([state.diffPinnedFromRef, state.diffPinnedToRef, state.historicalComparisonKind]);
+    if (!diffRefPanel.hidden && diffRefPanel.dataset.diffRefHistoryRendered !== historySignature) {
+      diffRefPanel.innerHTML = historicalDiffRefControlsHtml(state);
+      diffRefPanel.dataset.diffRefRepoRendered = state.gitRoot || state.diffRepo || '';
+      diffRefPanel.dataset.diffRefPathRendered = path;
+      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
+    }
+    return;
+  }
   // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
   // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
   const diffRepo = fileRepoForPath(path);
@@ -71523,7 +72615,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
   updateFileEditorDiffButton(parts.diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable;
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true;
   syncEditorDiffRefPanel(path, state, item, parts, mode);
   updateFileEditorToolbarSeparators(panel);
   return {previewable};
@@ -71627,7 +72719,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   updateFileEditorPanelChrome(panel, path);
   const parts = editorPanelParts(panel);
   updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
@@ -71663,8 +72755,29 @@ function renderFileEditorPanel(panel, item, options = {}) {
 }
 
 function loadFileEditorState(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.loadingPromise) return;
+  if (state.historical === true) {
+    const identity = historicalFileEditorIdentity(item);
+    if (!identity) return;
+    const loadingPromise = refreshOpenFileDiff(path, {
+      item,
+      state,
+      fromRef: identity.fromRef,
+      toRef: identity.toRef,
+      silent: true,
+      renderOnComplete: false,
+      updateControlsOnComplete: false,
+    }).finally(() => {
+      state.loading = false;
+      if (state.loadingPromise === loadingPromise) delete state.loadingPromise;
+      if (panel) renderFileEditorPanel(panel, item);
+      renderSessionButtons();
+      renderPaneTabStrips();
+    });
+    state.loadingPromise = loadingPromise;
+    return;
+  }
   const loadingPromise = (async () => {
     const kind = openFileKindForPreviewPath(basenameOf(path));
     if (kind === 'image' || kind === 'media') {
@@ -71743,9 +72856,9 @@ function loadFileEditorState(path, panel, item) {
 }
 
 function updateFileEditorPanelChrome(panel, path) {
-  const state = fileState.get(path);
   const item = panel?.dataset?.layoutItem || '';
-  const previewOnly = false;
+  const state = fileEditorStateForItem(path, item);
+  const previewOnly = state?.historical === true;
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -72389,6 +73502,12 @@ function fileEditorPanelPath(panel) {
   return panel?.dataset?.filePath || '';
 }
 
+function fileEditorPanelState(panel) {
+  const path = fileEditorPanelPath(panel);
+  const item = fileEditorPanelItem(panel) || fileEditorItemFor(path);
+  return fileEditorStateForItem(path, item);
+}
+
 function fileEditorPanelMode(panel) {
   const path = fileEditorPanelPath(panel);
   return editorViewModeFor(path, fileEditorPanelItem(panel));
@@ -72458,7 +73577,9 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    const state = fileEditorPanelState(panel);
+    const panelContent = state?.kind === 'text' ? state.content : content;
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -72544,10 +73665,10 @@ function refreshEditorPreviews() {
   for (const [item, panel] of panelNodes.entries()) {
     if (!isFileEditorItem(item)) continue;
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
-      updateFilePreviewPopout(path, state.content || '');
+      if (state.historical !== true) updateFilePreviewPopout(path, state.content || '');
     }
   }
 }
@@ -72570,6 +73691,8 @@ function normalizeFileEditorSaveContent(content, options = fileEditorSaveHygiene
 
 function syncFileEditorNormalizedContentToPanels(path, content) {
   for (const openPanel of fileEditorPanelsForPath(path)) {
+    const panelState = fileEditorPanelState(openPanel);
+    if (panelState?.historical === true) continue;
     if (openPanel?._cmView) syncCodeMirrorDocument(openPanel._cmView, content, {path});
     const rawCode = openPanel?.querySelector?.('.file-editor-raw-panel code');
     if (rawCode) rawCode.textContent = content;
@@ -72577,7 +73700,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (mode === 'preview' || mode === 'split') {
       renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
-    const status = openFileStatus(fileState.get(path));
+    const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
   }
   renderLinkedFilePreviewPanels(null, path, content);
@@ -72597,8 +73720,9 @@ function applyFileEditorSaveHygiene(path) {
 
 async function saveFileEditor(path, panel, options = {}) {
   if (readOnlyMode) return false;
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return false;
   syncOpenFileContentFromPanels(path, panel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});

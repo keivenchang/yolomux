@@ -427,6 +427,33 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         to_ref = query_one(qs, "to", None)
         self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
 
+    def handle_fs_git_history(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        limit, error = parse_query_int(qs, "limit", 50, max_value=50, clamp_min=True)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        cursor = str(query_one(qs, "cursor", "") or "")
+        self.submit_filesystem_operation(
+            "GET /api/fs/git-history",
+            "git_history",
+            raw_path,
+            {"limit": limit, "cursor": cursor},
+        )
+
+    def handle_fs_git_commit(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        commit = str(query_one(qs, "commit", "") or "")
+        head = str(query_one(qs, "head", "") or "")
+        self.submit_filesystem_operation(
+            "GET /api/fs/git-commit",
+            "git_commit",
+            raw_path,
+            {"commit": commit, "head": head},
+        )
+
     def handle_blame(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
@@ -1885,6 +1912,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_diff(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_diff(self, parsed)
+
+    def handle_fs_git_history(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_git_history(self, parsed)
+
+    def handle_fs_git_commit(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_git_commit(self, parsed)
 
     def handle_blame(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_blame(self, parsed)

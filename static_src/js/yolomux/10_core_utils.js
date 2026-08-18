@@ -2664,6 +2664,51 @@ function fileStateFor(path) {
   return state ? normalizeFileStateRecord(state) : null;
 }
 
+function ensureHistoricalFileState(item, defaults = null) {
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity) return null;
+  let state = historicalFileState.get(item);
+  if (!state) {
+    state = defaults && typeof defaults === 'object' ? defaults : {};
+    historicalFileState.set(item, state);
+  }
+  Object.assign(state, {
+    historical: true,
+    immutable: true,
+    readOnly: true,
+    path: identity.path,
+    diffPinnedFromRef: identity.fromRef,
+    diffPinnedToRef: identity.toRef,
+  });
+  return normalizeFileStateRecord(state);
+}
+
+function fileEditorStateForItem(path, item = null, create = false) {
+  if (isHistoricalFileEditorItem(item)) {
+    return create ? ensureHistoricalFileState(item) : (historicalFileState.has(item) ? ensureHistoricalFileState(item) : null);
+  }
+  return create ? ensureFileState(path) : fileStateFor(path);
+}
+
+function fileEditorTabState(item, create = false) {
+  const path = fileItemPath(item);
+  return path ? fileEditorStateForItem(path, item, create) : null;
+}
+
+function fileEditorTabIsMissing(item) {
+  return fileEditorTabState(item)?.externalMissing === true;
+}
+
+function setHistoricalFileState(item, state) {
+  if (!historicalFileEditorIdentity(item) || !state || typeof state !== 'object') return null;
+  historicalFileState.set(item, state);
+  return ensureHistoricalFileState(item);
+}
+
+function deleteHistoricalFileState(item) {
+  return historicalFileState.delete(item);
+}
+
 function setFileState(path, state) {
   if (!path) return null;
   const previous = fileStateFor(path);

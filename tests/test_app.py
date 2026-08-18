@@ -7,6 +7,7 @@ from http import HTTPStatus
 import inspect
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -10767,6 +10768,7 @@ def _ready_filesystem_product(payload, *, schedule=None):
 
 def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_do_not():
     assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status"}
+    assert {"git_history", "git_commit"} <= app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
         assert app_module.filesystem_operation_priority(operation) == "point"
@@ -10966,6 +10968,47 @@ def test_identical_point_reads_coalesce_on_content_identity_and_change_with_the_
     assert app_module.filesystem_point_content_generation(str(tmp_path / "absent.md")) == ("", "stat_failed:ENOENT")
     identity, reason = app_module.filesystem_point_content_generation(str(target))
     assert reason == "" and identity.startswith("stat:")
+
+
+def test_git_history_refresh_does_not_join_inflight_work_after_head_advances(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+    first_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        first = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/git-history",
+            operation="git_history",
+            path=str(repo),
+            args={"limit": 50, "cursor": ""},
+        )
+        tracked.write_text("second\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "second")
+        second_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        refreshed = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/git-history",
+            operation="git_history",
+            path=str(repo),
+            args={"limit": 50, "cursor": ""},
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first_head != second_head
+    assert first.status == refreshed.status == HTTPStatus.ACCEPTED
+    first_kwargs, refreshed_kwargs = [kwargs for _task, _payload, kwargs in job.produced]
+    assert first_kwargs["fresh_only"] is refreshed_kwargs["fresh_only"] is True
+    assert first_kwargs["coalesce_key"] != refreshed_kwargs["coalesce_key"]
 
 
 def test_transient_product_metadata_is_retried_inside_the_operation_budget(monkeypatch, tmp_path):
@@ -11674,6 +11717,8 @@ def test_concurrent_warm_filesystem_same_key_callers_do_not_mutate_ledgers(monke
         ("GET /api/fs/read", "read", {}),
         ("GET /api/fs/info", "info", {}),
         ("GET /api/fs/diff", "diff", {"from_ref": "HEAD", "to_ref": "current"}),
+        ("GET /api/fs/git-history", "git_history", {"limit": 50, "cursor": ""}),
+        ("GET /api/fs/git-commit", "git_commit", {"commit": "a" * 40, "head": "b" * 40}),
         ("GET /api/blame", "blame", {"ref": "HEAD"}),
         ("GET /api/fs/count", "count", {}),
     ),
@@ -11688,10 +11733,12 @@ def test_retained_filesystem_reads_scope_and_revision_warm_without_ledger_mutati
     product = _filesystem_json_product(body)
     generation = ["watchd:epoch-a:7"]
     keys = []
+    fresh_only_values = []
 
     class RetainedReadJob:
         def produce(self, _task, _payload, **kwargs):
             keys.append(kwargs["coalesce_key"])
+            fresh_only_values.append(kwargs["fresh_only"])
             return {"ok": True, "state": "ready", "product": product}, body
 
     webapp = app_module.TmuxWebtermApp([])
@@ -11718,6 +11765,7 @@ def test_retained_filesystem_reads_scope_and_revision_warm_without_ledger_mutati
 
     assert all(response.status == HTTPStatus.OK for response in (first, revised, other_scope))
     assert len(keys) == len(set(keys)) == 3
+    assert fresh_only_values == [operation in {"git_history", "git_commit"}] * 3
     assert diagnostics["queued_delivery_frames"] == []
     assert diagnostics["outstanding_queued"] == []
 
@@ -17671,12 +17719,21 @@ def test_a_recorded_statsd_failure_alarms_even_while_the_pin_is_pending(monkeypa
     assert panel["reason"] == "stats database migration failed", panel
 
 
-def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys):
+def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys, request):
     """The observer arms after the election is DECIDED, whatever it decided.
 
     A monitor that only runs on the process that won the background-owner election would be a
     worse defect than the flash it was reordered for, so both outcomes are proven here.
     """
+    root_logger = logging.getLogger()
+    original_handlers = tuple(root_logger.handlers)
+
+    def restore_root_handlers():
+        for handler in tuple(root_logger.handlers):
+            if all(handler is not original for original in original_handlers):
+                root_logger.removeHandler(handler)
+
+    request.addfinalizer(restore_root_handlers)
     for acquired in (True, False):
         order: list[str] = []
 
