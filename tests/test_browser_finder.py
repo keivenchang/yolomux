@@ -1358,6 +1358,27 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
           const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
           const fieldOrder = Array.from(rootRows[0].children).map(node => node.className.split(' ')[0]);
+          rootPanel.style.width = '1200px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const alignedColumnVisibility = fieldVisibility(rootPanel);
+          const columnStarts = Object.fromEntries([
+            'sha',
+            'date',
+            'changes',
+            'author',
+            'description',
+          ].map(field => [field, rootRows.map(row => Number(
+            row.querySelector('.git-diff-commit-' + field).getBoundingClientRect().left.toFixed(2),
+          ))]));
+          const rowRects = rootRows.map(row => row.getBoundingClientRect());
+          const rowDensity = {
+            heights: rowRects.map(rect => Number(rect.height.toFixed(2))),
+            gaps: rowRects.slice(1).map((rect, index) => Number(
+              (rect.top - rowRects[index].bottom).toFixed(2),
+            )),
+          };
+          rootPanel.style.width = '';
+          await new Promise(resolve => requestAnimationFrame(resolve));
           rootRows[0].click();
           rootRows[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
           await waitFor(() => document.activeElement === rootRows[1]);
@@ -1544,6 +1565,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             commitOrder,
             loadedOrder,
             fieldOrder,
+            alignedColumnVisibility,
+            columnStarts,
+            rowDensity,
             commitRoving,
             focusAfterAsync,
             fileRoving,
@@ -1605,6 +1629,12 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "git-diff-commit-author",
         "git-diff-commit-description",
     ], metrics
+    assert all(metrics["alignedColumnVisibility"].values()), metrics["alignedColumnVisibility"]
+    assert all(
+        max(starts) - min(starts) <= 0.5 for starts in metrics["columnStarts"].values()
+    ), metrics["columnStarts"]
+    assert max(metrics["rowDensity"]["heights"]) <= 24.5, metrics["rowDensity"]
+    assert max(metrics["rowDensity"]["gaps"], default=0) <= 0.5, metrics["rowDensity"]
     assert metrics["commitRoving"] == {"focused": sha_b, "tabStops": [sha_b]}, metrics
     assert metrics["focusAfterAsync"] == sha_b, metrics
     assert metrics["fileRoving"]["focused"] == metrics["fileRoving"]["expected"], metrics

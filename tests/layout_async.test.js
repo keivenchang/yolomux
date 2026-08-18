@@ -103,6 +103,16 @@ async function runLayoutAsyncSuite() {
     const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
     const changesDrop = css.indexOf('.git-diff-commit-changes', dateDrop + 1);
     assert.ok(authorDrop >= 0 && dateDrop > authorDrop && changesDrop > dateDrop, 'responsive rules remove author, then date, then changes');
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*grid-template-columns:\s*14px max-content max-content max-content/,
+      'one commit-list grid owns the shared semantic column tracks');
+    assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
+      'each commit group inherits the list tracks');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
+      'each summary row inherits the same list tracks');
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-8\)/,
+      'collapsed commit rows have no extra inter-row whitespace');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*24px;[\s\S]*padding:\s*var\(--space-2\) var\(--space-6\)/,
+      'commit summaries keep the approved compact row height and padding');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
     assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
   });
