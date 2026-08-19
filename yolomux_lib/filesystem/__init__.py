@@ -517,9 +517,14 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
 
 
 @normalize_os_errors
-def delete_path(raw_path: str) -> dict[str, Any]:
+def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
     _sync_package_overrides()
-    payload = io_ops.delete_path(raw_path)
+    payload = io_ops.delete_path(raw_path, recursive=recursive)
+    if payload.get("pending"):
+        # A non-terminal probe deleted NOTHING.  Invalidating the path policy caches or fanning out
+        # a reindex here would publish a filesystem change that never happened; both are terminal
+        # side effects and fire only when the delete actually removed the entry.
+        return payload
     paths.invalidate_path_policy_caches()
     payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-delete")
     return payload

@@ -10977,17 +10977,27 @@ def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
     """The write-side boundary, held as tightly as the read-side one above.
 
     `point` stays reads-only: it carries the stat-derived coalescing key and `fresh_only`, which a
-    mutation must never get.  `delete` stays unbounded: `delete_path` recurses through a subtree.
+    mutation must never get.  `delete` is bounded ONLY without `recursive`: one `unlink`, or one
+    `rmdir` probe that refuses to enumerate.  A recursive delete walks a subtree (measured at 20,001
+    destructive syscalls for one 20,000-entry directory) and stays on the shared `interactive` lane.
     """
-    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir"}
+    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir", "delete"}
     for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS):
         assert app_module.filesystem_operation_priority(operation) == "mutation"
+        assert app_module.filesystem_operation_priority(operation, {}) == "mutation"
     # A mutation is not a retained read and must never enter the coalescing read lane.
     assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_POINT_OPERATIONS)
     assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_RETAINED_READ_OPERATIONS)
+    # The lane depends on the ARGUMENTS for exactly one operation, and only for the true flag.
+    assert app_module.filesystem_operation_priority("delete", {"recursive": True}) == "interactive"
+    assert app_module.filesystem_operation_priority("delete", {"recursive": False}) == "mutation"
+    assert app_module.filesystem_operation_priority("delete", {"recursive": "yes"}) == "mutation"
+    # No other bounded mutation is argument-sensitive.
+    for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS - {"delete"}):
+        assert app_module.filesystem_operation_priority(operation, {"recursive": True}) == "mutation"
     # Recursive/unbounded writes stay on the shared `interactive` lane no matter how point-shaped
     # they look at the call site.
-    for operation in ("delete", "unindex", "zip"):
+    for operation in ("unindex", "zip"):
         assert app_module.filesystem_operation_priority(operation) == "interactive"
     # The mutation lane is physically separate from the read lane and from every bulk lane.
     assert jobd.JOBD_PRIORITY_LANES["mutation"] == "mutation"
@@ -10996,7 +11006,7 @@ def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
     assert "mutation" in jobd.JOBD_PRIORITIES
 
 
-@pytest.mark.parametrize("operation", ["write", "rename", "mkdir"])
+@pytest.mark.parametrize("operation", ["write", "rename", "mkdir", "delete"])
 def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane(operation, tmp_path, monkeypatch):
     """A one-syscall mkdir must not wait for someone else's recursive tree walk.
 
@@ -11040,7 +11050,10 @@ def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane
     )
 
 
-@pytest.mark.parametrize("held_operation, probe_operation", [("mkdir", "read"), ("read", "mkdir")])
+@pytest.mark.parametrize(
+    "held_operation, probe_operation",
+    [("mkdir", "read"), ("read", "mkdir"), ("delete", "read"), ("read", "delete")],
+)
 def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operation, probe_operation, tmp_path, monkeypatch):
     """`point` and `mutation` are separate lanes with separate executors, so filling every slot of
     one must leave the other's capacity untouched in both directions."""
@@ -11077,6 +11090,188 @@ def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operati
     assert lanes[held_lane]["queued"] == 0
     assert probe.status == "running"
     assert lanes[jobd.PersistentJobBroker._lane_for_priority(probe_priority)]["active"] == 1
+
+
+def test_bounded_unlink_dispatches_while_recursive_deletes_hold_the_shared_lane(tmp_path, monkeypatch):
+    """The reproduced failure, in the form that made it a bug.
+
+    Before the split every `delete` -- including a one-entry unlink -- was classified `interactive`,
+    so deleting one file queued behind whatever recursive delete, count or Finder batch already
+    owned the single shared worker.  Here the shared lane is held at capacity by unresolved
+    RECURSIVE deletes; the one-entry unlink must still reach `running` on this pump.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for priority in ("freshness", "maintenance", "interactive"):
+        lane = jobd.PersistentJobBroker._lane_for_priority(priority)
+        for number in range(service._lane_capacity(lane)):
+            holder = service._queue_record(
+                "filesystem_operation",
+                app_module.filesystem_operation_descriptor(
+                    "delete", str(tmp_path / f"tree-{number}"), {"recursive": True},
+                ),
+                priority, number, f"recursive-delete-{priority}-{number}",
+            )
+            holder.status = "running"
+            holder.future = Future()
+            holders.append(holder)
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    unlink_args = {}
+    unlink = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor("delete", str(tmp_path / "one-file.txt"), unlink_args),
+        app_module.filesystem_operation_priority("delete", unlink_args), 1, "bounded-unlink",
+    )
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert unlink.status == "running", "one-entry unlink queued behind held recursive deletes"
+
+
+def test_recursive_delete_cannot_take_a_slot_the_bounded_mutation_lane_owns(tmp_path, monkeypatch):
+    """The other direction: filling the mutation lane with bounded unlinks must not admit a
+    recursive delete into it, and must not stop the shared lane from running one."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    mutation_lane = jobd.PersistentJobBroker._lane_for_priority("mutation")
+    for number in range(service._lane_capacity(mutation_lane)):
+        holder = service._queue_record(
+            "filesystem_operation",
+            app_module.filesystem_operation_descriptor("delete", str(tmp_path / f"file-{number}.txt"), {}),
+            app_module.filesystem_operation_priority("delete", {}), number, f"held-unlink-{number}",
+        )
+        holder.status = "running"
+        holder.future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    recursive_args = {"recursive": True}
+    recursive = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor("delete", str(tmp_path / "tree"), recursive_args),
+        app_module.filesystem_operation_priority("delete", recursive_args), 1, "recursive-delete",
+    )
+
+    service._pump()
+
+    lanes = service.common_status()["lanes"]
+    assert lanes[mutation_lane]["active"] == service._lane_capacity(mutation_lane)
+    assert lanes[mutation_lane]["queued"] == 0
+    assert recursive.status == "running"
+    assert lanes[jobd.PersistentJobBroker._lane_for_priority("interactive")]["active"] == 1
+
+
+def test_pending_delete_escalates_to_bulk_under_one_operation_id(monkeypatch, tmp_path):
+    """One click, one receipt, one terminal result -- across a lane change.
+
+    The bounded probe answers `pending: "subtree"`.  That must NOT terminalize the operation: the
+    browser is holding one receipt for one delete.  The completion releases the mutation lane,
+    reserves `bulk`, and re-produces the SAME delete with `recursive=True` under the SAME
+    `operation_id`, so exactly one terminal result ever reaches the client.
+    """
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    pending_payload = {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "dir", "reindex_roots": []}
+    job = _RecordingFilesystemJob([
+        _ready_filesystem_product(pending_payload),
+        _ready_filesystem_product(terminal_payload),
+    ])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    terminals = []
+    original_terminalize = webapp.terminalize_operation
+
+    def record_terminalize(operation_id, result, status):
+        terminals.append((operation_id, result, status))
+        return original_terminalize(operation_id, result, status)
+
+    monkeypatch.setattr(webapp, "terminalize_operation", record_terminalize)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    submissions = [(kwargs["priority"], payload["op"], payload["args"]) for _task, payload, kwargs in job.produced]
+    assert submissions == [
+        ("mutation", "delete", {}),
+        ("interactive", "delete", {"recursive": True}),
+    ], "the pending probe did not re-produce the same delete as recursive bulk work"
+    # ONE receipt: the same operation id, terminalized exactly once, and only by the recursive result.
+    assert [entry[0] for entry in terminals] == [operation_id]
+    assert terminals[0][2] == HTTPStatus.OK
+    assert terminals[0][1]["state"] == "ready"
+    assert terminals[0][1]["data"]["deleted"] is True
+    assert "pending" not in terminals[0][1]["data"]
+
+
+def test_bounded_delete_of_a_file_terminalizes_without_touching_the_bulk_lane(monkeypatch, tmp_path):
+    """The common case must stay one produce on one lane -- no speculative escalation."""
+    target = tmp_path / "one-file.txt"
+    target.write_text("payload", encoding="utf-8")
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "file", "reindex_roots": []}
+    job = _RecordingFilesystemJob([_ready_filesystem_product(terminal_payload)])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    terminals = []
+    original_terminalize = webapp.terminalize_operation
+    monkeypatch.setattr(
+        webapp, "terminalize_operation",
+        lambda operation_id, result, status: (
+            terminals.append((operation_id, status)) or original_terminalize(operation_id, result, status)
+        ),
+    )
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target),
+        )
+        operation_id = response.payload["operation"]["id"]
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [kwargs["priority"] for _task, _payload, kwargs in job.produced] == ["mutation"]
+    assert terminals == [(operation_id, HTTPStatus.OK)]
+
+
+def test_recursive_delete_request_never_reserves_the_mutation_lane(monkeypatch, tmp_path):
+    """A caller that already knows it wants the subtree goes straight to the shared lane."""
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "dir", "reindex_roots": []}
+    job = _RecordingFilesystemJob([_ready_filesystem_product(terminal_payload)])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target), args={"recursive": True},
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [kwargs["priority"] for _task, _payload, kwargs in job.produced] == ["interactive"]
 
 
 @pytest.mark.parametrize("operation", ["read", "info", "index_status"])

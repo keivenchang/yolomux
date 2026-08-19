@@ -584,6 +584,106 @@ def test_search_files_consumes_the_authorized_directory_handle(monkeypatch, tmp_
     assert [item["name"] for item in payload["files"]] == ["safe.txt"]
 
 
+def test_descriptor_path_never_re_resolves_a_pathname_on_darwin(monkeypatch, tmp_path):
+    """`descriptor_path()` feeds `git -C`, the count/zip walkers and the multi-repo scan.
+
+    Whatever it returns is opened AGAIN by that consumer, so it must name this descriptor
+    generation and nothing else.  `F_GETPATH` returns a pathname the kernel re-resolves on the
+    consumer's next open: a rename or namespace replacement between the call and the consumer hands
+    the consumer a different object.  Darwin cannot run here, so this proves the branch is gone --
+    with the platform forced to darwin, `F_GETPATH` must not be consulted at all.
+    """
+    target = tmp_path / "repo"
+    target.mkdir()
+    refusals = []
+
+    def refuse_fcntl(*args, **kwargs):
+        refusals.append(args)
+        raise AssertionError("descriptor_path() re-resolved a pathname through F_GETPATH")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(fcntl, "fcntl", refuse_fcntl)
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        handle = filesystem_paths.SafePathHandle(target, target, descriptor)
+        descriptor_path = handle.descriptor_path()
+        assert refusals == []
+        assert descriptor_path.parent in set(filesystem_paths.DESCRIPTOR_PATH_ROOTS)
+        # Generation-bound, not name-bound: renaming the directory out from under the pathname must
+        # not change which object that pathname names.
+        target.rename(tmp_path / "moved")
+        assert os.stat(descriptor_path).st_ino == os.fstat(descriptor).st_ino
+    finally:
+        os.close(descriptor)
+
+
+def test_descriptor_path_fails_closed_without_a_descriptor_bound_root(monkeypatch, tmp_path):
+    """No descriptor-bound root means no authorized pathname: refuse instead of substituting one."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(filesystem_paths, "DESCRIPTOR_PATH_ROOTS", ())
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        handle = filesystem_paths.SafePathHandle(target, target, descriptor)
+        with pytest.raises(FilesystemError) as error:
+            handle.descriptor_path()
+        assert error.value.status == 500
+    finally:
+        os.close(descriptor)
+
+
+def test_multi_repo_scan_authorizes_every_child_through_the_shared_owner(monkeypatch, tmp_path):
+    """The non-recursive multi-repo scan used to `os.listdir()` then `os.open()` an absolute child
+    path and wrap the raw descriptor in a bare `SafePathHandle`, so that child never passed
+    `_ensure_path_allowed` and never opened relative to the pinned scan-root descriptor."""
+    root = tmp_path / "workspaces"
+    repo = root / "alpha"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "needle.txt").write_text("needle", encoding="utf-8")
+    authorized: list[Path] = []
+    original_ensure = filesystem_paths._ensure_path_allowed
+
+    def record_authorization(path, *, resolved=None):
+        authorized.append(Path(path))
+        return original_ensure(path, resolved=resolved)
+
+    monkeypatch.setattr(filesystem_paths, "_ensure_path_allowed", record_authorization)
+
+    payload = filesystem_search.search_files(str(root), query="needle", recursive=False)
+
+    assert [item["name"] for item in payload["files"]] == ["needle.txt"]
+    assert repo in authorized, "multi-repo scan child never passed the shared authorization owner"
+
+
+def test_multi_repo_scan_refuses_a_child_the_policy_blocks(monkeypatch, tmp_path):
+    """A blocked child must be refused by the one policy owner, not by a name-only prefilter."""
+    root = tmp_path / "workspaces"
+    repo = root / "alpha"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "needle.txt").write_text("needle", encoding="utf-8")
+    original_ensure = filesystem_paths._ensure_path_allowed
+
+    def block_the_repo(path, *, resolved=None):
+        if Path(path) == repo:
+            raise FilesystemError(
+                "path is blocked because it may contain credentials: BLOCKED_SENTINEL_DO_NOT_EXPOSE",
+                status=403,
+                message_key="fs.error.credentialBlocked",
+            )
+        return original_ensure(path, resolved=resolved)
+
+    monkeypatch.setattr(filesystem_paths, "_ensure_path_allowed", block_the_repo)
+
+    payload = filesystem_search.search_files(str(root), query="needle", recursive=False)
+
+    assert payload["files"] == []
+
+
 def test_recursive_search_never_follows_a_repointed_descendant(monkeypatch, tmp_path):
     indexed = tmp_path / "indexed"
     nested = indexed / "nested"
@@ -2289,11 +2389,186 @@ def test_delete_path_removes_directory_tree(tmp_path):
     (target / "nested").mkdir(parents=True)
     (target / "nested" / "file.txt").write_text("hello", encoding="utf-8")
 
-    result = filesystem.delete_path(str(target))
+    result = filesystem.delete_path(str(target), recursive=True)
 
     assert result["deleted"] is True
     assert result["kind"] == "dir"
+    assert "pending" not in result
     assert not target.exists()
+
+
+DELETE_ENTRY_CASES = ("file", "symlink", "empty_dir", "nonempty_dir", "missing")
+
+
+def _make_delete_target(tmp_path: Path, case: str) -> Path:
+    target = tmp_path / f"delete-{case}"
+    if case == "file":
+        target.write_text("payload", encoding="utf-8")
+    elif case == "symlink":
+        source = tmp_path / "symlink-source.txt"
+        source.write_text("payload", encoding="utf-8")
+        target.symlink_to(source)
+    elif case == "empty_dir":
+        target.mkdir()
+    elif case == "nonempty_dir":
+        (target / "child").mkdir(parents=True)
+        (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    return target
+
+
+@pytest.mark.parametrize("case", DELETE_ENTRY_CASES)
+def test_non_recursive_delete_has_one_typed_result_per_entry_class(tmp_path, case):
+    """One signature, one terminal result shape, and exactly one non-terminal probe result.
+
+    `symlink` reports `kind: "file"`: today's payload calls every non-directory a file, and the
+    browser reads that field.  Recorded here rather than changed, because adding `kind: "symlink"`
+    is a UI-visible payload change that belongs to whoever owns the Finder row rendering.
+    """
+    target = _make_delete_target(tmp_path, case)
+
+    if case == "missing":
+        with pytest.raises(FilesystemError) as error:
+            filesystem_io.delete_path(str(target))
+        assert error.value.status == 404
+        return
+
+    result = filesystem_io.delete_path(str(target))
+
+    if case == "nonempty_dir":
+        assert result == {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+        assert target.is_dir()
+        assert (target / "child" / "leaf.txt").read_text(encoding="utf-8") == "payload"
+    elif case == "empty_dir":
+        assert result == {"path": str(target), "deleted": True, "kind": "dir"}
+        assert not target.exists()
+    else:
+        assert result == {"path": str(target), "deleted": True, "kind": "file"}
+        assert not target.is_symlink() and not target.exists()
+        if case == "symlink":
+            assert (tmp_path / "symlink-source.txt").exists(), "unlink followed the link"
+
+
+def test_non_recursive_delete_of_a_nonempty_directory_never_scans_the_subtree(tmp_path, monkeypatch):
+    """The bound proof.  A bounded unlink is bounded because it performs a FIXED number of
+    destructive syscalls.  Before the split, one `delete` of a 20,000-entry tree performed 20,401
+    of them under the same request, which is what disqualified `delete` from the mutation lane.
+    Counting elapsed time would not prove the bound; refusing to enumerate does.
+    """
+    target = tmp_path / "tree"
+    target.mkdir()
+    for index in range(20_000):
+        (target / f"entry-{index:05d}.txt").write_text("x", encoding="utf-8")
+    scandir_calls = []
+    unlink_calls = []
+    rmdir_calls = []
+    real_scandir, real_unlink, real_rmdir = os.scandir, os.unlink, os.rmdir
+
+    def record_scandir(*args, **kwargs):
+        scandir_calls.append(args)
+        return real_scandir(*args, **kwargs)
+
+    def record_unlink(*args, **kwargs):
+        unlink_calls.append(args)
+        return real_unlink(*args, **kwargs)
+
+    def record_rmdir(*args, **kwargs):
+        rmdir_calls.append(args)
+        return real_rmdir(*args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", record_scandir)
+    monkeypatch.setattr(os, "unlink", record_unlink)
+    monkeypatch.setattr(os, "rmdir", record_rmdir)
+
+    result = filesystem_io.delete_path(str(target))
+
+    assert result["pending"] == "subtree"
+    assert result["deleted"] is False
+    assert scandir_calls == [], f"non-recursive delete enumerated the subtree {len(scandir_calls)} times"
+    assert unlink_calls == [], f"non-recursive delete unlinked {len(unlink_calls)} entries"
+    assert len(rmdir_calls) == 1, "the bounded probe is exactly one rmdir"
+
+
+def test_recursive_delete_still_removes_the_whole_subtree(tmp_path):
+    target = tmp_path / "tree"
+    (target / "a" / "b").mkdir(parents=True)
+    (target / "a" / "b" / "leaf.txt").write_text("payload", encoding="utf-8")
+    (target / "a" / "sibling.txt").write_text("payload", encoding="utf-8")
+
+    result = filesystem_io.delete_path(str(target), recursive=True)
+
+    assert result == {"path": str(target), "deleted": True, "kind": "dir"}
+    assert not target.exists()
+
+
+def test_pending_delete_probe_invalidates_nothing_and_reindexes_nothing(tmp_path, monkeypatch):
+    """A probe that deleted nothing must not be reported as a mutation.
+
+    `invalidate_path_policy_caches()` and the reindex fan-out are TERMINAL-result side effects; a
+    pending probe firing them would publish a filesystem change that never happened.
+    """
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    invalidations = []
+    reindexes = []
+    monkeypatch.setattr(filesystem_paths, "invalidate_path_policy_caches", lambda: invalidations.append(1))
+    monkeypatch.setattr(filesystem, "_reindex_after_mutation", lambda candidates, reason="": reindexes.append(reason) or [])
+
+    pending = filesystem.delete_path(str(target))
+
+    assert pending == {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+    assert "reindex_roots" not in pending
+    assert invalidations == []
+    assert reindexes == []
+
+    terminal = filesystem.delete_path(str(target), recursive=True)
+
+    assert terminal["deleted"] is True
+    assert "pending" not in terminal
+    assert invalidations == [1]
+    assert reindexes == ["fs-delete"]
+
+
+def test_delete_path_refuses_a_blocked_target_before_any_destructive_syscall(tmp_path, monkeypatch):
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    target = blocked / "id_rsa"
+    target.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    unlink_calls = []
+    real_unlink = os.unlink
+    monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: unlink_calls.append(args) or real_unlink(*args, **kwargs))
+
+    for recursive in (False, True):
+        with pytest.raises(FilesystemError) as error:
+            filesystem_io.delete_path(str(target), recursive=recursive)
+        assert error.value.status == 403
+    assert unlink_calls == []
+    assert target.read_text(encoding="utf-8") == "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_delete_path_consumes_the_authorized_parent_across_a_namespace_replacement(monkeypatch, tmp_path, recursive):
+    """Both delete lanes keep ONE authorization owner: swapping the parent after authorization must
+    not redirect either the bounded probe or the recursive walk at a blocked directory."""
+    safe_parent = tmp_path / "safe"
+    safe_parent.mkdir()
+    (safe_parent / "item").mkdir()
+    (safe_parent / "item" / "leaf.txt").write_text("safe", encoding="utf-8")
+    blocked_parent = tmp_path / ".ssh"
+    blocked_parent.mkdir()
+    (blocked_parent / "item").mkdir()
+    (blocked_parent / "item" / "leaf.txt").write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(safe_parent, target_is_directory=True)
+    state = _swap_path_after_authorization(monkeypatch, alias / "item", alias, blocked_parent)
+
+    try:
+        filesystem_io.delete_path(str(alias / "item"), recursive=recursive)
+    except FilesystemError:
+        pass
+
+    assert state["swapped"] is True
+    assert (blocked_parent / "item" / "leaf.txt").read_text(encoding="utf-8") == "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 
 
 def test_count_directory_files_counts_recursive_regular_files(tmp_path):

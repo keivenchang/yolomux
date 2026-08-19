@@ -1856,9 +1856,9 @@ FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 # Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
 # result right now (an editor open, a file probe, an index badge).  These are the only filesystem
 # operations that take jobd's `point` lane.  Everything else -- recursive `list`, `search`,
-# `count`, `diff`, `blame`, `delete`, Finder batches, watch-diff fanouts, forced session-files
-# transforms -- stays on the shared `interactive` lane, because its cost is unbounded in the input
-# and it is exactly the work that used to put an editor open behind it head-of-line on it.
+# `count`, `diff`, `blame`, recursive `delete`, Finder batches, watch-diff fanouts, forced
+# session-files transforms -- stays on the shared `interactive` lane, because its cost is unbounded
+# in the input and it is exactly the work that used to put an editor open behind it head-of-line.
 FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
 
 # The write-side half of that same principle, and the half that was missed when `point` was drawn:
@@ -1868,19 +1868,30 @@ FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
 # must never be coalesced with another mutation.  They take jobd's sibling `mutation` lane, which
 # is bounded and physically separate from both the read lane and the shared `interactive` lane.
 #
-# `delete` is deliberately absent.  `delete_path` recurses through a whole subtree, so its cost is
-# unbounded in the input; it belongs with the other unbounded work regardless of looking like a
-# point mutation at the call site.  A measured `mkdir` waited 6737 ms then 8167 ms behind one
-# recursive count over 457,364 files on the shared lane before this lane existed.
-FILESYSTEM_BOUNDED_MUTATIONS = frozenset({"write", "rename", "mkdir"})
+# `delete` is here, but ONLY in its bounded form.  `delete` used to be excluded wholesale because
+# `delete_path` recursed through a whole subtree -- measured at 20,001 destructive syscalls for one
+# 20,000-entry directory.  That is a property of the WORK, not of the operation: deleting a single
+# file is one `unlink`, exactly as bounded as `mkdir`, and it was queuing behind recursive counts
+# and Finder batches on the shared lane for no reason.  `io_ops.delete_path()` now separates the two
+# without a second route: without `recursive` it performs one `unlink`, or one `rmdir` probe that
+# returns a typed `pending: "subtree"` WITHOUT enumerating anything.  So the lane is chosen from the
+# arguments as well as the name, and a request that turns out to need the subtree is re-produced
+# with `recursive=True` on the bulk lane under the SAME operation id.  A measured `mkdir` waited
+# 6737 ms then 8167 ms behind one recursive count over 457,364 files before this lane existed.
+FILESYSTEM_BOUNDED_MUTATIONS = frozenset({"write", "rename", "mkdir", "delete"})
+
+# The one operation whose lane depends on its arguments, and the argument that decides it.
+FILESYSTEM_RECURSIVE_MUTATION = "delete"
 
 
-def filesystem_operation_priority(operation: str) -> str:
-    """Return the one jobd lane priority that owns a filesystem operation."""
+def filesystem_operation_priority(operation: str, args: Mapping[str, Any] | None = None) -> str:
+    """Return the one jobd lane priority that owns a filesystem operation and its arguments."""
     name = str(operation)
     if name in FILESYSTEM_POINT_OPERATIONS:
         return "point"
     if name in FILESYSTEM_BOUNDED_MUTATIONS:
+        if name == FILESYSTEM_RECURSIVE_MUTATION and (args or {}).get("recursive") is True:
+            return "interactive"
         return "mutation"
     return "interactive"
 
@@ -14603,12 +14614,70 @@ class TmuxWebtermApp:
             code="producer_abandoned",
         )
 
+    def escalate_filesystem_delete_to_bulk(
+        self,
+        *,
+        operation_id: str,
+        request_id: str,
+        route: str,
+        reload_yolo_rules: bool,
+        escalation: dict[str, Any],
+        deadline_at: float,
+    ) -> bool:
+        """Re-produce ONE bounded delete as its recursive self on the bulk lane, same operation id.
+
+        The browser holds one receipt for one delete.  A bounded probe that discovers a nonempty
+        directory must therefore not terminalize: it releases the mutation lane (by returning from
+        the mutation-lane completion worker, which is what frees that reservation), reserves `bulk`,
+        and hands the SAME `operation_id` and `request_id` to a fresh completion for the recursive
+        product.  The operation deadline is NOT extended -- one receipt, one deadline -- so a subtree
+        that cannot finish inside it expires honestly instead of silently outliving its promise.
+        """
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
+            return False
+        try:
+            descriptor = filesystem_operation_descriptor(
+                escalation["operation"], escalation["path"], dict(escalation["args"]),
+            )
+            product_key = f"filesystem-operation:{uuid.uuid4().hex}"
+            response, body = self.job_client.produce(
+                "filesystem_operation",
+                descriptor,
+                priority="interactive",
+                generation=1,
+                coalesce_key=product_key,
+                deadline_ms=int(max(1.0, deadline_at - time.time()) * 1000),
+                delivery="receipt",
+            )
+            job = response.get("job") if isinstance(response.get("job"), dict) else {}
+            job_id = str(job.get("job_id") or "")
+            if body or response.get("ok") is not True or not job_id:
+                reservation.release()
+                return False
+            producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=1)
+        except Exception:
+            reservation.release()
+            raise
+        return self.jobd_operation_service.submit_reserved(
+            reservation,
+            self.complete_filesystem_operation,
+            operation_id,
+            request_id,
+            route,
+            reload_yolo_rules,
+            None,
+            producer,
+            deadline_at,
+        )
+
     def complete_filesystem_operation(
         self,
         operation_id: str,
         request_id: str,
         route: str,
         reload_yolo_rules: bool,
+        delete_escalation: dict[str, Any] | None,
         producer: JobdProductOperation,
         deadline_at: float,
     ) -> None:
@@ -14625,6 +14694,23 @@ class TmuxWebtermApp:
                 raise JobdOperationUnavailable(
                     "malformed completed filesystem product",
                     {"error": "malformed completed filesystem product", "status": "malformed_product"},
+                )
+            if delete_escalation is not None and data.get("pending") == "subtree":
+                if self.escalate_filesystem_delete_to_bulk(
+                    operation_id=operation_id,
+                    request_id=request_id,
+                    route=route,
+                    reload_yolo_rules=reload_yolo_rules,
+                    escalation=delete_escalation,
+                    deadline_at=deadline_at,
+                ):
+                    # Deliberately NOT terminal: the same operation is now waiting on the bulk lane.
+                    return
+                raise JobdOperationUnavailable(
+                    "recursive delete could not be scheduled on the bulk lane",
+                    {"error": "recursive delete could not be scheduled on the bulk lane", "status": "service_busy"},
+                    code="service_busy",
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             if reload_yolo_rules:
                 data["yolo_rules"] = yolo_rules.reload_rules()
@@ -14688,7 +14774,7 @@ class TmuxWebtermApp:
         # Priority (and therefore the completion lane) is computed BEFORE admission: a point read
         # reserves the point lane and a bounded mutation the mutation lane, so neither can be
         # refused or stranded because bulk completion polls hold the shared pool.
-        priority = filesystem_operation_priority(operation)
+        priority = filesystem_operation_priority(operation, operation_args)
         reservation = self.jobd_operation_service.reserve(jobd_operation_lane(priority))
         if reservation is None:
             result = self.jobd_operation_failure_result(
@@ -14775,6 +14861,14 @@ class TmuxWebtermApp:
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
         producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=generation)
+        # A bounded `delete` may come back saying the target is a nonempty directory.  That is not a
+        # failure and not a second request: this names the SAME operation re-produced with
+        # `recursive=True`, so the completion can move it to the bulk lane under one receipt.
+        delete_escalation = (
+            {"operation": operation, "path": path, "args": {**operation_args, "recursive": True}}
+            if operation == FILESYSTEM_RECURSIVE_MUTATION and priority == "mutation"
+            else None
+        )
         payload, status = self.accept_jobd_product_operation(
             route=route,
             kind="filesystem_operation",
@@ -14784,7 +14878,7 @@ class TmuxWebtermApp:
             producer=producer,
             deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
             completion=self.complete_filesystem_operation,
-            completion_args=(route, reload_yolo_rules),
+            completion_args=(route, reload_yolo_rules, delete_escalation),
             reservation=reservation,
             lane=jobd_operation_lane(priority),
         )
@@ -14809,9 +14903,10 @@ class TmuxWebtermApp:
         enough concurrent downloads refused every other client with ``service busy``.
         """
         request_id = self.new_api_request_id()
-        descriptor = filesystem_operation_descriptor(operation, path, dict(args or {}))
+        relay_args = dict(args or {})
+        descriptor = filesystem_operation_descriptor(operation, path, relay_args)
         product_key = f"filesystem-operation-relay:{uuid.uuid4().hex}"
-        priority = filesystem_operation_priority(operation)
+        priority = filesystem_operation_priority(operation, relay_args)
         deadline_ms = int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)
         response, body = self.job_client.produce(
             "filesystem_operation",
