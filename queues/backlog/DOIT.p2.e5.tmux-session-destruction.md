@@ -50,6 +50,34 @@ WHY THIS MATTERS HERE: it produces exactly the signature this queue recorded - a
 
 The fix is tracked in `DOIT.p1.e1.tmux-exact-session-target.md` and is implemented but not yet integrated. If the retained tripwire is ever built, it should specifically test whether unexplained disappearances stop after that fix lands, which is a far cheaper discriminator than a blind seven-day soak.
 
+## 2026-08-18 REFUTED AND RECOMMENDED FOR RETIREMENT - The Retained Archive Exists
+
+The premise of this queue is FALSIFIED, and the prefix-kill mechanism recorded above as a "candidate cause" is REFUTED as the explanation. That candidate hypothesis is withdrawn.
+
+THE HARD BLOCKER WAS FALSE. `tools/tmux_state.sh` is absent from this repo, but the snapshot owner it describes exists at `~/dev/ai-config/claude/skills/tmux-capture/scripts/tmux_state.sh` and has been writing per-minute snapshots to `~/.cache/tmux-state/history/` for 15 days. Measured coverage is 1440 rows/day across 2026-08-04 through 2026-08-18 - complete per-minute coverage of the incident window and the fortnight after it. Each row carries session, window, proc, pane, cwd, provider, transcript id, and argv, which is enough to join a session across a rename by identity. There was never a need to build a tripwire or run a seven-day soak.
+
+TIME-CRITICAL: that archive is expiring. `HIST_DAYS=14` prunes on a rolling basis and the oldest retained snapshot advanced three times during this session alone. 2026-08-04 is pruned within roughly 24 hours. A preserved copy of 2026-08-03 through 2026-08-18 is at `/home/keivenc/.cache/tmux-state-incident-20260804/history-20260803-to-20260818.tgz`, 4,285,446 bytes, verified to sit outside the prune scope, which targets only `$HIST_DIR/snapshot-*.tsv`.
+
+WHAT THE DATA SHOWS across 21,531 consecutive snapshot pairs, 156 vanished-name events:
+
+- 34 were RENAMES, not deaths, verified by identical transcript UUID and cwd within the same minute. A name-keyed differ reads every ticket-prefix rename as a disappearance.
+- 122 were true terminations: 56 bullpen scratch, 23 yolomux dev/agent scratch, 20 named work sessions, 12 `yt-*` fixtures, 7 numeric scratch, 4 gate scratch. 110 of 122 were single-pane.
+- Session `2`, this queue's marquee "died three times" symptom, is a single-window single-pane session whose only process is `claude`, with a DIFFERENT transcript UUID each incarnation. The agent exited, the last pane exited, tmux ended the session. No kill was involved.
+
+WHY THE PREFIX MECHANISM CANNOT BE THE CAUSE, structurally:
+- A prefix kill can only destroy a session whose name strictly EXTENDS the target. `2` has no nonempty proper prefix, so it can never be a prefix victim. The headline symptom is mechanically impossible under this cause.
+- A sweep of all 122 true terminations for the prefix signature found ZERO matches.
+- tmux's prefix resolution returns NULL on ambiguity, and the real naming distribution makes short numeric targets ambiguous rather than lethal.
+- `kill_session` was already `@requires_known_session(refresh=True)` in the code running that day (verified at `aae9c157e`), so a stale client receives 404, not a sibling kill.
+
+AGAINST THAT CONCLUSION, recorded honestly: the mechanism WAS maximally exposed on 2026-08-04. `tmux_guarded_verb` did not land until `d4caf7fe1` on 2026-08-08, and production explicitly opts in via `YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1` (`tools/startup_common.sh:7-9`). The fix remains justified on its own merits; it is simply not this queue's cause.
+
+BOX 1 IS SATISFIED BY THE ARCHIVE. The `yt-*` leak was real on 2026-08-04: 9 distinct `yt-<pid>-<hex10>-1` sessions on the default socket between 11:11 and 11:46 PT, every one with `cwd=/home/keivenc/dev/yolomux.dev7774`. That checkout no longer exists. `yt-*` count is 0 on every other day.
+
+WHAT CANNOT BE DETERMINED: snapshot granularity is one minute, so a kill-and-recreate inside a single minute is invisible, and the archive records no invoker PID or argv for the killer - only for the victim's panes. It is therefore possible but unevidenced that one of the 20 named-session terminations was an unwanted kill; none carries the prefix signature and all are consistent with `dyn-cleanup`, `tmux-remove`, or agent-exit shapes.
+
+RECOMMENDED DISPOSITION - RETIRE this queue. Box 1 satisfied (invoker identified, checkout deleted). Box 2 satisfied (only 4 `~/dev/yolomux*` checkouts remain, zero fixture-shaped `yt-*` after 08-04). Boxes 3 and 4 MOVE to `DOIT.p1.e1.tmux-exact-session-target.md` rather than duplicating there. Box 5 retire, the tripwire exists and rebuilding it in-repo would duplicate a working shared parent. Box 6 retire, 14 days of retained per-minute data already answer what a forward soak would ask.
+
 ## Plan
 
 - [ ] Resolve the leaking invoker by executable, PID/start identity, parent, argv, exact CWD, start source, socket environment, and PT minute; immediately stop or redirect that invocation to a checkout containing the guarded helper without changing unrelated dirty worktrees.

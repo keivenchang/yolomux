@@ -30,6 +30,8 @@ A first attempt at reproduction that kept the exact session present did NOT repr
 
 ## Done Criteria
 
+- [ ] `rename-session` carries the IDENTICAL prefix exposure and is still unfixed. `app.py:15049` targets a session for rename through the same bare form, so a rename aimed at an absent name can retarget a prefix sibling. It must be fixed in the same change as `kill-session`, not deferred.
+- [ ] `tmux_exact_target` is MISNAMED and does not do what its name claims: it emits `name:`, not `=name`. Either make it emit the exact form or rename it so no future caller trusts it for precision.
 - [x] A prefix target is refused with a typed error and an exact target succeeds, proven by a regression that fails before the change. DONE, see above.
 - [x] `python3 -m pytest -q tests/test_tmux_runtime.py tests/test_gate_tmux.py` exits 0. DONE: 31 passed, 1 skipped, 5 xfailed. Also measured: `test_app.py` 552 passed; `test_tmux_utils`/`signals`/`theme`/`session_actions`/`server_query` 187 passed; `test_gate_tmux_identity`/`recovery`/`yoagent_actions`/`activity_summary`/`server_lease`/`server_logs` 54 passed 1 xfailed; `test_mock_agents.py` 165 passed; `test_statusd.py` 41 passed.
 - [x] Default-socket session count is recorded before and after the work and is unchanged. DONE: before/after session lists are byte-identical by `diff`, 30 sessions both times, zero `yt-*`. Independently re-confirmed by the main agent after integration review: 30 sessions, zero `yt-*`. Every destructive probe ran on private sockets created and torn down by the agent.
