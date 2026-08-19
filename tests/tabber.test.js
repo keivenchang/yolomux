@@ -671,7 +671,7 @@ async function runTabberSuite() {
     const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
     assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
-    assert.ok(/applyTerminalContainerTheme\(item\.container, theme\)/.test(dragSrc), '#32: all terminal containers share one theme background');
+    assert.ok(/applyTerminalContainerTheme\(item\.container, displayTheme\)/.test(dragSrc), '#32: all terminal containers share the display theme background');
     assert.ok(/\.topbar-search\s*\{[^}]*background:\s*var\(--topbar-control-surface\)/.test(dragCss) && /body\.theme-light\s*\{[\s\S]*--topbar-control-surface:\s*var\(--paint-overlay-slate-05\)/.test(dragCss), '#33: the topbar search blends in light mode through the centralized surface token');
     // The topbar is neutral at rest and switches to the green tab-strip color only on hover/focus.
     assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'topbar bg is neutral at rest');

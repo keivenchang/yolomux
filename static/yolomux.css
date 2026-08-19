@@ -703,13 +703,13 @@
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: var(--accent-gold);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00b7ff;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff7a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #f000d5;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #f4d08a;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #31dca0;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff4f70;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #9b6cff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00a8ff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff6a00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #ff00d4;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #ffd400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #00e676;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff1744;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #8b5cf6;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-white);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 255 255 255;
   --30-preferences-changes-preferences-setting-control-bg-14: #10151d;
@@ -1231,13 +1231,13 @@ body.theme-light {
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: #cf1625;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: #17813a;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: #bf6a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #0074a4;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: var(--icon-archive);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #b0009f;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #805b1c;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #087c5b;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #c21f45;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #5b21d1;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #006dff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #f04400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #d000b8;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #b06b00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #008f55;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #d00040;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #6d28d9;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-black);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 0 0 0;
   --30-preferences-changes-preferences-setting-control-bg-14: var(--paint-white);
@@ -1738,6 +1738,7 @@ body.editor-theme-light {
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
 .file-explorer-date-toggle.active,
+.js-debug-service-load-mode-control input:checked + span,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
 .js-debug-log-level[aria-pressed="true"],
@@ -2304,16 +2305,7 @@ button.topbar-status-surface:focus-visible {
   gap: var(--space-4);
   padding: 0 var(--space-6);
 }
-.topbar-activity.has-attention {
-  border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
-  background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
-  color: var(--text);
-}
-.topbar-activity.has-attention:hover,
-.topbar-activity.has-attention:focus-visible {
-  border-color: var(--danger-strong);
-  background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
-}
+/* Per-state dots carry activity meaning; the aggregate summary is not an error surface. */
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;
@@ -4988,6 +4980,7 @@ body :is(
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
+  --js-debug-process-area-opacity: 0.52;
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
   --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
@@ -5440,11 +5433,6 @@ body :is(
   padding: var(--space-3) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-}
-.js-debug-service-load-mode-control input:checked + span {
-  border-color: var(--active-accent-bright);
-  color: var(--active-accent-bright);
-  background: var(--active-accent-soft);
 }
 .js-debug-service-load-mode-control input:focus-visible + span {
   box-shadow: var(--active-control-focus-shadow-compact);
@@ -6233,6 +6221,16 @@ body :is(
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+body.theme-light :is(.js-debug-graph-view, .js-yocost-graphs) {
+  --js-debug-client-comparison-opacity: 0.9;
+  --js-debug-process-area-opacity: 0.52;
+}
+body.theme-light .js-debug-line {
+  stroke-width: 1.6;
+}
+body.theme-light .js-debug-line--moving-average {
+  stroke-width: 2.2;
+}
 .js-debug-live-pulse.heartbeat-pulse {
   fill: rgb(var(--active-accent-rgb) / 0.14);
   pointer-events: none;
@@ -6276,6 +6274,9 @@ body :is(
 .js-debug-area {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
   opacity: 0.18;
+}
+:is(.js-debug-chart[data-js-debug-chart="cpu"], .js-debug-chart[data-js-debug-chart="memory"]) .js-debug-area {
+  opacity: var(--js-debug-process-area-opacity);
 }
 .js-debug-bar {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
@@ -6371,6 +6372,18 @@ body :is(
 }
 .js-debug-line--pattern-dash {
   --js-debug-line-dash: 6 4;
+}
+.js-debug-line--pattern-dash-dot {
+  --js-debug-line-dash: 7 3 1 3;
+}
+.js-debug-line--pattern-long-dash {
+  --js-debug-line-dash: 11 4;
+}
+.js-debug-line--pattern-dense-dot {
+  --js-debug-line-dash: 1 2;
+}
+.js-debug-line--pattern-long-short {
+  --js-debug-line-dash: 10 3 3 3;
 }
 .js-debug-legend {
   display: flex;
@@ -10503,6 +10516,22 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .terminal[data-terminal-theme="light"] {
   --terminal-file-link-underline: rgb(3 105 161 / 0.48);
   --terminal-file-link-underline-hover: rgb(3 105 161 / 0.58);
+}
+/* xterm's minimum contrast correction collapses dark-tuned 24-bit grays when it compares them to a
+   white background. Light terminals retain the dark render palette/contrast reference, then this
+   involutive transform converts the painted rows to dark-on-white while preserving source spacing.
+   Keep the xterm paint layers explicitly white: filtering a transparent row stack composites the
+   dark render background into the result even when the outer terminal container is already white.
+   A cursor receives the transform twice so its light display colors and bad-connection X stay
+   unchanged instead of inheriting the row conversion. */
+.terminal[data-terminal-theme="light"] :is(.xterm, .xterm-viewport, .xterm-screen) {
+  background-color: var(--paint-white) !important;
+}
+.terminal[data-terminal-theme="light"] .xterm-rows {
+  filter: invert(1) hue-rotate(180deg);
+}
+.terminal[data-terminal-theme="light"] .xterm-rows .xterm-cursor {
+  filter: invert(1) hue-rotate(180deg);
 }
 .terminal-file-link-underlines {
   position: absolute;

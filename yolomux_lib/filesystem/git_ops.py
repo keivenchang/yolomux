@@ -260,6 +260,128 @@ def _git_at_path(args: list[str], cwd: Path, timeout: float) -> subprocess.Compl
     )
 
 
+def _read_small_git_control_file(directory_fd: int, relative_path: str) -> str | None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(relative_path, flags, dir_fd=directory_fd)
+    except OSError:
+        return None
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > 4096:
+            return None
+        chunks: list[bytes] = []
+        retained = 0
+        while retained <= 4096:
+            chunk = os.read(descriptor, 4097 - retained)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            retained += len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > 4096:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    record = text.rstrip("\r\n")
+    return record if record and "\n" not in record and "\r" not in record else None
+
+
+def _valid_git_head_record(record: str | None) -> bool:
+    if record is None:
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", record):
+        return True
+    if not record.startswith("ref: refs/"):
+        return False
+    ref = record.removeprefix("ref: ")
+    if ref == "refs/" or ref.endswith(("/", ".", ".lock")):
+        return False
+    if any(not part or part.startswith(".") or part.endswith(".") for part in ref.split("/")):
+        return False
+    return not any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in " ~^:?*[\\"
+        for character in ref
+    ) and ".." not in ref and "@{" not in ref and "//" not in ref
+
+
+def _git_control_storage_is_valid(directory_fd: int) -> bool:
+    try:
+        objects = os.stat("objects", dir_fd=directory_fd, follow_symlinks=True)
+        refs = os.stat("refs", dir_fd=directory_fd, follow_symlinks=True)
+        config = os.stat("config", dir_fd=directory_fd, follow_symlinks=True)
+    except OSError:
+        return False
+    return stat.S_ISDIR(objects.st_mode) and stat.S_ISDIR(refs.st_mode) and stat.S_ISREG(config.st_mode)
+
+
+def _git_control_directory_is_valid(directory: paths.SafePathHandle, *, operation: str) -> bool:
+    if not _valid_git_head_record(_read_small_git_control_file(directory.descriptor, "HEAD")):
+        return False
+    common_pointer = _read_small_git_control_file(directory.descriptor, "commondir")
+    if common_pointer is None:
+        return _git_control_storage_is_valid(directory.descriptor)
+    common_path = Path(common_pointer)
+    if not common_path.is_absolute():
+        common_path = directory.resolved / common_path
+    try:
+        with paths.safe_path(
+            str(common_path),
+            flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            operation=operation,
+        ) as common_directory:
+            return _git_control_storage_is_valid(common_directory.descriptor)
+    except (paths.FilesystemError, OSError):
+        return False
+
+
+def _valid_git_marker(
+    candidate: Path,
+    directory_fd: int,
+    marker: os.stat_result,
+    *,
+    operation: str,
+) -> bool:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if stat.S_ISDIR(marker.st_mode):
+        try:
+            with paths.safe_child(
+                directory_fd,
+                candidate / ".git",
+                candidate / ".git",
+                flags=directory_flags,
+                operation=operation,
+                observe_name=False,
+            ) as git_directory:
+                return _git_control_directory_is_valid(git_directory, operation=operation)
+        except (paths.FilesystemError, OSError):
+            return False
+    if not stat.S_ISREG(marker.st_mode):
+        return False
+    record = _read_small_git_control_file(directory_fd, ".git")
+    if record is None or not record.startswith("gitdir: "):
+        return False
+    git_dir_text = record.removeprefix("gitdir: ").strip()
+    if not git_dir_text or "\x00" in git_dir_text:
+        return False
+    git_dir_path = Path(git_dir_text)
+    if not git_dir_path.is_absolute():
+        git_dir_path = candidate / git_dir_path
+    try:
+        with paths.safe_path(str(git_dir_path), flags=directory_flags, operation=operation) as git_directory:
+            return _git_control_directory_is_valid(git_directory, operation=operation)
+    except (paths.FilesystemError, OSError):
+        return False
+
+
 def _pinned_repo_root(
     handle: paths.SafePathHandle | paths.SafeParentHandle,
     *,
@@ -271,14 +393,16 @@ def _pinned_repo_root(
     while True:
         if deadline is not None:
             _ensure_git_view_deadline(deadline)
+        valid_marker = False
         try:
             with paths.safe_path(str(candidate), flags=directory_flags, operation=operation) as directory:
                 marker = os.stat(".git", dir_fd=directory.descriptor, follow_symlinks=False)
+                valid_marker = _valid_git_marker(candidate, directory.descriptor, marker, operation=operation)
         except (paths.FilesystemError, OSError):
             marker = None
         if deadline is not None:
             _ensure_git_view_deadline(deadline)
-        if marker is not None and (stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)):
+        if marker is not None and valid_marker:
             return candidate
         if candidate == candidate.parent:
             return None

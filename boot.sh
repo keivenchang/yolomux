@@ -177,6 +177,13 @@ log_path_for() {
   printf '%s/yolomux-%s.log' "${log_dir%/}" "$port"
 }
 
+log_sink_is_writable() {
+  local port="$1"
+  local log_path
+  log_path="$(log_path_for "$port")"
+  mkdir -p "$log_dir" && : >> "$log_path"
+}
+
 print_launch_command() {
   local port="$1"
   local log_path
@@ -463,7 +470,7 @@ restart_port() {
   fi
   log_path="$(log_path_for "$port")"
   acquire_port_restart_lock "$port"
-  if ! mkdir -p "$log_dir" || ! : >> "$log_path"; then
+  if ! log_sink_is_writable "$port"; then
     release_port_restart_lock "$port"
     die "log path is not writable: $log_path"
   fi
@@ -523,6 +530,15 @@ if [[ "$print_command" -eq 1 ]]; then
   done
   exit 0
 fi
+
+# Validate every sink before the capacity wait or any listener mutation. A bad absolute path is a
+# deterministic launch refusal; making it wait behind a busy-host guard hides that root cause and
+# can spend the full operator timeout without ever reaching the path that was already invalid.
+for port in "${ports[@]}"; do
+  if ! log_sink_is_writable "$port"; then
+    die "log path is not writable: $(log_path_for "$port")"
+  fi
+done
 
 yolomux_acquire_start_lock || die "startup lock unavailable"
 trap yolomux_release_start_lock EXIT

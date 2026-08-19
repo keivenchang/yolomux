@@ -856,7 +856,7 @@ const UI_COLOR_PRESETS = {
   orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
   yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
   purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}},
   'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
   'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
   'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
@@ -887,6 +887,7 @@ function editorCursorColorForScheme(scheme = activeEditorScheme()) {
 
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  if (value === 'theme' && resolvedTerminalThemeMode() === 'light') return terminalThemeForGlobalTheme().cursor;
   return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
@@ -904,6 +905,15 @@ function terminalCursorBlinkEnabled() {
 
 function terminalThemeWithBadConnectionCursor(theme) {
   return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme()) {
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
+  const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
+  return {
+    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme(displayTheme) : displayTheme.cursor,
+    cursorAccent: displayTheme.cursorAccent,
+  };
 }
 
 function setBadConnectionCursorState(active) {
@@ -961,7 +971,7 @@ function uiColorVisualPreset(value, light = false) {
 function applyActiveColor(value) {
   const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
   if (!styles.length) return;
-  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft'];
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border'];
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
@@ -978,6 +988,14 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-text', p.text);
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
+    for (const [name, presetKey] of [
+      ['--active-tab-muted-bg', 'tabMuted'],
+      ['--active-tab-muted-hover-bg', 'tabMutedHover'],
+      ['--active-tab-muted-border', 'tabMutedBorder'],
+    ]) {
+      if (p[presetKey]) style.setProperty(name, p[presetKey]);
+      else style.removeProperty(name);
+    }
   }
   // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
   updateBrowserFavicon({force: true});
@@ -1089,9 +1107,8 @@ function installGlobalThemeMediaListener() {
 // typing into; every other terminal keeps its theme's default cursor color.
 
 function terminalThemeForSession(session, baseTheme) {
-  const theme = baseTheme || terminalThemeForGlobalTheme();
-  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor(theme);
-  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
+  const theme = baseTheme || terminalRenderThemeForGlobalTheme();
+  return {...theme, ...terminalCursorColorsForSession(session, theme)};
 }
 
 function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
@@ -1101,10 +1118,11 @@ function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTh
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
-  // one theme source for every terminal AND its container, so all panes share the same
-  // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
-  // faint 24-bit agent output stays legible on white.
-  const theme = terminalThemeForGlobalTheme();
+  // The display theme owns the container/background. The render theme owns xterm's source palette
+  // and contrast reference; in light mode CSS converts those painted rows without collapsing their
+  // original neutral hierarchy.
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
@@ -1112,11 +1130,11 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
     item.term.options.cursorBlink = terminalCursorBlinkEnabled();
-    item.term.options.theme = terminalThemeForSession(session, theme);
+    item.term.options.theme = terminalThemeForSession(session, renderTheme);
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    applyTerminalContainerTheme(item.container, theme);
+    applyTerminalContainerTheme(item.container, displayTheme);
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -1124,15 +1142,12 @@ function applyTerminalRuntimeSettings(options = {}) {
 // Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
 // terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
 function refreshActiveTerminalCursor() {
-  const base = terminalThemeForGlobalTheme();
+  const base = terminalRenderThemeForGlobalTheme();
   const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
     item.term.options.cursorBlink = !badConnection;
-    const cursor = badConnection
-      ? badConnectionTerminalCursorColor()
-      : (session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor);
-    const cursorAccent = badConnection ? BAD_CONNECTION_CURSOR_ACCENT : base.cursorAccent;
+    const {cursor, cursorAccent} = terminalCursorColorsForSession(session, base);
     const current = item.term.options.theme || base;
     if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
       item.term.options.theme = {...current, cursor, cursorAccent};

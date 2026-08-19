@@ -687,14 +687,21 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
     if observation.family == "cpu":
         process_percent = _number(payload, "process_percent")
         system_percent = _number(payload, "system_percent")
-        return (
+        samples = [
             _Sample(f"cpu_percent:{source}", "average", process_percent, at, source),
             _Sample(f"cpu_min_percent:{source}", "minimum", process_percent, at, source),
             _Sample(f"cpu_max_percent:{source}", "maximum", process_percent, at, source),
             _Sample("system_cpu_percent", "average", system_percent, at, source),
             _Sample("system_cpu_min_percent", "minimum", system_percent, at, source),
             _Sample("system_cpu_max_percent", "maximum", system_percent, at, source),
-        )
+        ]
+        for binary, percent in payload.get("process_cpu_percent", {}).items():
+            samples.extend((
+                _Sample(f"process_cpu_percent:{binary}", "average", float(percent), at, source),
+                _Sample(f"process_cpu_min_percent:{binary}", "minimum", float(percent), at, source),
+                _Sample(f"process_cpu_max_percent:{binary}", "maximum", float(percent), at, source),
+            ))
+        return tuple(samples)
     if observation.family == "agent_status":
         states = payload["states"]
         if not isinstance(states, Mapping):
@@ -791,11 +798,23 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
         },
     }.get(observation.family)
     if fields is not None:
-        return tuple(
+        samples = [
             _Sample(series, spec.fold_kind.value, _number(payload, field), at, source)
             for series, field in fields.items()
             if field in payload and payload[field] is not None
-        )
+        ]
+        if observation.family == "system_memory":
+            samples.extend(
+                _Sample(
+                    f"process_memory_bytes:{binary}",
+                    spec.fold_kind.value,
+                    float(rss_bytes),
+                    at,
+                    source,
+                )
+                for binary, rss_bytes in payload.get("process_memory_bytes", {}).items()
+            )
+        return tuple(samples)
     # Agent/model token and cost projections have one owner: usage atoms.
     return ()
 

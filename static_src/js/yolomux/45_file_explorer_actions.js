@@ -136,7 +136,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    if (primaryInfo && !primaryInfo.repo_root) return [];
+    if (!primaryInfo?.repo_root) return [];
     const disabledReason = finderPathActionDisabledReason(primaryInfo);
     const disabled = Boolean(disabledReason);
     return [{
@@ -2269,6 +2269,9 @@ async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
   state.historicalComparisonKind = ['parent', 'root-empty-tree', 'merge-first-parent'].includes(options.historicalComparisonKind)
     ? options.historicalComparisonKind
     : 'parent';
+  // A commit file is a drill-down from one repository-history tab. Retain that exact owner so
+  // dismissing the child restores the viewer even when another tab precedes it in the pane.
+  if (gitDiffItemPath(options.returnToItem)) state.closeReturnToItem = options.returnToItem;
   setFileEditorViewMode(path, 'diff', item);
   recordEditorNav(item);
   await showFileEditorPaneForPath(path, {
@@ -4048,6 +4051,7 @@ async function removeOpenFile(path, options = {}) {
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
   if (!requestedItem && !fileState.has(path)) return;
   const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
+  const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
   if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
@@ -4067,14 +4071,30 @@ async function removeOpenFile(path, options = {}) {
     deleteFileState(path);
   }
   syncFileLayoutItems();
+  const closeReturnSlot = closeReturnToItem ? slotForItem(closeReturnToItem, nextSlots) : null;
+  if (closeReturnSlot) {
+    nextSlots[closeReturnSlot] = paneStateWithTabsForSlot(
+      closeReturnSlot,
+      paneTabs(closeReturnSlot, nextSlots),
+      closeReturnToItem,
+      nextSlots,
+    );
+  }
   if (activeFile === path && !openFilePathHasOwner(path)) {
     const remaining = Array.from(fileState.keys());
     activeFile = remaining[remaining.length - 1] || null;
   }
   updateFileExplorerCurrentFileHighlight();
-  if (wasInLayout) applyLayoutSlots(nextSlots);
+  if (wasInLayout) applyLayoutSlots(nextSlots, {focusSession: closeReturnSlot ? closeReturnToItem : undefined});
   if (shouldRender) renderSessionButtons();
   return true;
+}
+
+function historicalFileReturnItem(item, slots = layoutSlots) {
+  if (!isHistoricalFileEditorItem(item)) return '';
+  const state = fileEditorStateForItem(fileItemPath(item), item);
+  const returnItem = state?.historical === true ? String(state.closeReturnToItem || '') : '';
+  return gitDiffItemPath(returnItem) && itemInLayout(returnItem, slots) ? returnItem : '';
 }
 
 function closeFileTab(path, options = {}) {

@@ -68,6 +68,10 @@ let yolomuxFontsReadyPromise = null;
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
+const cpuTopology = Object.freeze({
+  logicalCpus: Math.max(0, Number(bootstrap.cpuTopology?.logical_cpus) || 0),
+  physicalCores: Math.max(0, Number(bootstrap.cpuTopology?.physical_cores) || 0),
+});
 const appRoot = document.getElementById('appRoot') || document.body;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -6037,9 +6041,19 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
-// on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
-// terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
-// (including app 24-bit colors) against the bg.
+// xterm's contrast correction moves every light-on-white truecolor toward the same 4.5:1 gray.
+// Paint light terminals from the dark palette instead; CSS performs one lightness inversion on the
+// rendered rows while the container keeps the requested white background. The original ANSI/24-bit
+// distances then survive, including output from agents that chose colors for a dark terminal.
+function terminalRenderThemeForGlobalTheme(mode = globalThemeMode) {
+  const resolved = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  const theme = resolved === 'light' ? TERMINAL_THEMES.dark : TERMINAL_THEMES[resolved];
+  return {...(theme || TERMINAL_THEMES.dark)};
+}
+
+// On a light terminal, agents emit 24-bit truecolor escapes tuned for a dark terminal. The light
+// renderer deliberately keeps a dark contrast reference before CSS converts the painted rows;
+// otherwise xterm maps every light source color toward one uniform gray against white.
 // the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
 // an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
 // white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
@@ -11006,6 +11020,7 @@ function layoutUrlEditorModesSnapshot() {
       entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
       entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
       if (state?.historicalComparisonKind) entry.historicalComparisonKind = state.historicalComparisonKind;
+      if (state?.historical === true && gitDiffItemPath(state.closeReturnToItem)) entry.returnToItem = state.closeReturnToItem;
     }
     modes.push(entry);
   };
@@ -11062,6 +11077,7 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
       state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
       state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
       if (state.historical === true && ['parent', 'root-empty-tree', 'merge-first-parent'].includes(entry.historicalComparisonKind)) state.historicalComparisonKind = entry.historicalComparisonKind;
+      if (state.historical === true && gitDiffItemPath(entry.returnToItem)) state.closeReturnToItem = entry.returnToItem;
     }
     if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
   }
@@ -26327,7 +26343,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    if (primaryInfo && !primaryInfo.repo_root) return [];
+    if (!primaryInfo?.repo_root) return [];
     const disabledReason = finderPathActionDisabledReason(primaryInfo);
     const disabled = Boolean(disabledReason);
     return [{
@@ -28460,6 +28476,9 @@ async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
   state.historicalComparisonKind = ['parent', 'root-empty-tree', 'merge-first-parent'].includes(options.historicalComparisonKind)
     ? options.historicalComparisonKind
     : 'parent';
+  // A commit file is a drill-down from one repository-history tab. Retain that exact owner so
+  // dismissing the child restores the viewer even when another tab precedes it in the pane.
+  if (gitDiffItemPath(options.returnToItem)) state.closeReturnToItem = options.returnToItem;
   setFileEditorViewMode(path, 'diff', item);
   recordEditorNav(item);
   await showFileEditorPaneForPath(path, {
@@ -30239,6 +30258,7 @@ async function removeOpenFile(path, options = {}) {
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
   if (!requestedItem && !fileState.has(path)) return;
   const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
+  const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
   if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
@@ -30258,14 +30278,30 @@ async function removeOpenFile(path, options = {}) {
     deleteFileState(path);
   }
   syncFileLayoutItems();
+  const closeReturnSlot = closeReturnToItem ? slotForItem(closeReturnToItem, nextSlots) : null;
+  if (closeReturnSlot) {
+    nextSlots[closeReturnSlot] = paneStateWithTabsForSlot(
+      closeReturnSlot,
+      paneTabs(closeReturnSlot, nextSlots),
+      closeReturnToItem,
+      nextSlots,
+    );
+  }
   if (activeFile === path && !openFilePathHasOwner(path)) {
     const remaining = Array.from(fileState.keys());
     activeFile = remaining[remaining.length - 1] || null;
   }
   updateFileExplorerCurrentFileHighlight();
-  if (wasInLayout) applyLayoutSlots(nextSlots);
+  if (wasInLayout) applyLayoutSlots(nextSlots, {focusSession: closeReturnSlot ? closeReturnToItem : undefined});
   if (shouldRender) renderSessionButtons();
   return true;
+}
+
+function historicalFileReturnItem(item, slots = layoutSlots) {
+  if (!isHistoricalFileEditorItem(item)) return '';
+  const state = fileEditorStateForItem(fileItemPath(item), item);
+  const returnItem = state?.historical === true ? String(state.closeReturnToItem || '') : '';
+  return gitDiffItemPath(returnItem) && itemInLayout(returnItem, slots) ? returnItem : '';
 }
 
 function closeFileTab(path, options = {}) {
@@ -31763,7 +31799,7 @@ const UI_COLOR_PRESETS = {
   orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
   yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
   purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}},
   'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
   'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
   'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
@@ -31794,6 +31830,7 @@ function editorCursorColorForScheme(scheme = activeEditorScheme()) {
 
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  if (value === 'theme' && resolvedTerminalThemeMode() === 'light') return terminalThemeForGlobalTheme().cursor;
   return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
@@ -31811,6 +31848,15 @@ function terminalCursorBlinkEnabled() {
 
 function terminalThemeWithBadConnectionCursor(theme) {
   return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme()) {
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
+  const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
+  return {
+    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme(displayTheme) : displayTheme.cursor,
+    cursorAccent: displayTheme.cursorAccent,
+  };
 }
 
 function setBadConnectionCursorState(active) {
@@ -31868,7 +31914,7 @@ function uiColorVisualPreset(value, light = false) {
 function applyActiveColor(value) {
   const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
   if (!styles.length) return;
-  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft'];
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border'];
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
@@ -31885,6 +31931,14 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-text', p.text);
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
+    for (const [name, presetKey] of [
+      ['--active-tab-muted-bg', 'tabMuted'],
+      ['--active-tab-muted-hover-bg', 'tabMutedHover'],
+      ['--active-tab-muted-border', 'tabMutedBorder'],
+    ]) {
+      if (p[presetKey]) style.setProperty(name, p[presetKey]);
+      else style.removeProperty(name);
+    }
   }
   // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
   updateBrowserFavicon({force: true});
@@ -31996,9 +32050,8 @@ function installGlobalThemeMediaListener() {
 // typing into; every other terminal keeps its theme's default cursor color.
 
 function terminalThemeForSession(session, baseTheme) {
-  const theme = baseTheme || terminalThemeForGlobalTheme();
-  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor(theme);
-  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
+  const theme = baseTheme || terminalRenderThemeForGlobalTheme();
+  return {...theme, ...terminalCursorColorsForSession(session, theme)};
 }
 
 function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
@@ -32008,10 +32061,11 @@ function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTh
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
-  // one theme source for every terminal AND its container, so all panes share the same
-  // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
-  // faint 24-bit agent output stays legible on white.
-  const theme = terminalThemeForGlobalTheme();
+  // The display theme owns the container/background. The render theme owns xterm's source palette
+  // and contrast reference; in light mode CSS converts those painted rows without collapsing their
+  // original neutral hierarchy.
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
@@ -32019,11 +32073,11 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
     item.term.options.cursorBlink = terminalCursorBlinkEnabled();
-    item.term.options.theme = terminalThemeForSession(session, theme);
+    item.term.options.theme = terminalThemeForSession(session, renderTheme);
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    applyTerminalContainerTheme(item.container, theme);
+    applyTerminalContainerTheme(item.container, displayTheme);
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -32031,15 +32085,12 @@ function applyTerminalRuntimeSettings(options = {}) {
 // Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
 // terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
 function refreshActiveTerminalCursor() {
-  const base = terminalThemeForGlobalTheme();
+  const base = terminalRenderThemeForGlobalTheme();
   const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
     item.term.options.cursorBlink = !badConnection;
-    const cursor = badConnection
-      ? badConnectionTerminalCursorColor()
-      : (session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor);
-    const cursorAccent = badConnection ? BAD_CONNECTION_CURSOR_ACCENT : base.cursorAccent;
+    const {cursor, cursorAccent} = terminalCursorColorsForSession(session, base);
     const current = item.term.options.theme || base;
     if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
       item.term.options.theme = {...current, cursor, cursorAccent};
@@ -34648,8 +34699,9 @@ function canPaneExpand(item, slots = layoutSlots) {
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
+  const returnItem = historicalFileReturnItem(item);
   if (narrowPaneFrameActionTargetsTab(item)) {
-    removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
+    removeSessionFromLayout(item, {focusSession: returnItem || nextNarrowPaneFrameItem(item)});
     return;
   }
   if (narrowSingleColumnMode()) return;
@@ -34660,23 +34712,37 @@ function minimizePaneFromLayout(item) {
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
   if (!targetSlot || !sourceTabs.length) {
+    if (returnItem) {
+      if (sourceTabs.includes(returnItem)) activatePaneTab(sourceSlot, returnItem, {userInitiated: true});
+      else applyLayoutSlots(
+        layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)}),
+        {focusSession: returnItem},
+      );
+      return;
+    }
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
+  const keepItems = returnItem ? Array.from(new Set([...sourceTabs, returnItem])) : sourceTabs;
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems});
   if (!capacity.ok) {
     showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
     return;
   }
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive || capacity.finalTabs[0], next);
+  const returnSlot = returnItem ? slotForItem(returnItem, next) : null;
+  if (returnSlot) {
+    next[returnSlot] = paneStateWithTabsForSlot(returnSlot, paneTabs(returnSlot, next), returnItem, next);
+  }
+  const nextActive = returnSlot ? returnItem : targetActive || capacity.finalTabs[0];
   const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
   if (capacity.evicted.length) {
     messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
   }
   applyLayoutSlots(next, {
-    focusSession: targetActive || capacity.finalTabs[0],
+    focusSession: nextActive,
     prune: false,
     message: messages.filter(Boolean).join('; '),
   });
@@ -50340,7 +50406,7 @@ function bindPreferencesPanel(panel) {
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
         const seriesName = groupId === 'agent-tokens'
-          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          ? `agent_tokens_per_minute:${currentStatsCanonicalSessionKey(name.slice('agent_tokens_per_minute:'.length))}`
           : name;
         if (!series.has(seriesName)) series.set(seriesName, []);
         const points = series.get(seriesName);
@@ -50414,7 +50480,7 @@ function bindPreferencesPanel(panel) {
       {id: 'agent-status', title: 'Agent status', families: ['agent_status']},
       {id: 'gpu', title: 'GPU', families: ['gpu']},
       {id: 'system', title: 'System', families: ['service_load', 'system_memory']},
-      {id: 'agent-tokens', title: 'Agent tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
+      {id: 'agent-tokens', title: 'Session tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-output-tokens', title: 'Model output tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-usage', title: 'Model usage', families: ['agent_tokens']},
       {id: 'cost', title: 'Marginal / at API list prices', families: ['cost'], compact: true},
@@ -50429,7 +50495,7 @@ function bindPreferencesPanel(panel) {
       {id: 'agent-status', label: 'Agent status', groups: ['agent-status']},
       {id: 'gpu', label: 'GPU', groups: ['gpu']},
       {id: 'system', label: 'System', groups: ['system']},
-      {id: 'agent-tokens', label: 'Agent tokens', groups: ['agent-tokens']},
+      {id: 'agent-tokens', label: 'Session tokens', groups: ['agent-tokens']},
       {id: 'model-tokens', label: 'Model tokens', groups: ['model-output-tokens', 'model-usage']},
       {id: 'cost', label: 'Cost', groups: ['cost'], defaultVisible: false},
       {id: 'browser', label: 'API/SSE', groups: ['browser']},
@@ -50549,22 +50615,30 @@ function bindPreferencesPanel(panel) {
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
   }
 
-  // Usage series retain a stable pane-level key, while the visible identity is the tmux
-  // session. Cost rows carry that same safe key from the server, so both surfaces call this
-  // one owner instead of independently trimming their agent labels.
+  // Usage series retain a stable pane-level key, while the token-throughput owner is the tmux
+  // session. Keep the exact grouping key separate from display shortening so unrelated private
+  // identities cannot collide merely because their visible labels were bounded.
+  function currentStatsCanonicalSessionKey(value) {
+    const full = String(value || '').trim();
+    if (!full) return '';
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
+  }
+
   function currentStatsCanonicalAgentLabel(value) {
     const full = String(value || '').trim();
     if (!full) return 'Unknown';
+    const sessionKey = currentStatsCanonicalSessionKey(full);
+    if (sessionKey !== full) return sessionKey;
     if (full.startsWith('claude-bg:')) {
       const [, projectValue = '', sessionValue = ''] = full.split(':');
       const projectParts = projectValue.split('-').filter(Boolean);
       const project = projectParts.slice(-2).join('-') || projectValue;
       const session = sessionValue.slice(0, 8);
       return ['claude-bg', project, session].filter(Boolean).join(':');
-    }
-    const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
-      return parts[0] || full;
     }
     return full;
   }
@@ -51161,6 +51235,7 @@ function bindPreferencesPanel(panel) {
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
     canonicalAgentLabel: currentStatsCanonicalAgentLabel,
+    canonicalSessionKey: currentStatsCanonicalSessionKey,
     createBrowserClient,
     createController,
     mount,
@@ -51755,6 +51830,12 @@ const jsDebugGraphProcessCpuColors = Object.freeze({
   current: jsDebugGraphSeriesPalette.currentProcessCpu,
   peers: Object.freeze([jsDebugGraphSeriesPalette.turquoise, jsDebugGraphSeriesPalette.magenta, jsDebugGraphSeriesPalette.beige]),
 });
+const jsDebugGraphCpuProcessAreaColors = Object.freeze([
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.turquoise,
+]);
 const jsDebugGraphGpuDeviceColors = Object.freeze([
   jsDebugGraphSeriesPalette.cyan,
   jsDebugGraphSeriesPalette.orange,
@@ -51811,7 +51892,7 @@ const jsDebugStatsFamilyManifest = Object.freeze({
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', hostMetric: 'cpu'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', kind: 'area', stacked: true, hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
@@ -55402,10 +55483,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
     for (const [key, item] of bucket.agentTokenRates.entries()) {
       if (dimension === 'agent') {
-        const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
-        existing.label = item?.label || existing.label;
+        const sessionKey = debugGraphSessionTokenKey(key);
+        const existing = tokenItems.get(sessionKey) || {
+          label: debugGraphAgentDisplayLabel(sessionKey),
+          rawKeys: new Set(),
+          samples: 0,
+        };
+        existing.rawKeys.add(String(key));
         existing.samples += Number(item?.samples || 0);
-        tokenItems.set(String(key), existing);
+        tokenItems.set(sessionKey, existing);
         continue;
       }
       if (!(item?.modelRates instanceof Map)) continue;
@@ -55436,10 +55522,14 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       agentTokenPatternIndex: visuals[index].patternIndex,
       color: visuals[index].color,
       value: bucket => {
-        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') {
-          if (!tokenItem) return 0;
-          return debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let value = 0;
+          for (const rawKey of item.rawKeys) {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            if (tokenItem) value += debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          }
+          return value;
         }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
@@ -55453,8 +55543,11 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       hasData: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          if (!(bucket?.agentTokenRates instanceof Map)) return false;
+          return [...item.rawKeys].some(rawKey => {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          });
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
           const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
@@ -55463,8 +55556,12 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       sampleCount: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Math.max(0, Number(tokenItem?.samples) || 0);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let samples = 0;
+          for (const rawKey of item.rawKeys) {
+            samples += Math.max(0, Number(bucket.agentTokenRates.get(rawKey)?.samples) || 0);
+          }
+          return samples;
         }
         let samples = 0;
         for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
@@ -55489,23 +55586,63 @@ function debugGraphStablePaletteIndex(identity, count) {
   return hash % size;
 }
 
-function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+function debugGraphVisualCombinations(patternCount = jsDebugGraphAgentTokenPatternCount) {
   const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
-  const patternCount = Math.max(1, jsDebugGraphAgentTokenPatternCount);
+  const normalizedPatternCount = Math.max(1, Math.floor(Number(patternCount) || 0));
   const combinations = [];
-  const pairedCount = Math.min(colorCount, patternCount);
+  const pairedCount = Math.min(colorCount, normalizedPatternCount);
   for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
   for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
-    for (let patternIndex = 0; patternIndex < patternCount; patternIndex += 1) {
+    for (let patternIndex = 0; patternIndex < normalizedPatternCount; patternIndex += 1) {
       if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
       combinations.push([colorIndex, patternIndex]);
     }
   }
+  return combinations;
+}
+
+function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+  const combinations = debugGraphVisualCombinations();
   return (items || []).map((item, index) => {
     const identity = identityForItem(item);
     const combinationIndex = index < combinations.length
       ? index
       : debugGraphStablePaletteIndex(identity, combinations.length);
+    const [colorIndex, patternIndex] = combinations[combinationIndex];
+    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+  });
+}
+
+const jsDebugGraphServiceLoadLinePatterns = Object.freeze(['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short']);
+// Daemons enter and leave retained buckets independently. Keep each assigned visual for the page
+// lifetime so one disappearing service cannot recolor every later legend row; reclaim absent slots
+// only after all 49 color/pattern pairs have been used.
+const jsDebugGraphServiceLoadVisualAssignments = new Map();
+
+function debugGraphStableServiceLoadVisuals(items) {
+  const combinations = debugGraphVisualCombinations(jsDebugGraphServiceLoadLinePatterns.length);
+  const activeKeys = new Set((items || []).map(([key]) => String(key)));
+  if (jsDebugGraphServiceLoadVisualAssignments.size >= combinations.length) {
+    for (const key of jsDebugGraphServiceLoadVisualAssignments.keys()) {
+      if (!activeKeys.has(key)) jsDebugGraphServiceLoadVisualAssignments.delete(key);
+      if (jsDebugGraphServiceLoadVisualAssignments.size < combinations.length) break;
+    }
+  }
+  const used = new Set(jsDebugGraphServiceLoadVisualAssignments.values());
+  return (items || []).map(([rawKey]) => {
+    const key = String(rawKey);
+    let combinationIndex = jsDebugGraphServiceLoadVisualAssignments.get(key);
+    if (!Number.isFinite(combinationIndex)) {
+      combinationIndex = debugGraphStablePaletteIndex(key, combinations.length);
+      for (let candidate = 0; candidate < combinations.length; candidate += 1) {
+        if (!used.has(candidate)) {
+          combinationIndex = candidate;
+          jsDebugGraphServiceLoadVisualAssignments.set(key, candidate);
+          used.add(candidate);
+          break;
+        }
+      }
+    }
     const [colorIndex, patternIndex] = combinations[combinationIndex];
     return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
   });
@@ -55634,8 +55771,100 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     }));
 }
 
+const jsDebugGraphHostProcessVisualAssignments = Object.freeze({
+  cpu: new Map(),
+  memory: new Map(),
+});
+
+function debugGraphStableHostProcessVisuals(metric, displayed, colors) {
+  const assignments = jsDebugGraphHostProcessVisualAssignments[metric];
+  const activeKeys = new Set(displayed.map(([key]) => String(key)));
+  const unassignedActiveCount = displayed.reduce(
+    (count, [key]) => count + (assignments.has(String(key)) ? 0 : 1),
+    0,
+  );
+  for (const key of assignments.keys()) {
+    if (assignments.size + unassignedActiveCount <= colors.length) break;
+    if (!activeKeys.has(key)) assignments.delete(key);
+  }
+  const used = new Set(assignments.values());
+  return displayed.map(([rawKey]) => {
+    const key = String(rawKey);
+    let colorIndex = assignments.get(key);
+    if (!Number.isFinite(colorIndex)) {
+      const start = debugGraphStablePaletteIndex(`${metric}:${key}`, colors.length);
+      colorIndex = start;
+      for (let offset = 0; offset < colors.length; offset += 1) {
+        const candidate = (start + offset) % colors.length;
+        if (used.has(candidate)) continue;
+        colorIndex = candidate;
+        assignments.set(key, candidate);
+        used.add(candidate);
+        break;
+      }
+    }
+    return {
+      color: colors[colorIndex % colors.length],
+      patternIndex: colorIndex % jsDebugGraphServiceLoadLinePatterns.length,
+    };
+  });
+}
+
+function debugGraphHostProcessSeriesDefs(buckets, metric) {
+  const cpu = metric === 'cpu';
+  const mapName = cpu ? 'cpuProcesses' : 'memoryProcesses';
+  const valueKey = cpu ? 'totalPercent' : 'totalBytes';
+  const limit = cpu ? 4 : 5;
+  const keyPrefix = cpu ? 'cpuBinary' : 'memory';
+  const unit = cpu ? 'percent' : 'bytes';
+  const colors = cpu ? jsDebugGraphCpuProcessAreaColors : jsDebugGraphAgentTokenColors;
+  const processes = new Map();
+  for (const bucket of buckets) {
+    const source = bucket.hostMetrics?.[mapName];
+    if (!(source instanceof Map)) continue;
+    for (const [key, item] of source.entries()) {
+      if (Number(item?.samples || 0) <= 0) continue;
+      const value = Number(item[valueKey] || 0) / Number(item.samples || 1);
+      const current = processes.get(key);
+      if (!current || value > current.peakValue) {
+        processes.set(key, {label: String(item.label || key), peakValue: value});
+      }
+    }
+  }
+  const displayed = [...processes.entries()]
+    .sort((left, right) => right[1].peakValue - left[1].peakValue || left[0].localeCompare(right[0]))
+    .slice(0, limit);
+  const visuals = debugGraphStableHostProcessVisuals(metric, displayed, colors);
+  return displayed.map(([hostProcessId, process], index) => ({
+    key: `${keyPrefix}:${hostProcessId}`,
+    label: process.label,
+    unit,
+    hostMetric: metric,
+    hostProcessId,
+    color: visuals[index].color,
+    linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex % jsDebugGraphServiceLoadLinePatterns.length],
+    value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
+    hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
+    sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
+    familyHasData: bucket => cpu
+      ? Number(bucket?.systemCpuCount || 0) > 0
+      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
+  }));
+}
+
+function debugGraphMemoryProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'memory');
+}
+
+function debugGraphCpuProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'cpu');
+}
+
 function debugGraphHostMetricSeriesDefs(buckets) {
   return [
+    ...debugGraphCpuProcessSeriesDefs(buckets),
+    ...debugGraphMemoryProcessSeriesDefs(buckets),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil'),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory'),
   ];
@@ -55698,11 +55927,10 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
-  const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
-  const linePatterns = ['solid', 'dash', 'dot'];
+  const visuals = debugGraphStableServiceLoadVisuals(items);
   return items.map(([key, label], index) => ({
     key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
-    color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
+    color: visuals[index].color, linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
       return debugGraphServiceLoadValue(item, mode);
@@ -56403,7 +56631,7 @@ function debugGraphSeriesClientAttrs(series) {
 
 function debugGraphSeriesLinePattern(series) {
   const pattern = String(series?.linePattern || (series?.clientMetric === true ? series.clientLinePattern : '') || '').trim();
-  return ['solid', 'dot', 'dash'].includes(pattern) ? pattern : '';
+  return ['solid', 'dot', 'dash', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'].includes(pattern) ? pattern : '';
 }
 
 function debugGraphSeriesLinePatternAttrs(series) {
@@ -56580,9 +56808,13 @@ function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
   </div>`;
 }
 
+function debugGraphSeriesUsesArea(series, kind = '') {
+  return kind === 'area' && Boolean(series?.hostMetric && series?.hostProcessId);
+}
+
 function debugGraphLegendSwatchHtml(series, kind = '') {
   if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
-  if (kind === 'area') return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
+  if (debugGraphSeriesUsesArea(series, kind)) return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
@@ -56702,10 +56934,13 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
+  if (group.macMemoryCard === true) {
+    return seriesItems.filter(series => series.key === 'macMemoryPressure' || (series.hostMetric === 'memory' && series.hostProcessId));
+  }
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu');
+      return [...hostSeries, ...seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu')];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
@@ -56764,6 +56999,17 @@ function debugGraphLegendSeriesItems(group, groupSeries) {
   return legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
 }
 
+function debugGraphMacMemoryProcessPlotSeries(series, buckets) {
+  if (series?.hostMetric !== 'memory' || !series.hostProcessId) return series;
+  const plotValues = (series.values || []).map((value, index) => {
+    const host = buckets?.[index]?.hostMetrics;
+    const capacity = Number(host?.macPhysicalMemoryTotalBytes || host?.systemMemoryCapacityTotalBytes || 0)
+      / Math.max(1, Number(host?.macMemoryDetailCount || host?.systemMemoryCount || 1));
+    return capacity > 0 ? Math.max(0, Number(value) || 0) / capacity * 100 : 0;
+  });
+  return {...series, plotValues, plotMax: Math.max(0, ...plotValues)};
+}
+
 function debugGraphVisibleChartGroups(seriesItems) {
   return jsDebugGraphChartGroups.filter(group => {
     if (!debugGraphChartVisible(group.key)) return false;
@@ -56773,10 +57019,10 @@ function debugGraphVisibleChartGroups(seriesItems) {
 }
 
 function debugGraphStackedSeries(seriesItems) {
-  const count = Math.max(0, ...seriesItems.map(series => (series.values || []).length));
+  const count = Math.max(0, ...seriesItems.map(series => debugGraphSeriesPlotValues(series).length));
   const totals = Array.from({length: count}, () => 0);
   return seriesItems.map(series => {
-    const values = series.values || [];
+    const values = debugGraphSeriesPlotValues(series);
     const stackBaseValues = totals.slice();
     const plotValues = values.map((value, index) => {
       const next = totals[index] + Math.max(0, Number(value) || 0);
@@ -56851,14 +57097,20 @@ function debugGraphHoverBucketIndex(buckets, timestamp) {
   return timestamp < end ? index : -1;
 }
 
-function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+function debugGraphDirectHoverSeriesKey(event) {
+  const target = event?.target?.closest?.('[data-js-debug-series], [data-js-debug-area-series]');
+  return String(target?.dataset?.jsDebugSeries || target?.dataset?.jsDebugAreaSeries || '');
+}
+
+function debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, groupKey) {
   const data = jsDebugGraphHoverChartData.get(String(chart?.dataset?.jsDebugChart || ''));
-  if (data?.group?.key !== 'serversLoad') return null;
+  if (data?.group?.key !== groupKey) return null;
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return null;
-  const available = data.groupSeries.filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  const available = (data.hoverSeries || data.groupSeries)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
   if (!available.length) return null;
-  const directKey = String(event?.target?.closest?.('[data-js-debug-series]')?.dataset?.jsDebugSeries || '');
+  const directKey = debugGraphDirectHoverSeriesKey(event);
   const direct = available.find(series => series.key === directKey);
   if (direct) return direct;
   const svg = chart?.querySelector?.('.js-debug-line-chart');
@@ -56872,20 +57124,37 @@ function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
     ? {mode: 'broken-linear', threshold: Number(chart?.dataset?.jsDebugChartAxisBreak) || axisMax, upperFraction: 0.18}
     : scaleName === 'log';
   return available.reduce((nearest, series) => {
-    const startValue = Math.max(0, Number(series.values?.[index]) || 0);
+    const renderedValues = Array.isArray(series.plotValues) ? series.plotValues : series.values;
+    const startValue = Math.max(0, Number(renderedValues?.[index]) || 0);
     const startTime = Number(series.times?.[index]);
     const nextIndex = index + 1;
-    const nextAvailable = nextIndex < series.values.length
+    const nextAvailable = nextIndex < renderedValues.length
       && (!Array.isArray(series.hasDataValues) || series.hasDataValues[nextIndex] === true);
     const nextTime = Number(series.times?.[nextIndex]);
-    const nextValue = Math.max(0, Number(series.values?.[nextIndex]) || 0);
+    const nextValue = Math.max(0, Number(renderedValues?.[nextIndex]) || 0);
     const fraction = nextAvailable && Number.isFinite(startTime) && Number.isFinite(nextTime) && nextTime > startTime
       ? Math.max(0, Math.min(1, (Number(timestamp) - startTime) / (nextTime - startTime)))
       : 0;
     const renderedValue = startValue + ((nextValue - startValue) * fraction);
-    const distance = Math.abs(debugGraphPlotYForValue(renderedValue, axisMax, scale) - pointerY);
+    const renderedY = debugGraphPlotYForValue(renderedValue, axisMax, scale);
+    let distance = Math.abs(renderedY - pointerY);
+    if (Array.isArray(series.stackBaseValues)) {
+      const startBase = Math.max(0, Number(series.stackBaseValues[index]) || 0);
+      const nextBase = Math.max(0, Number(series.stackBaseValues[nextIndex]) || 0);
+      const renderedBase = startBase + ((nextBase - startBase) * fraction);
+      const baseY = debugGraphPlotYForValue(renderedBase, axisMax, scale);
+      const minimumY = Math.min(renderedY, baseY);
+      const maximumY = Math.max(renderedY, baseY);
+      distance = pointerY >= minimumY && pointerY <= maximumY
+        ? 0
+        : Math.min(Math.abs(pointerY - minimumY), Math.abs(pointerY - maximumY));
+    }
     return !nearest || distance < nearest.distance ? {series, distance} : nearest;
   }, null)?.series || available[0];
+}
+
+function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+  return debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'serversLoad');
 }
 
 function debugGraphHoverDetailAtTime(chart, timestamp, event) {
@@ -56900,6 +57169,16 @@ function debugGraphHoverDetailAtTime(chart, timestamp, event) {
       seriesKey: series.key,
     };
   }
+  if (data?.group?.key === 'cpu') {
+    const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+    const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'cpu');
+    if (index >= 0 && series && (!Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)) {
+      return {
+        text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+        seriesKey: series.key,
+      };
+    }
+  }
   return {text: debugGraphHoverValueAtTime(chart, timestamp), seriesKey: ''};
 }
 
@@ -56909,7 +57188,9 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
-  const series = data.group.key === 'activity'
+  const series = data.group.macMemoryCard === true
+    ? data.groupSeries.filter(item => item.key === 'macMemoryPressure')
+    : data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
   const values = series
@@ -57059,19 +57340,23 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   group = debugGraphResolvedChartGroup(group, buckets);
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
-  const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
-  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
+  const selectedGroupSeries = debugGraphGroupSeriesItems(group, seriesItems);
+  const groupSeries = group.macMemoryCard === true
+    ? selectedGroupSeries.map(series => debugGraphMacMemoryProcessPlotSeries(series, buckets))
+    : selectedGroupSeries;
   // Series lines/areas stay continuous across every covered span and break only
   // at these genuine no-data ranges (the same holes painted as red no-data bands).
   const genuineNoDataRanges = debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
-  const areaSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => series.hostMetric && series.hostProcessId) : [];
+  const areaSeries = plottedGroupSeries.filter(series => debugGraphSeriesUsesArea(series, group.kind));
   const lineSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries;
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  const hoverSeries = group.kind === 'area' ? [...plotSeries, ...lineSeries] : groupSeries;
+  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries, hoverSeries});
   // Both subviews stay mounted so switching modes preserves their DOM. Namespace the
   // SVG paint-server IDs by surface; otherwise Cost bars resolve Graphs' now-hidden
   // <pattern> definitions and become invisible even though both views share the data.
@@ -57193,7 +57478,14 @@ function debugGraphChartLabel(group, buckets = []) {
   const label = debugGraphLocalizedLabel(group);
   const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
   if (!detailKey) return label;
-  const detail = buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
+  const logicalCpus = Math.max(0, Number(cpuTopology?.logicalCpus) || 0);
+  const physicalCores = Math.max(0, Number(cpuTopology?.physicalCores) || 0);
+  const topologyDetail = group?.key !== 'cpu' || logicalCpus <= 0
+    ? ''
+    : physicalCores > 0
+      ? `${logicalCpus} logical CPUs / ${physicalCores} physical cores`
+      : `${logicalCpus} logical CPUs`;
+  const detail = topologyDetail || buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
   return detail ? `${label} (${detail})` : label;
 }
 
@@ -57517,6 +57809,12 @@ function debugGraphAgentDisplayLabel(value) {
   }
   if (Array.from(full).length <= 64) return full;
   return `${Array.from(full).slice(0, 39).join('')}…${Array.from(full).slice(-16).join('')}`;
+}
+
+function debugGraphSessionTokenKey(value) {
+  const full = String(value || '').trim();
+  if (!full) return 'unknown';
+  return globalThis.YOLOmuxStatsCurrent?.canonicalSessionKey?.(full) || full;
 }
 
 function debugGraphCostModelAgentKind(row) {
@@ -58764,7 +59062,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     duration,
     clients: {},
     servers: {},
-    host_metrics: {gpu_devices: {}, service_load: {}},
+    host_metrics: {cpu_processes: {}, memory_processes: {}, gpu_devices: {}, service_load: {}},
     agent_token_rates: [],
   };
   const agentRates = new Map();
@@ -58804,6 +59102,13 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('process_cpu_percent:')) {
+      const binary = name.slice('process_cpu_percent:'.length);
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `process_cpu_max_percent:${binary}`, duration);
+      record.host_metrics.cpu_processes[binary] = {label: binary, total_percent: projected, samples: 1};
+    } else if (name.startsWith('process_memory_bytes:')) {
+      const binary = name.slice('process_memory_bytes:'.length);
+      record.host_metrics.memory_processes[binary] = {label: binary, total_bytes: value, samples: 1};
     } else if (name.startsWith('mac_')) {
       const macMemorySeries = {
         mac_physical_memory_bytes: 'mac_physical_memory_total_bytes', mac_memory_used_bytes: 'mac_memory_used_total_bytes',
@@ -62830,6 +63135,7 @@ async function openGitDiffHistoricalFile(detail, file, options = {}) {
   return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
     item,
     repo: detail.repo,
+    returnToItem: options.returnToItem,
     historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
     userInitiated: options.userInitiated !== false,
   });
@@ -62895,7 +63201,7 @@ const gitDiffFileTreeInteractionController = createSharedTreeInteractionControll
       return;
     }
     const file = context.detail ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '') : null;
-    if (file) void openGitDiffHistoricalFile(context.detail, file);
+    if (file) void openGitDiffHistoricalFile(context.detail, file, {returnToItem: context.item});
   },
 });
 
@@ -79192,7 +79498,8 @@ function startTerminal(session) {
   }
   container.innerHTML = '';
   const size = estimateTerminalSize(container);
-  const baseTheme = terminalThemeForGlobalTheme();
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
@@ -79204,7 +79511,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForSession(session, baseTheme),
+    theme: terminalThemeForSession(session, renderTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
     allowProposedApi: true,
@@ -79216,7 +79523,7 @@ function startTerminal(session) {
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
-  applyTerminalContainerTheme(container, baseTheme);
+  applyTerminalContainerTheme(container, displayTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);

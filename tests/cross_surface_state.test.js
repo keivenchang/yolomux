@@ -142,6 +142,13 @@ async function runCrossSurfaceStateSuite() {
     });
     assert.deepStrictEqual([...repoActions.map(action => action.label)], ['ΔShow Diff']);
     assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
+    assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
+      ...fileContext,
+      fullPath: '/unverified',
+      entry: {kind: 'dir', name: 'unverified'},
+      selectedPaths: ['/unverified'],
+      primaryInfo: null,
+    })], [], 'a directory without positive repository metadata omits Diff repo instead of showing a disabled fallback');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({...fileContext, selectedPaths: ['/repo/app.js', '/repo/other.js']})], [], 'multi-selection omits Finder open actions');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
       ...fileContext,
@@ -2633,7 +2640,14 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(/const NEON_CURSOR_COLOR_CHOICES\s*=\s*\['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'\]/.test(cursorSrc), 'cursor color: neon choices are cursor-only, not active-color choices');
       assert.ok(/'laser-lime':\s*\{cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.laser-lime',\s*cursor:\s*\{dark:\s*'#ccff00',\s*light:\s*'#6b8f00'\}\}/.test(cursorSrc), 'cursor color: Laser lime is the first neon cursor preset with a readable light-mode variant');
       assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : cursorColorForPreset\(value, scheme\?\.dark === false\)/.test(cursorSrc), 'cursor color: theme uses the scheme cursor, color choices use the shared UI color parent');
-      assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*value === 'theme' \? baseTheme\.cursor : cursorColorForPreset\(value, resolvedTerminalThemeMode\(\) === 'light'\)/.test(cursorSrc), 'cursor color: active terminal uses the same shared UI color parent');
+      assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*resolvedTerminalThemeMode\(\) === 'light'[\s\S]*value === 'theme' \? baseTheme\.cursor : cursorColorForPreset\(value, resolvedTerminalThemeMode\(\) === 'light'\)/.test(cursorSrc), 'cursor color: active terminal uses the light display cursor with the shared UI color parent');
+      const moonWhite = api.uiColorVisualPresetForTest('white', true);
+      assert.equal(moonWhite.accent, '#64748b', 'Moon white uses a darker light-mode strip color instead of blending into the light app chrome');
+      assert.equal(moonWhite.bright, '#aeb8c5', 'Moon white uses a darker light-mode active tab color');
+      assert.equal(moonWhite.text, '#0b0e14', 'Moon white keeps dark text on its darker light-mode tab');
+      assert.equal(moonWhite.tabMuted, '#d3dbe6', 'Moon white gives inactive tabs their own darker light-mode fill');
+      assert.equal(moonWhite.tabMutedHover, '#c2ccd9', 'Moon white keeps inactive-tab hover visibly darker than the strip');
+      assert.equal(moonWhite.tabMutedBorder, '#8290a3', 'Moon white keeps inactive-tab edges visible against light chrome');
       assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR)"), 'editor cursor color defaults through the shared cursor default');
     }
     assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
@@ -2781,15 +2795,39 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#071327', 'light terminal selection forces readable selected text');
   });
 
-  test('cross-surface host state 14: a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio', () => {
-    // a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
+  test('cross-surface host state 14: a light terminal preserves dark-tuned 24-bit hierarchy before its paint transform', () => {
+    // The display stays white, while xterm measures and stores colors against the dark source theme.
     assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
+    assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'light terminal keeps a white display background');
+    assert.equal(api.terminalRenderThemeForGlobalTheme('dark').background, '#11151d', 'light terminal renders from the dark contrast reference');
+    assert.notEqual(api.terminalRenderThemeForGlobalTheme('dark').foreground, api.terminalThemeForGlobalTheme('dark').foreground, 'light display and xterm source foreground stay separate');
     api.setTerminalThemeModeForTest('dark');
     assert.equal(api.terminalMinimumContrastRatio('dark'), 3, 'dark terminal uses a moderate 3:1 floor so a light-on-white agent composer (Codex input) is forced readable');
+    assert.deepStrictEqual(api.terminalRenderThemeForGlobalTheme('dark'), api.terminalThemeForGlobalTheme('dark'), 'dark terminals need no paint conversion');
     api.setTerminalThemeModeForTest('light');
     api.setTerminalThemeModeForTest('follow-app');
     assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
     assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
+    assert.equal(api.terminalRenderThemeForGlobalTheme('light').background, '#11151d', 'follow-app light uses the dark xterm source theme');
+    const previousFocusedItem = api.focusedPanelItemForTest();
+    api.setGlobalThemeModeForTest('light');
+    api.setFocusedPanelItemValueForTest('light-cursor-focused');
+    const lightRenderTheme = api.terminalRenderThemeForGlobalTheme('light');
+    const focusedLightTheme = api.terminalThemeForSession('light-cursor-focused', lightRenderTheme);
+    const unfocusedLightTheme = api.terminalThemeForSession('light-cursor-unfocused', lightRenderTheme);
+    assert.equal(focusedLightTheme.cursor, '#9a6700', 'focused light terminal uses the configured light cursor color');
+    assert.equal(focusedLightTheme.cursorAccent, '#ffffff', 'focused light terminal keeps readable cursor glyph text');
+    assert.equal(unfocusedLightTheme.cursor, '#0f172a', 'unfocused light terminal uses the visible light outline color');
+    assert.equal(unfocusedLightTheme.cursorAccent, '#ffffff', 'unfocused light terminal keeps the complete light cursor pair');
+    api.setFileEditorCursorColorForTest('theme');
+    const themeFocusedLightTheme = api.terminalThemeForSession('light-cursor-focused', lightRenderTheme);
+    assert.equal(themeFocusedLightTheme.cursor, '#0f172a', 'Theme cursor uses the light display cursor instead of the dark render cursor');
+    assert.equal(themeFocusedLightTheme.cursorAccent, '#ffffff', 'Theme cursor and cursorAccent remain one readable light display pair');
+    api.setFileEditorCursorColorForTest('yellow');
+    api.setFocusedPanelItemValueForTest(previousFocusedItem);
+    assert.match(preferencesCss, /\.terminal\[data-terminal-theme="light"\] \.xterm-rows\s*\{[^}]*filter:\s*invert\(1\) hue-rotate\(180deg\)/, 'light terminal rows apply one hue-preserving lightness conversion');
+    assert.match(preferencesCss, /\.terminal\[data-terminal-theme="light"\] :is\(\.xterm, \.xterm-viewport, \.xterm-screen\)\s*\{[^}]*background-color:\s*var\(--paint-white\) !important/, 'light terminal forces the xterm-owned paint layers to the white display background');
+    assert.match(preferencesCss, /\.terminal\[data-terminal-theme="light"\] \.xterm-rows \.xterm-cursor\s*\{[^}]*filter:\s*invert\(1\) hue-rotate\(180deg\)/, 'light cursor applies the conversion twice and keeps its configured display color');
     {
       const refreshCalls = [];
       let textureClears = 0;
@@ -2817,7 +2855,7 @@ async function runCrossSurfaceStateSuite() {
         refresh(start, end) { refreshCalls.push([start, end]); },
         clearTextureAtlas() { textureClears += 1; },
       };
-      api.registerTerminalForTest('system-repaint', term);
+      const item = api.registerTerminalForTest('system-repaint', term);
       api.setTerminalThemeModeForTest('follow-app');
       api.setSystemPrefersDarkForTest(false);
       api.setGlobalThemeModeForTest('dark');
@@ -2826,7 +2864,9 @@ async function runCrossSurfaceStateSuite() {
       textureClears = 0;
       api.setGlobalThemeModeForTest('system');
       api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
-      assert.equal(term.options.theme.background, '#ffffff', 'System repaints follow-app terminals to the OS-resolved light theme from Dark');
+      assert.equal(term.options.theme.background, '#11151d', 'System keeps the dark xterm render reference when the display resolves light');
+      assert.equal(item.container.style.background, '#ffffff', 'System repaints the terminal container to the OS-resolved white display from Dark');
+      assert.equal(item.container.dataset.terminalTheme, 'light', 'System marks the container for the light row conversion');
       assert.deepStrictEqual(refreshCalls, [[0, 23]], 'System from Dark forces a terminal repaint');
       assert.equal(textureClears, 1, 'System from Dark clears cached glyph colors');
       refreshCalls.length = 0;

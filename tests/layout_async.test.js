@@ -6772,6 +6772,69 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const sessions = Array.from({length: 9}, (_, index) => String(index + 1));
+      const api = loadYolomux('', sessions);
+      const repo = '/repo/app';
+      const path = `${repo}/src/return.js`;
+      const fromRef = '5'.repeat(40);
+      const toRef = '6'.repeat(40);
+      const repoItem = api.resolveLayoutItem(api.gitDiffItemFor(repo));
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.leafNode('left');
+      slots.left = api.paneStateWithTabs(['1', repoItem], repoItem);
+      api.setLayoutSlotsForTest(slots);
+      api.setFocusedPanelItem(repoItem);
+      api.setFetchForTest(url => {
+        const parsed = new URL(String(url), 'http://localhost');
+        return Promise.resolve(jsonResponse({
+          repo,
+          relative_path: 'src/return.js',
+          from_ref: parsed.searchParams.get('from'),
+          to_ref: parsed.searchParams.get('to'),
+          diff: '@@ -1 +1 @@\n-old\n+new\n',
+          original: 'old\n',
+          working: 'new\n',
+        }));
+      });
+
+      const opened = await api.openGitDiffHistoricalFileForTest({
+        repo,
+        from_ref: fromRef,
+        to_ref: toRef,
+        parents: [fromRef],
+      }, {path: 'src/return.js', abs_path: path}, {returnToItem: repoItem});
+      assert.equal(api.layoutSlotsForTest().left.active, opened, 'clicking a commit file activates its historical diff tab');
+
+      const minimizeSlots = api.emptyLayoutSlots();
+      minimizeSlots[api.layoutTreeKey] = api.splitNode(
+        'row',
+        api.leafNode('left'),
+        api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50),
+        60,
+      );
+      minimizeSlots.left = api.paneStateWithTabs(['1'], '1');
+      minimizeSlots.slot1 = api.paneStateWithTabs([repoItem], repoItem);
+      minimizeSlots.slot2 = api.paneStateWithTabs([opened], opened);
+      api.setLayoutSlotsForTest(minimizeSlots);
+      api.minimizePaneFromLayout(opened);
+      assert.equal(api.layoutSlotsForTest().left.active, '1', 'minimizing retains the unrelated destination pane selection');
+      assert.equal(api.layoutSlotsForTest().slot1.active, repoItem, 'minimizing a historical diff pane returns to its originating Diff repo tab in another pane');
+
+      const capacitySlots = api.emptyLayoutSlots();
+      capacitySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 70);
+      capacitySlots.left = api.paneStateWithTabs([...sessions, repoItem], '1');
+      capacitySlots.slot1 = api.paneStateWithTabs([opened], opened);
+      api.setLayoutSlotsForTest(capacitySlots);
+      api.minimizePaneFromLayout(opened);
+      assert.equal(api.layoutSlotsForTest().left.tabs.includes(repoItem), true, 'a full destination cannot evict the originating Diff repo tab');
+      assert.equal(api.layoutSlotsForTest().left.active, repoItem, 'a full destination still returns to the originating Diff repo tab');
+
+      api.activatePaneTab('left', opened);
+      await api.closeFileTabForTest(path, {item: opened});
+      assert.equal(api.layoutSlotsForTest().left.active, repoItem, 'closing the historical diff returns to its originating Diff repo tab');
+    }
+
+    {
       const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
       const differApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')), 'zh-Hant': zhHant},

@@ -469,6 +469,7 @@ async function openGitDiffHistoricalFile(detail, file, options = {}) {
   return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
     item,
     repo: detail.repo,
+    returnToItem: options.returnToItem,
     historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
     userInitiated: options.userInitiated !== false,
   });
@@ -534,7 +535,7 @@ const gitDiffFileTreeInteractionController = createSharedTreeInteractionControll
       return;
     }
     const file = context.detail ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '') : null;
-    if (file) void openGitDiffHistoricalFile(context.detail, file);
+    if (file) void openGitDiffHistoricalFile(context.detail, file, {returnToItem: context.item});
   },
 });
 

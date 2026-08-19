@@ -3549,9 +3549,19 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
-// on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
-// terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
-// (including app 24-bit colors) against the bg.
+// xterm's contrast correction moves every light-on-white truecolor toward the same 4.5:1 gray.
+// Paint light terminals from the dark palette instead; CSS performs one lightness inversion on the
+// rendered rows while the container keeps the requested white background. The original ANSI/24-bit
+// distances then survive, including output from agents that chose colors for a dark terminal.
+function terminalRenderThemeForGlobalTheme(mode = globalThemeMode) {
+  const resolved = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  const theme = resolved === 'light' ? TERMINAL_THEMES.dark : TERMINAL_THEMES[resolved];
+  return {...(theme || TERMINAL_THEMES.dark)};
+}
+
+// On a light terminal, agents emit 24-bit truecolor escapes tuned for a dark terminal. The light
+// renderer deliberately keeps a dark contrast reference before CSS converts the painted rows;
+// otherwise xterm maps every light source color toward one uniform gray against white.
 // the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
 // an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
 // white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,

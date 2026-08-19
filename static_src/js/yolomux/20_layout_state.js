@@ -1184,6 +1184,7 @@ function layoutUrlEditorModesSnapshot() {
       entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
       entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
       if (state?.historicalComparisonKind) entry.historicalComparisonKind = state.historicalComparisonKind;
+      if (state?.historical === true && gitDiffItemPath(state.closeReturnToItem)) entry.returnToItem = state.closeReturnToItem;
     }
     modes.push(entry);
   };
@@ -1240,6 +1241,7 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
       state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
       state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
       if (state.historical === true && ['parent', 'root-empty-tree', 'merge-first-parent'].includes(entry.historicalComparisonKind)) state.historicalComparisonKind = entry.historicalComparisonKind;
+      if (state.historical === true && gitDiffItemPath(entry.returnToItem)) state.closeReturnToItem = entry.returnToItem;
     }
     if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
   }

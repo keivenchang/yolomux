@@ -25,6 +25,7 @@ from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
 from yolomux_lib import cli as cli_module
 from yolomux_lib.stats_current import host_collectors
+from yolomux_lib.stats_current import process_memory
 from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib import common
 from yolomux_lib import jobd
@@ -909,6 +910,148 @@ def test_nvidia_gpu_devices_use_aggregate_devices_without_process_scans(monkeypa
     assert calls == [["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
+def test_process_memory_rows_group_python_variants_and_keep_only_the_top_five():
+    rows = [
+        ("/usr/bin/python3.11", 10),
+        ("/usr/bin/python3.11 (deleted)", 5),
+        ("/venv/bin/python", 20),
+        ("Python3", 30),
+        ("/usr/bin/node", 100),
+        ("chrome", 90),
+        ("java", 80),
+        ("go", 70),
+        ("rust", 60),
+        ("bash", 50),
+        ("tmux", 40),
+        ("postgres", 30),
+        ("nginx", 20),
+    ]
+
+    assert process_memory.aggregate_process_memory_by_binary(rows) == {
+        "node": 100,
+        "chrome": 90,
+        "java": 80,
+        "go": 70,
+        "python": 65,
+    }
+
+
+def test_darwin_process_memory_uses_one_bounded_ps_census(monkeypatch):
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(returncode=0, stdout=(
+            "101 1024 0:01.00 Mon Aug 18 00:00:00 2026 /usr/bin/python3.12\n"
+            "102 2048 0:02.00 Mon Aug 18 00:00:01 2026 /opt/homebrew/bin/node\n"
+            "103 3072 0:03.00 Mon Aug 18 00:00:02 2026 Python\n"
+        ))
+
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(process_memory.subprocess, "run", run)
+
+    assert process_memory.process_memory_by_binary() == {"python": 4 * 1024 * 1024, "node": 2 * 1024 * 1024}
+    assert calls[0][0] == ["ps", "-axo", "pid=,rss=,time=,lstart=,comm="]
+    assert calls[0][1]["timeout"] == 0.75
+    assert calls[0][1]["env"]["LC_ALL"] == "C"
+
+
+def test_process_cpu_rows_group_by_binary_and_keep_deterministic_top_four():
+    assert process_memory.aggregate_process_cpu_by_binary([
+        ("python3.12", 10),
+        ("python", 5),
+        ("node", 20),
+        ("rustc", 20),
+        ("chromium", 30),
+        ("bash", 2),
+    ]) == {
+        "chromium": 30.0,
+        "node": 20.0,
+        "rustc": 20.0,
+        "python": 15.0,
+    }
+
+
+def test_linux_version_named_executable_uses_its_package_directory():
+    assert process_memory._linux_process_binary(
+        "2.1.226",
+        "/home/user/.local/share/claude/versions/2.1.226 (deleted)",
+    ) == "claude"
+
+
+def test_process_memory_normalization_does_not_merge_lossy_binary_names():
+    result = process_memory.aggregate_process_memory_by_binary([
+        ("Foo Bar", 10),
+        ("foo@bar", 20),
+    ])
+
+    assert sorted(result.values()) == [10, 20]
+    assert len(result) == 2
+    assert all(key.startswith("foo-bar-") for key in result)
+
+
+def test_linux_process_identity_prefers_the_full_executable_over_truncated_comm():
+    assert process_memory._linux_process_binary(
+        "very-long-binar",
+        "/opt/tools/very-long-binary-one",
+    ) == "very-long-binary-one"
+
+
+def test_native_process_memory_failure_is_distinct_from_a_valid_empty_census(monkeypatch):
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    assert process_memory.process_memory_by_binary() is None
+
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+    assert process_memory.process_memory_by_binary() == {}
+
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="not-a-valid-ps-row\n"),
+    )
+    assert process_memory.process_memory_by_binary() is None
+
+
+def test_linux_process_memory_reports_proc_enumeration_failure(monkeypatch):
+    class MissingProc:
+        def iterdir(self):
+            raise OSError("proc unavailable")
+
+    monkeypatch.setattr(process_memory.sys, "platform", "linux")
+    monkeypatch.setattr(process_memory, "Path", lambda _value: MissingProc())
+
+    assert process_memory.process_memory_by_binary() is None
+
+
+def test_linux_process_memory_reports_total_pid_read_failure(monkeypatch):
+    class UnreadablePid:
+        name = "123"
+
+        def __truediv__(self, _value):
+            return self
+
+        def read_text(self, **_kwargs):
+            raise OSError("pid disappeared")
+
+    class ProcWithUnreadablePid:
+        def iterdir(self):
+            return (UnreadablePid(),)
+
+    monkeypatch.setattr(process_memory.sys, "platform", "linux")
+    monkeypatch.setattr(process_memory, "Path", lambda _value: ProcWithUnreadablePid())
+
+    assert process_memory.process_memory_by_binary() is None
+
+
 def test_macos_gpu_devices_read_ioreg_activity_and_unified_memory(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
@@ -956,6 +1099,19 @@ def test_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
     }
+
+
+def test_linux_physical_core_count_deduplicates_hyperthreads_and_skips_offline_cpus(tmp_path):
+    cpu_root = tmp_path / "cpu"
+    for cpu_id, core_id, online in ((0, 0, True), (1, 0, True), (2, 1, True), (3, 1, False)):
+        topology = cpu_root / f"cpu{cpu_id}" / "topology"
+        topology.mkdir(parents=True)
+        (topology / "physical_package_id").write_text("0\n", encoding="utf-8")
+        (topology / "core_id").write_text(f"{core_id}\n", encoding="utf-8")
+        if cpu_id > 0:
+            (topology.parent / "online").write_text("1\n" if online else "0\n", encoding="utf-8")
+
+    assert host_collectors._linux_physical_core_count(cpu_root) == 2
 
 
 def test_stats_sample_parallel_scalars_are_retired():
@@ -1016,11 +1172,42 @@ def test_statsd_cpu_push_updates_the_web_cache_without_a_web_sampler():
 
     response = webapp.handle_control_request({
         "action": "stats_cpu_sample",
-        "sample": {"time": 100.0, "pid": os.getpid(), "cpu_percent": 42.0, "system_cpu_percent": 11.0, "rss_bytes": 123},
+        "sample": {
+            "time": 100.0,
+            "pid": os.getpid(),
+            "cpu_percent": 42.0,
+            "system_cpu_percent": 11.0,
+            "rss_bytes": 123,
+            "process_cpu_percent": {"python": 4.0, "node": 3.0},
+            "process_memory_bytes": {"python": 400, "node": 300},
+        },
     })
 
     assert response == {"ok": True, "cpu_budget": {"status": "ok", "current_percent": 42.0}}
-    assert webapp.latest_stats_sample()["cpu_percent"] == 42.0
+    assert webapp.latest_stats_sample()["process_cpu_percent"] == {"python": 4.0, "node": 3.0}
+    assert webapp.latest_stats_sample()["process_memory_bytes"] == {"python": 400, "node": 300}
+    assert webapp.latest_stats_sample()["process_memory_time"] == 100.0
+
+
+def test_statsd_process_memory_push_is_fresh_without_a_cpu_sample(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    response = webapp.handle_control_request({
+        "action": "stats_process_memory_sample",
+        "sample": {
+            "time": 100.0,
+            "pid": os.getpid(),
+            "process_memory_bytes": {"python": 400, "node": 300},
+        },
+    })
+
+    assert response == {"ok": True}
+    sample = webapp.latest_stats_sample()
+    assert "time" not in sample
+    assert sample["cpu_percent"] is None
+    assert sample["process_memory_time"] == 100.0
+    assert sample["process_memory_bytes"] == {"python": 400, "node": 300}
 
 
 def test_cpu_budget_marks_a_missing_statsd_push_stale():
@@ -5764,8 +5951,12 @@ def test_session_metadata_work_graph_owner_reuses_unchanged_source_generations(m
     idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)])
     current = {"info": working}
     rebuilds = []
+    test_thread = threading.current_thread()
+    original_work_graph = app_module.session_work_graph
 
     def fake_work_graph(info, _cache, allow_network=False):
+        if threading.current_thread() is not test_thread:
+            return original_work_graph(info, _cache, allow_network=allow_network)
         rebuilds.append((info.agents[0].status, allow_network))
         graph = metadata.empty_work_graph()
         graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}

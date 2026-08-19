@@ -67,6 +67,10 @@ let yolomuxFontsReadyPromise = null;
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
+const cpuTopology = Object.freeze({
+  logicalCpus: Math.max(0, Number(bootstrap.cpuTopology?.logical_cpus) || 0),
+  physicalCores: Math.max(0, Number(bootstrap.cpuTopology?.physical_cores) || 0),
+});
 const appRoot = document.getElementById('appRoot') || document.body;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');

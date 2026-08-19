@@ -65,7 +65,7 @@ def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
         """
         const probe = document.createElement('div');
         probe.style.cssText = 'display:flex;align-items:center;gap:8px';
-        probe.innerHTML = debugGraphLegendSwatchHtml({key: 'memory', linePattern: 'solid'}, 'area')
+        probe.innerHTML = debugGraphLegendSwatchHtml({key: 'memory', hostMetric: 'memory', hostProcessId: 'python'}, 'area')
           + debugGraphLegendSwatchHtml({key: 'latency', clientMetric: true}, 'line');
         document.body.append(probe);
         const area = probe.querySelector('.js-debug-legend-area');

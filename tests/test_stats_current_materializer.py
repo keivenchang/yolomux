@@ -75,6 +75,73 @@ def test_system_memory_projection_keeps_mac_details_as_exact_server_series():
     assert samples["system_memory_used_bytes"] == 900
 
 
+def test_system_memory_projection_emits_one_dynamic_series_per_binary():
+    observation = Observation("memory-processes-1", "system_memory", "host", 10, "epoch", 1, {
+        "used_bytes": 900,
+        "capacity_bytes": 1000,
+        "process_memory_bytes": {"python": 300, "node": 200},
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert samples["process_memory_bytes:python"] == 300
+    assert samples["process_memory_bytes:node"] == 200
+
+
+def test_system_memory_projection_keeps_the_retained_eight_binary_wire_shape_readable():
+    processes = {f"process-{index}": 100 - index for index in range(8)}
+    observation = Observation("memory-processes-legacy", "system_memory", "host", 10, "epoch", 1, {
+        "used_bytes": 900,
+        "capacity_bytes": 1000,
+        "process_memory_bytes": processes,
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert {name for name in samples if name.startswith("process_memory_bytes:")} == {
+        f"process_memory_bytes:process-{index}" for index in range(8)
+    }
+
+
+def test_cpu_projection_emits_average_min_and_max_series_per_binary():
+    observation = Observation("cpu-processes-1", "cpu", "host", 10, "epoch", 1, {
+        "process_percent": 5,
+        "system_percent": 20,
+        "process_cpu_percent": {"python": 4, "node": 3},
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert samples["process_cpu_percent:python"] == 4
+    assert samples["process_cpu_min_percent:python"] == 4
+    assert samples["process_cpu_max_percent:python"] == 4
+    assert samples["process_cpu_percent:node"] == 3
+
+
+def test_process_memory_gauge_keeps_the_latest_sample_in_a_coarse_bucket():
+    observations = (
+        Observation("memory-processes-1", "system_memory", "host", 11, "epoch", 60, {
+            "used_bytes": 900, "capacity_bytes": 1000,
+            "process_memory_bytes": {"python": 300, "node": 200},
+        }),
+        Observation("memory-processes-2", "system_memory", "host", 12, "epoch", 60, {
+            "used_bytes": 910, "capacity_bytes": 1000,
+            "process_memory_bytes": {"python": 400},
+        }),
+    )
+    generation = _build(_snapshot(observations=observations), until=20)
+    bucket = next(
+        item for item in materializer.slice_generation(
+            generation, 300, 10, private_source_id="client",
+        ).buckets
+        if item.start == 10
+    )
+
+    values = _series(bucket)
+    assert values["process_memory_bytes:python"].value == 400
+    assert values["process_memory_bytes:node"].value == 200
+
+
 def _projection(micro_usd):
     if micro_usd is None:
         return current_pricing.UsagePriceProjection(None, None, None)

@@ -8384,6 +8384,24 @@ class TmuxWebtermApp:
         if memory is None:
             raise RuntimeError("system memory metrics unavailable")
         macos_details = None if macos_snapshot is None else macos_snapshot[1]
+        process_sample = self.latest_stats_sample()
+        process_memory_observed_at = process_sample.get("process_memory_time")
+        process_sample_age = stats_current_host_collectors.host_cpu_sample_age_seconds(
+            {
+                "time": (
+                    process_memory_observed_at
+                    if process_memory_observed_at is not None
+                    else process_sample.get("time")
+                ),
+            },
+            time.time(),
+        )
+        process_memory_bytes = (
+            process_sample.get("process_memory_bytes")
+            if not stats_current_host_collectors.host_cpu_sample_is_stale(process_sample_age)
+            and isinstance(process_sample.get("process_memory_bytes"), Mapping)
+            else None
+        )
         return stats_current_collectors.system_memory_success(
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
@@ -8394,6 +8412,7 @@ class TmuxWebtermApp:
             used_bytes=float(memory[1]),
             capacity_bytes=float(memory[0]),
             macos_details=None if macos_details is None else asdict(macos_details),
+            process_memory_bytes=process_memory_bytes,
         )
 
     def collect_current_stats_agent_tokens(
@@ -12761,6 +12780,23 @@ class TmuxWebtermApp:
                     "system_cpu_percent": max(0.0, float(sample["system_cpu_percent"])),
                     "rss_bytes": max(0, int(sample["rss_bytes"])),
                 }
+                cpu_payload: dict[str, object] = {
+                    "process_percent": normalized["cpu_percent"],
+                    "system_percent": normalized["system_cpu_percent"],
+                }
+                if sample.get("process_cpu_percent") is not None:
+                    cpu_payload["process_cpu_percent"] = sample["process_cpu_percent"]
+                validated_cpu = stats_current_families.validate_payload("cpu", cpu_payload)
+                if "process_cpu_percent" in validated_cpu:
+                    normalized["process_cpu_percent"] = dict(validated_cpu["process_cpu_percent"])
+                if sample.get("process_memory_bytes") is not None:
+                    validated_memory = stats_current_families.validate_payload("system_memory", {
+                        "used_bytes": 0,
+                        "capacity_bytes": 0,
+                        "process_memory_bytes": sample["process_memory_bytes"],
+                    })
+                    normalized["process_memory_bytes"] = dict(validated_memory["process_memory_bytes"])
+                    normalized["process_memory_time"] = normalized["time"]
             except (KeyError, TypeError, ValueError):
                 return {"ok": False, "error": "invalid stats CPU sample"}
             if normalized["pid"] != os.getpid():
@@ -12776,6 +12812,38 @@ class TmuxWebtermApp:
                 record.cached_payload = normalized
             budget = self.update_server_cpu_budget(normalized)
             return {"ok": True, "cpu_budget": budget}
+        if action == "stats_process_memory_sample":
+            sample = request.get("sample")
+            if not isinstance(sample, dict):
+                return {"ok": False, "error": "invalid stats process memory sample"}
+            try:
+                observed_at = float(sample["time"])
+                pid = int(sample["pid"])
+                validated = stats_current_families.validate_payload("system_memory", {
+                    "used_bytes": 0,
+                    "capacity_bytes": 0,
+                    "process_memory_bytes": sample["process_memory_bytes"],
+                })
+                process_memory_bytes = dict(validated["process_memory_bytes"])
+            except (KeyError, TypeError, ValueError):
+                return {"ok": False, "error": "invalid stats process memory sample"}
+            if pid != os.getpid():
+                return {"ok": False, "error": "stats process memory sample PID mismatch"}
+            with self.stats_collection_state.sample_lock:
+                record = self.stats_collection_state.sample_record
+                normalized = dict(record.cached_payload or {
+                    "pid": os.getpid(),
+                    "started_at": SERVER_STARTED_AT,
+                    "cpu_percent": None,
+                    "system_cpu_percent": None,
+                    "rss_bytes": None,
+                    "reason_code": STATS_SAMPLE_NOT_PUSHED_REASON_CODE,
+                    "reason": STATS_SAMPLE_NOT_PUSHED_REASON,
+                })
+                normalized["process_memory_time"] = observed_at
+                normalized["process_memory_bytes"] = process_memory_bytes
+                record.cached_payload = normalized
+            return {"ok": True}
         if action == "disable_auto_approve":
             session = request.get("session")
             requester = request.get("requester")

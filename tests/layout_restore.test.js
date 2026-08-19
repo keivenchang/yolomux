@@ -56,13 +56,18 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomux('', ['1']);
     const path = '/repo/src/app.js', fromRef = '1'.repeat(40), toRef = '2'.repeat(40);
     const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
+    const returnToItem = api.gitDiffItemFor('/repo');
     assert.equal(api.resolveLayoutItem(item), item);
     assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, api.layoutWithItems(api.emptyLayoutSlots(), [item])), [item], 'historical Editor tuple IDs survive both URL decoding layers');
     api.setOpenFileStateForTest(path, {kind: 'text', content: 'working', original: 'working', dirty: true});
-    const restored = api.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'diff', diffFromRef: fromRef, diffToRef: toRef, historicalComparisonKind: 'merge-first-parent'});
+    const restored = api.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'diff', diffFromRef: fromRef, diffToRef: toRef, historicalComparisonKind: 'merge-first-parent', returnToItem});
     assert.deepStrictEqual(canonical(restored), {path, item, mode: 'diff'});
     const historical = api.fileEditorStateForItemForTest(path, item);
     assert.deepStrictEqual([historical.historical, historical.diffPinnedFromRef, historical.diffPinnedToRef, historical.historicalComparisonKind], [true, fromRef, toRef, 'merge-first-parent']);
+    assert.equal(historical.closeReturnToItem, returnToItem, 'historical URL restoration retains its originating Diff repo tab');
+    api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [returnToItem, item]), {focusSession: item, prune: false});
+    const snapshotMode = api.layoutUrlStateSnapshotForTest().editor.modes.find(mode => mode.item === item);
+    assert.equal(snapshotMode.returnToItem, returnToItem, 'historical URL serialization retains its originating Diff repo tab');
     assert.equal(api.openFileStateForTest(path).content, 'working', 'historical URL restoration cannot overwrite unsaved working-tree content');
   });
 
@@ -2715,7 +2720,7 @@ async function runLayoutRestoreSuite() {
 	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*calc\(-1 \* var\(--space-1\)\)/.test(css), 'topbar activity separator adds no extra horizontal padding');
 	    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)[\s\S]*width:\s*var\(--agent-status-ball-size\)/.test(css), 'topbar activity balls reuse the shared status-ball size parent');
 	    assert.ok(/\.topbar-activity--mobile-count-balls \.topbar-activity-count:not\(\.active\),[\s\S]*?\.topbar-activity-idle,[\s\S]*?\.topbar-activity-sep\s*\{[\s\S]*display:\s*none/.test(css), 'compact activity hides zero tones and the idle label through the measured packing state');
-	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
+	    assert.equal(/\.topbar-activity\.has-attention\s*\{/.test(css), false, 'the informational activity summary stays neutral while its state dots retain their colors');
   });
 
   test('session teardown distinguishes confirmed removals', () => {

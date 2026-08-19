@@ -2312,6 +2312,35 @@ def test_count_directory_files_counts_recursive_regular_files(tmp_path):
     assert result == {"path": str(target), "kind": "dir", "files": 2, "recursive": True}
 
 
+def test_path_info_ignores_incomplete_git_marker_directory(tmp_path):
+    root = tmp_path / "home"
+    target = root / "dev" / "2025"
+    target.mkdir(parents=True)
+    marker = root / ".git"
+    marker.mkdir()
+    (marker / "config").write_text("[core]\n", encoding="utf-8")
+    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == ""
+    assert result["relative_path"] == ""
+    assert result["repo"] is None
+
+
+def test_path_info_ignores_invalid_git_marker_file(tmp_path):
+    root = tmp_path / "home"
+    target = root / "dev" / "2025"
+    target.mkdir(parents=True)
+    (root / ".git").write_text(f"gitdir: {tmp_path / 'missing-git-dir'}\n", encoding="utf-8")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == ""
+    assert result["relative_path"] == ""
+    assert result["repo"] is None
+
+
 def test_path_info_returns_git_relative_path(tmp_path):
     git(tmp_path, "init")
     target = tmp_path / "src" / "main.py"

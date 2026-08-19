@@ -1499,6 +1499,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
 
           await editorNavBack();
           await waitFor(() => activeItemForSide(slotForItem(rootItem)) === rootItem);
+          activatePaneTab(slotForItem(historicalItem), historicalItem, {userInitiated: true});
+          await waitFor(() => activeItemForSide(slotForItem(historicalItem)) === historicalItem);
 
           let renamePromptCalls = 0;
           const originalPrompt = window.prompt;
@@ -1508,10 +1510,33 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           };
           historicalTab.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true}));
           window.prompt = originalPrompt;
-          await Promise.resolve(closeFileTab(historicalPath, {item: historicalItem}));
+          const minimizeButtons = Array.from(document.querySelectorAll(
+            '[data-pane-minimize="' + CSS.escape(historicalItem) + '"]'
+          ));
+          const minimizeButton = minimizeButtons.find(button => button.offsetParent !== null) || minimizeButtons[0];
+          if (!minimizeButton) throw new Error('historical diff pane minimize control missing');
+          minimizeButton.click();
+          await waitFor(() => activeItemForSide(slotForItem(rootItem)) === rootItem);
+          const historicalAfterMinimize = {
+            stillInLayout: itemInLayout(historicalItem),
+            activeItem: activeItemForSide(slotForItem(rootItem)),
+            historicalState: fileEditorStateForItem(historicalPath, historicalItem) != null,
+            workingContent: fileStateFor(historicalPath)?.content,
+            workingDirty: fileStateFor(historicalPath)?.dirty === true,
+          };
+
+          activatePaneTab(slotForItem(historicalItem), historicalItem, {userInitiated: true});
+          await waitFor(() => activeItemForSide(slotForItem(historicalItem)) === historicalItem);
+          const dismissButton = document.querySelector(
+            '[data-pane-tab="' + CSS.escape(historicalItem) + '"] [data-pane-tab-close]'
+          );
+          if (!dismissButton) throw new Error('historical diff tab dismiss control missing');
+          dismissButton.click();
+          await waitFor(() => !itemInLayout(historicalItem));
           const historicalAfterClose = {
             renamePromptCalls,
             stillInLayout: itemInLayout(historicalItem),
+            activeItem: activeItemForSide(slotForItem(rootItem)),
             historicalState: fileEditorStateForItem(historicalPath, historicalItem) != null,
             workingContent: fileStateFor(historicalPath)?.content,
             workingDirty: fileStateFor(historicalPath)?.dirty === true,
@@ -1610,6 +1635,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             historicalItem,
             historicalBeforePreview,
             historicalAfterPreview,
+            historicalAfterMinimize,
             historicalAfterClose,
             restoredSnapshot,
             backItem: rootItem,
@@ -1709,9 +1735,17 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "previewSelected": True,
         "tabLabel": "Δnew.js;repo/src",
     }, metrics
+    assert metrics["historicalAfterMinimize"] == {
+        "stillInLayout": True,
+        "activeItem": root_item,
+        "historicalState": True,
+        "workingContent": "working tree dirty\n",
+        "workingDirty": True,
+    }, metrics
     assert metrics["historicalAfterClose"] == {
         "renamePromptCalls": 0,
         "stillInLayout": False,
+        "activeItem": root_item,
         "historicalState": False,
         "workingContent": "working tree dirty\n",
         "workingDirty": True,
