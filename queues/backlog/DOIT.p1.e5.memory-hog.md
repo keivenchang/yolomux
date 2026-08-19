@@ -18,6 +18,48 @@ For `statsd`, 560.8 MiB of PSS was anonymous and SQLite `mmap_size` was zero. Th
 
 For `watchd`, the released configuration unions every `indexed_dir` into recursive native `watch_paths`; `/home/keivenc/dev` therefore created 126,028 inotify descriptors. Event exclusion runs after native registration and cannot bound that topology (`yolomux_lib/watchd.py`). Kernel inotify memory is additional to process PSS. The current dirty candidate contains non-recursive/capped work in this area, but source intent is not test, deployment, or release proof.
 
+## 2026-08-18 - statsd CPU Defect FOUND AND FIXED (uncommitted); Memory Scope Still Open
+
+RESCOPED per audit: statsd first. The CPU half is done and measured; the MEMORY half of this queue is untouched.
+
+HOT LOOP NAMED WITH ATTRIBUTION: `_append_uncovered_gap` (`yolomux_lib/stats_current/materializer.py:1685-1695`), reached via `_coverage_gaps` -> `_build` -> `update_generation`. Live 7772 statsd PID 842011 measured by `/proc/<pid>/stat` utime+stime deltas, never `ps %cpu`: 14.51 CPU-s over 17.79s wall = 81.6% of one core. A 40s py-spy profile on the pure incremental path (`build_generation` 0.00s) attributed `_build` 27.47s, `_coverage_gaps` 20.82s (52%), and `_append_uncovered_gap` 15.59s (39%) - the largest single owner. Fold path 4.69s, storage read 1.08s.
+
+HYPOTHESIS EXPLICITLY DISPROVEN: the decode-amplification theory carried over from earlier memory work is WRONG for CPU. `storage.py:2402-2530` JSON decode is about 2.7% of profile, not the driver. Do not re-open it as a CPU cause.
+
+CAUSE: the helper linearly rescanned every explicit span for every coverage epoch, O(epochs x spans) per build, at a live shape of 6 sources x 633 epochs x 589 spans and growing - measured N^1.66 with the retained window. `normalize_unavailable_spans` (`storage.py:301-346`) already guarantees spans are start-ordered and non-overlapping per `(family, source_id)`, an invariant clipping preserves, so the scan was unnecessary.
+
+FIX: `bisect` seek over a per-source starts index. Two files, uncommitted in an isolated worktree at `7cb75e3a5`: `materializer.py` (+76/-24) and `tests/test_stats_current_materializer.py` (+164). Frozen-fixture equivalence: 3625 gaps, output byte-identical (`cmp` rc=0).
+
+RED/GREEN VERIFIED FIRST-HAND BY THE MAIN AGENT: patched, 8 passed. With the product fix stashed and the tests kept, `test_coverage_gap_cost_stays_linear_in_retained_coverage_history` FAILS. On a pristine base it reports cost growing 3.81x for 2x history (0.1946s -> 0.7420s). The 6-case public `_coverage_gaps` matrix passes on BOTH base and patched, which is the point: it proves no semantic change rather than serving as the red.
+
+BEFORE/AFTER, whole service, real `service.py`, frozen 381 MB copy of the live DB, readiness-gated, calibrated to the measured live rate of 4.00 appends/s with `source_generation` delta exactly +240 and zero RPC timeouts: base 55.9% / 55.7% / 55.3%, patched 27.4% / 26.9% / 28.4%. About 2x, 33.4 -> 16.5 CPU-s per 60s. Residual `_append_uncovered_gap` 0.19s, down from 15.59s.
+
+INVALID EARLIER NUMBERS, WITHDRAWN: the first whole-service runs reporting 99.2% / 92.8% CPU and RSS 307->947 MiB are DISCARDED. `Observation` fields were passed in the wrong order so every append was rejected with `unknown current stats family 'jobd'`, and the response was never checked - only the startup full build was measured. The harness now asserts `accepted==2`, `duplicates==0`, and the generation delta.
+
+REMAINING CPU, NAMED NOT HAND-WAVED: inside `_coverage_gaps`, `normalize_coverage_model` 3.01s and `identity_text` 3.39s per 60s, both re-run over the full 4023-epoch / 3534-span model every build. `_build_once` already caches NORMALIZED coverage and `_coverage_gaps` then re-normalizes it; that double-normalization is the next target. Builds DO coalesce (`_take_work` drains all pending), so about 2 builds/s is a consequence of build cost, not a queue defect.
+
+STILL OPEN IN THIS QUEUE: the entire memory scope. Startup still schedules a full build; observations and usage still use whole-result `fetchall()`; RSS about 950 MiB with 1113 MiB high-water set by the startup full build, flat during steady state so NOT a leak; startup-to-ready 54-71s. The 24h read bound landed earlier in `f32ffd898` and must be preserved. Watchd and search work is separate and untouched.
+
+NO LIVE CLAIM: 7772 was never restarted and is not fixed. Landing requires commit authorization, an authorized restart, and a post-restart measurement.
+
+## LANDING BLOCKER 2026-08-18 - The statsd Regression Is A Load-Sensitive Timing Gate
+
+The bisect production fix is sound and red-on-base still holds. The REGRESSION is the problem, and it blocks landing.
+
+`test_coverage_gap_cost_stays_linear_in_retained_coverage_history` measures `_coverage_gaps` at 1500 and 3000 epochs with `time.process_time()`, takes `min` of 3 samples, and asserts `double / single < 2.8`. A perfectly linear algorithm scores 2.0, so the entire tolerance is 2.0 to 2.8, and the absolute durations are only about 0.015-0.018s, where scheduler and cache-contention noise dominate.
+
+Observed on the PATCHED tree: a full-module run gave 61 passed / 1 failed at 2.80x against the strict `< 2.8`, and five isolated reruns gave 4 pass / 1 fail with the failure at 2.88x (0.0157s -> 0.0453s). Raw outputs retained at `/tmp/statsd-p0-materializer-pytest-20260818.txt` and `/tmp/statsd-p0-scaling-repeat-20260818.txt`.
+
+A separate five-run measurement by the main context on a quieter box returned 5 pass / 0 fail. THAT DOES NOT CLEAR THE GATE. Non-reproduction on a quieter host is exactly what a load-sensitive threshold predicts, and it must not be used to reclassify the observed red. An earlier report of "8 passed" was a SINGLE run of a gate that is flaky by construction; any 332-pass or module-green claim is withdrawn until re-measured from a real exit code.
+
+- [x] DONE: replaced the timing pass/fail with a DETERMINISTIC OPERATION-COUNT BOUND at `_append_uncovered_gap`. For example, an indexable explicit-gap test double that fails the test if the implementation iterates the whole list, and counts bounded `__getitem__` accesses so a candidate overlapping O(1) spans passes and a whole-list scan fails. Keep wall-clock only as non-gating measurement.
+- [x] DONE: full module re-run independently by the main context at host loadavg 34 - 64 passed, rc=0. Exact new tests 3 passed / 61 deselected, rc=0. Forced-red against the old full-scan implementation: 3 failed, rc=1, so the new gate can fail.
+- [ ] Refresh the patch backup and its hash after the test change.
+
+FORBIDDEN REMEDIES, explicitly: raising the 2.8 threshold, retries, sleeps, serialization, lowering concurrency, or weakening the assertion. The gate must become deterministic, not more tolerant.
+
+Integration order is unchanged: statsd remains first because it is disjoint. After the CPU patch is clean and integrated, profile the PATCHED service before choosing the next CPU target. Memory and startup remain a separate unresolved phase. Live 7772 must not be restarted as part of this correction; it remains old and hot at 85.0% user-heavy CPU with zero physical reads.
+
 ## Plan
 
 - [ ] **Freeze production-scale reproductions and derive explicit budgets.** Create content-addressed fixtures and isolated subprocess harnesses for (a) the measured stats shape: approximately 417 MiB SQLite, 369,312 observations, 240,376 usage atoms, 149 MiB raw payload JSON, real indexes, aggregate ring, and WAL; and (b) a large nested indexed root that makes the released recursive watch owner exceed the intended registration bound. First prove the released behavior exceeds the proposed peak/steady PSS/USS and native-watch budgets. Measure stats phase-by-phase PSS/USS, allocated blocks, cache object/byte counts, and optional isolated `tracemalloc`/`malloc_info`; measure watchd at 0, 1k, 10k, and 100k directories plus kernel slab deltas. Derive budgets from the intended bounded architecture, not by rounding above the 703.5 MiB incident baseline. Keep raw outputs under `/tmp`; retain only fixture identities, summarized measurements, and exact repro commands.
@@ -56,3 +98,5 @@ For `watchd`, the released configuration unions every `indexed_dir` into recursi
 - `/readyz` proves every required daemon's identity, bounded serving state, memory/watch contract, and recovery state before browser launch; `/livez` remains a distinct progress signal.
 - Fresh clean Linux and Darwin checks pass on the same frozen SHA; the authorized development deployment proves identity, settle, authenticated soak, negative control, exact YO!stats/Filesystem paths, and retirement without post-freeze edits.
 - Documentation and `docs/DONE/` record the before/after measurements, budgets, architecture, and release evidence; this queue is removed only after those records are complete.
+
+NOTE ON METHOD: the owner attempted to prove load-independence by spawning 16 orphaned busy loops (PIDs 419050-419066, PPID 1, 150s) after an isolation guard refused its first saturation attempt. Those were terminated externally and none remain. That approach was both unsafe on a shared machine hosting live servers and unnecessary, because the replacement proof is structural and cannot vary with load. The independent re-measurement above was taken at loadavg 34 without generating any load.
