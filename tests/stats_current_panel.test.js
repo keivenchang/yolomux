@@ -331,6 +331,7 @@ test('CPU keeps the exact serving port as the only solid series and shows a gap,
   assert.equal(solid[0].key, 'cpu:port:9001');
   assert.equal(solid[0].color, 'green');
   assert.equal(solid[0].labelParams.process, 'yolomux.py (web)');
+  assert.equal(solid[0].currentProcessCpu, true);
   // The serving port had no sample in this bucket, so it is an honest gap, not a value.
   vm.runInNewContext(`${helpers}\nresult = debugGraphProcessCpuBucketHasData(${bucket}, 'port:9001');`, context);
   assert.equal(context.result, false);
@@ -358,7 +359,28 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.length, 1);
   assert.equal(context.result[0].key, 'cpu:port:80');
   assert.equal(context.result[0].linePattern, 'solid');
+  assert.equal(context.result[0].currentProcessCpu, true);
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
+});
+
+test('CPU serving-port series leads the legend and paints after every other line', () => {
+  const orderingSource = sourceFunction('debugGraphCurrentProcessCpuOrdered', 'debugGraphLegendSeriesItems');
+  const chartSource = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
+  const context = {result: null};
+  vm.runInNewContext(`
+    ${orderingSource}
+    const area = {key: 'cpuBinary:python'};
+    const system = {key: 'systemCpu'};
+    const peer = {key: 'cpu:port:7001', processCpu: true};
+    const current = {key: 'cpu:port:7442', processCpu: true, currentProcessCpu: true};
+    result = {
+      legend: debugGraphCurrentProcessCpuOrdered([area, system, peer, current], true).map(series => series.key),
+      paint: debugGraphCurrentProcessCpuOrdered([system, current, peer]).map(series => series.key),
+    };
+  `, context);
+  assert.deepEqual([...context.result.legend], ['cpu:port:7442', 'cpuBinary:python', 'systemCpu', 'cpu:port:7001']);
+  assert.deepEqual([...context.result.paint], ['systemCpu', 'cpu:port:7001', 'cpu:port:7442']);
+  assert.match(chartSource, /const lineSeries = debugGraphCurrentProcessCpuOrdered\(/);
 });
 
 test('CPU reserves red dotted for System and violet solid for yolomux.py under the red accent', () => {
@@ -387,7 +409,7 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
     ${sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml')}
     ${sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues')}
     const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'dot', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
-    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
+    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, currentProcessCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
     result = {
       colors: [debugGraphSeriesDisplayColor(system), debugGraphSeriesDisplayColor(current)],
       lines: [debugGraphPolylineHtml(system, 100, {}, false), debugGraphPolylineHtml(current, 100, {}, false)],
@@ -398,11 +420,13 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   assert.match(context.result.lines[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
   assert.match(context.result.lines[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.lines[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+  assert.match(context.result.lines[1], /js-debug-line--current-process/);
   assert.match(context.result.lines[0], /<title>system avg CPU %<\/title>/);
   assert.match(context.result.lines[1], /<title>yolomux\.py \(web\) CPU %<\/title>/);
   assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
   assert.match(context.result.legends[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.legends[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+  assert.match(context.result.legends[1], /js-debug-line--current-process/);
 
   const presetSource = slice(editorSettingsSource, 'const UI_COLOR_CHOICES =', '\nfunction normalizeEditorCursorColor(');
   const presetContext = {result: null, Object};
@@ -466,6 +490,8 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
     }
   }
   assert.match(css, /body\.theme-light \.js-debug-line\s*\{[^}]*stroke-width:\s*1\.6/);
+  assert.match(css, /\.js-debug-line--current-process\s*\{[^}]*stroke-width:\s*2\.4/);
+  assert.match(css, /\.js-debug-legend-line \.js-debug-line--current-process\s*\{[^}]*stroke-width:\s*2\.5/);
   assert.match(css, /body\.theme-light :is\(\.js-debug-graph-view, \.js-yocost-graphs\)\s*\{[^}]*--js-debug-client-comparison-opacity:\s*0\.9/);
 });
 

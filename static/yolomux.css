@@ -6347,6 +6347,9 @@ body.theme-light .js-debug-line--moving-average {
 .js-debug-line--systemCpu {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-rose));
 }
+.js-debug-line--current-process {
+  stroke-width: 2.4;
+}
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);
 }
@@ -6413,6 +6416,9 @@ body.theme-light .js-debug-line--moving-average {
 }
 .js-debug-legend-line .js-debug-line {
   stroke-width: 1.5;
+}
+.js-debug-legend-line .js-debug-line--current-process {
+  stroke-width: 2.5;
 }
 .js-debug-legend-area {
   width: 18px;

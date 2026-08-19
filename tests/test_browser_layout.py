@@ -1878,7 +1878,7 @@ def test_current_stats_system_memory_renders_the_top_five_vivid_binary_rss_areas
     }, result
 
 
-def test_current_stats_cpu_renders_top_four_binary_areas_without_changing_system_or_yolomux_lines(browser, tmp_path):
+def test_current_stats_cpu_renders_areas_below_the_emphasized_yolomux_line(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
     result = browser.execute_script(
@@ -1915,6 +1915,10 @@ def test_current_stats_cpu_renders_top_four_binary_areas_without_changing_system
             const yolomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
             const yolomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
+            const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])]
+              .map(node => node.dataset.jsDebugLegend);
+            const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])]
+              .map(node => node.dataset.jsDebugSeries);
             document.body.className = originalBodyClass;
             return {
               ready: true,
@@ -1928,6 +1932,11 @@ def test_current_stats_cpu_renders_top_four_binary_areas_without_changing_system
               areaLegendBlocks,
               systemLegendWidth: systemLegend ? getComputedStyle(systemLegend).strokeWidth : '',
               yolomuxLegendWidth: yolomuxLegend ? getComputedStyle(yolomuxLegend).strokeWidth : '',
+              systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
+              yolomuxLineWidth: yolomuxLine ? getComputedStyle(yolomuxLine).strokeWidth : '',
+              yolomuxEmphasized: yolomuxLine?.classList.contains('js-debug-line--current-process') || false,
+              legendOrder,
+              linePaintOrder,
               systemPattern: systemLine?.dataset.jsDebugLinePattern,
               yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
             };
@@ -1940,7 +1949,12 @@ def test_current_stats_cpu_renders_top_four_binary_areas_without_changing_system
     assert len(set(result["colors"])) == 4 and all(result["colors"]), result
     assert result["lightOpacity"] == result["darkOpacity"] == "0.52", result
     assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
-    assert result["systemLegendWidth"] == result["yolomuxLegendWidth"] == "1.5px", result
+    assert result["systemLegendWidth"] == "1.5px", result
+    assert float(result["yolomuxLegendWidth"].removesuffix("px")) > 1.5, result
+    assert float(result["yolomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
+    assert result["yolomuxEmphasized"] is True, result
+    assert result["legendOrder"][0].startswith("cpu:port:"), result
+    assert result["linePaintOrder"][-1].startswith("cpu:port:"), result
     assert result["systemPattern"] == "dot" and result["yolomuxPattern"] == "solid", result
 
 

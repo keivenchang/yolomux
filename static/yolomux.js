@@ -55731,6 +55731,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         cssKey: 'cpu',
         chartMetricKey: 'cpu',
         processCpu: true,
+        currentProcessCpu: current,
         processId,
         linePattern: current ? 'solid' : 'dot',
         color,
@@ -56641,6 +56642,7 @@ function debugGraphSeriesLinePatternAttrs(series) {
 
 function debugGraphSeriesLineClassName(series, extraClass = '') {
   const classes = ['js-debug-line', `js-debug-line--${debugGraphSeriesClassKey(series)}`];
+  if (series?.currentProcessCpu === true) classes.push('js-debug-line--current-process');
   const linePattern = debugGraphSeriesLinePattern(series);
   if (linePattern) classes.push('js-debug-line--pattern', `js-debug-line--pattern-${linePattern}`);
   if (series?.clientMetric === true) {
@@ -56992,11 +56994,23 @@ function debugGraphMacMemoryDetailsHtml(buckets) {
   }).join('')}</dl>`;
 }
 
+function debugGraphCurrentProcessCpuOrdered(seriesItems, currentFirst = false) {
+  const current = [];
+  const rest = [];
+  for (const series of seriesItems || []) {
+    (series?.currentProcessCpu === true ? current : rest).push(series);
+  }
+  return currentFirst ? [...current, ...rest] : [...rest, ...current];
+}
+
 function debugGraphLegendSeriesItems(group, groupSeries) {
   const legendKeys = Array.isArray(group?.legendSeries) ? group.legendSeries : null;
-  if (!legendKeys) return groupSeries;
-  const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
-  return legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  let selected = groupSeries;
+  if (legendKeys) {
+    const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
+    selected = legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  }
+  return debugGraphCurrentProcessCpuOrdered(selected, true);
 }
 
 function debugGraphMacMemoryProcessPlotSeries(series, buckets) {
@@ -57351,7 +57365,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
   const areaSeries = plottedGroupSeries.filter(series => debugGraphSeriesUsesArea(series, group.kind));
-  const lineSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries;
+  const lineSeries = debugGraphCurrentProcessCpuOrdered(
+    group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries,
+  );
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
