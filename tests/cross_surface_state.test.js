@@ -66,6 +66,8 @@ async function runCrossSurfaceStateSuite() {
     cacheApi.setRepoDiffRefsForTest('/repo/app', 'v0.7.4', 'current');
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 0}, 'changing Differ refs invalidates only the Differ cache');
     assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
+  });
+
   test('initial URL Git history state is applied before layout construction without a temporal-dead-zone failure', () => {
     const item = `gitdiff:${encodeURIComponent('/repo')}`;
     const sha = 'a'.repeat(40);

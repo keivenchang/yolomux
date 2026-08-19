@@ -1982,7 +1982,7 @@
     "tests/browser_helpers/cross_surface_quick_open_suite.js": 70,
     "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
     "tests/browser_helpers/editor_preview_suite.js": 8976,
-    "tests/cross_surface_state.test.js": 6417,
+    "tests/cross_surface_state.test.js": 6419,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 174,
