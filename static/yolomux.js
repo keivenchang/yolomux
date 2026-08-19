@@ -56571,17 +56571,18 @@ function debugGraphInteractionOverlayHtml() {
   return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
-function debugGraphLegendHtml(seriesItems) {
+function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
     ${seriesItems.map(series => {
       const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
-      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series, kind)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
     }).join('')}
   </div>`;
 }
 
-function debugGraphLegendSwatchHtml(series) {
+function debugGraphLegendSwatchHtml(series, kind = '') {
   if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (kind === 'area') return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
@@ -57116,7 +57117,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind})}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">

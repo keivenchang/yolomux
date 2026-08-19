@@ -415,6 +415,26 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   }
 });
 
+test('chart legends distinguish filled area keys from thin line keys', () => {
+  const swatchSource = sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues');
+  const context = {
+    result: null,
+    esc: value => String(value),
+    debugGraphAgentTokenLegendSwatchHtml: () => '',
+    debugGraphSeriesLinePattern: series => series.linePattern || '',
+    debugGraphSeriesLineClassName: () => 'js-debug-line',
+    debugGraphSeriesLinePatternAttrs: () => '',
+    debugGraphSeriesStyleAttr: () => '',
+    debugGraphSeriesClassKey: series => series.key,
+  };
+  vm.runInNewContext(`${swatchSource}\nresult = [debugGraphLegendSwatchHtml({key: 'memory', linePattern: 'solid'}, 'area'), debugGraphLegendSwatchHtml({key: 'latency', clientMetric: true}, 'line')];`, context);
+  assert.match(context.result[0], /<span class="js-debug-legend-area"/);
+  assert.doesNotMatch(context.result[0], /<svg/);
+  assert.match(context.result[1], /<svg class="js-debug-legend-line"/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind\}\)/);
+  assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
+});
+
 test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall time, and survives an epoch reset', () => {
   // W5: Clear uses validated (epoch, sequence) cursors, never wall time. A same-tick
   // record above the cursor stays; a clock rollback cannot resurface a hidden record;

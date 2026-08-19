@@ -6401,6 +6401,14 @@ body :is(
 .js-debug-legend-line .js-debug-line {
   stroke-width: 1.5;
 }
+.js-debug-legend-area {
+  width: 18px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 1px;
+  background: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.68;
+}
 .js-debug-legend-swatch--api {
   color: var(--js-debug-api-series);
 }
