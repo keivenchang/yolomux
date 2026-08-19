@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import re
@@ -1646,6 +1647,9 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                 for gap in sorted(explicit_gaps, key=lambda item: (item.start, item.end, item.epoch_id)):
                     _append_gap(gaps, gap)
                 continue
+            # Built once per source: explicit_gaps is already start-ordered and
+            # non-overlapping, so this is the seek index for gap subtraction.
+            explicit_starts = [item.start for item in explicit_gaps]
             computed_gaps: list[NoData] = []
             cursor = max(oldest, intervals[0].started_at)
             previous = intervals[0]
@@ -1659,7 +1663,7 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                     previous = interval
                     continue
                 if start > cursor:
-                    _append_uncovered_gap(explicit_gaps, computed_gaps, NoData(
+                    _append_uncovered_gap(explicit_gaps, explicit_starts, computed_gaps, NoData(
                         spec.name, source_id, previous.epoch_id, cursor, start,
                         previous.native_cadence_seconds,
                     ))
@@ -1673,7 +1677,7 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                 and previous.ended_at is not None
                 and previous.ended_at >= latest_family_end
             ):
-                _append_uncovered_gap(explicit_gaps, computed_gaps, NoData(
+                _append_uncovered_gap(explicit_gaps, explicit_starts, computed_gaps, NoData(
                     spec.name, source_id, previous.epoch_id, cursor, observed_until,
                     previous.native_cadence_seconds,
                 ))
@@ -1697,29 +1701,53 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
     return result
 
 
-def _append_uncovered_gap(explicit_gaps: list[NoData], computed_gaps: list[NoData], candidate: NoData) -> None:
-    """Add only candidate portions not already owned by an explicit span."""
+def _append_uncovered_gap(
+    explicit_gaps: list[NoData],
+    explicit_starts: list[float],
+    computed_gaps: list[NoData],
+    candidate: NoData,
+) -> None:
+    """Add only candidate portions not already owned by an explicit span.
 
-    portions = [(candidate.start, candidate.end)]
-    for existing in explicit_gaps:
-        next_portions = []
-        for start, end in portions:
-            if existing.end <= start or existing.start >= end:
-                next_portions.append((start, end))
-                continue
-            if start < existing.start:
-                next_portions.append((start, existing.start))
-            if existing.end < end:
-                next_portions.append((existing.end, end))
-        portions = next_portions
-    computed_gaps.extend(
-        NoData(
-            candidate.family, candidate.source_id, candidate.epoch_id,
-            start, end, candidate.native_cadence_seconds, candidate.reason,
-        )
-        for start, end in portions
-        if start < end
-    )
+    ``explicit_gaps`` is sorted by start and non-overlapping within one
+    family/source: ``normalize_unavailable_spans`` establishes that invariant
+    and the clip to ``[oldest, observed_until]`` preserves it. Only the spans
+    that actually overlap the candidate can subtract anything from it, so
+    ``explicit_starts`` lets us seek to the first of them instead of walking
+    the whole list. The previous full scan made each call O(explicit spans)
+    and each build O(coverage epochs x explicit spans). On a live statsd with
+    a steady-state 24h window (4023 coverage epochs, 3534 spans) that scan was
+    15.6s of CPU in a 40s sampled profile -- about 39 points of one core and
+    the largest single owner, though not the only one -- and it grew
+    quadratically as the retained window filled.
+    """
+
+    cursor = candidate.start
+    end = candidate.end
+    if cursor >= end:
+        return
+    index = bisect.bisect_right(explicit_starts, cursor)
+    # The span starting at or before the cursor may still cover it.
+    if index and explicit_gaps[index - 1].end > cursor:
+        index -= 1
+    while index < len(explicit_gaps):
+        existing = explicit_gaps[index]
+        if existing.start >= end:
+            break
+        if existing.start > cursor:
+            computed_gaps.append(NoData(
+                candidate.family, candidate.source_id, candidate.epoch_id,
+                cursor, existing.start, candidate.native_cadence_seconds, candidate.reason,
+            ))
+        if existing.end > cursor:
+            cursor = existing.end
+            if cursor >= end:
+                return
+        index += 1
+    computed_gaps.append(NoData(
+        candidate.family, candidate.source_id, candidate.epoch_id,
+        cursor, end, candidate.native_cadence_seconds, candidate.reason,
+    ))
 
 
 def _append_gap(gaps: list[NoData], gap: NoData) -> None:
