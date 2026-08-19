@@ -563,6 +563,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
         length_text = self.headers.get("Content-Length", "")
         if not length_text and allow_missing:
+            self.request_body_consumed = True
             return b"", None, HTTPStatus.OK
         try:
             length = int(length_text)
@@ -589,7 +590,11 @@ class FilesystemHttpAdapter(_HandlerAdapter):
                 message_params={"max": max_length},
                 status=too_large_status,
             ), too_large_status
-        return self.rfile.read(length), None, HTTPStatus.OK
+        body = self.rfile.read(length)
+        # This is the only place a declared request body leaves the socket, so it is the only place
+        # that may report the connection re-framed for the next request.
+        self.request_body_consumed = True
+        return body, None, HTTPStatus.OK
 
     def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
         body, error, status = Handler.read_request_body(
@@ -1608,6 +1613,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self._http_request_thread_native_id = None
         self._http_request_body_bytes = None
         self._http_request_body_identity_v1 = None
+        self.request_body_consumed = False
         self._route_response = None
         self._route_response_written = False
         self._api_request_id = ""
@@ -1740,8 +1746,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def send_response(self, code: int | HTTPStatus, message: str | None = None) -> None:
-        """Mark the response committed for every JSON and non-JSON protocol family."""
+        """Mark the response committed for every JSON and non-JSON protocol family.
+
+        Every response owner reaches this line before it emits a single header, so this is the one
+        place that can decide connection reuse for all of them: 404 for a deleted route, the 500
+        from ``dispatch_route_response``, the auth-setup redirect, the Content-Length rejections in
+        ``read_request_body``, and the POST handlers that answer from the query string alone.  A
+        response committed while the declared body is still on the socket must end the connection,
+        otherwise the leftover bytes become the next request line.
+        """
         self._route_response_written = True
+        self.close_after_unread_body()
         super().send_response(code, message)
 
     def http_endpoint_metric_key(self) -> str:
