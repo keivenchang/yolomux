@@ -2154,7 +2154,7 @@
     "tests/test_observability.py": 398,
     "tests/test_package_compatibility.py": 39,
     "tests/test_pricing_catalog.py": 576,
-    "tests/test_product_root_safety.py": 806,
+    "tests/test_product_root_safety.py": 816,
     "tests/test_ptrace.py": 37,
     "tests/test_published_json_cache.py": 121,
     "tests/test_quick_open_freshness_repro.py": 714,
