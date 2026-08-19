@@ -1015,7 +1015,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     server_module.configure_session_tmux_options("3")
 
     assert ["set-option", "-s", "set-clipboard", "on"] in calls
-    assert ["set-option", "-t", "3:", "window-size", "largest"] in calls
+    assert ["set-option", "-t", "=3:", "window-size", "largest"] in calls
     assert ["set-option", "-wg", "aggressive-resize", "on"] in calls
     assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session", "-f", "ignore-size"]
     assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]

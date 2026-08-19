@@ -3535,9 +3535,9 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert payload["session"] == "1"
     assert payload["terminal"] == "bash"
     assert commands[0][:8] == ["new-session", "-d", "-s", "1", "-e", "TERM=xterm-256color", "-c", str(tmp_path)]
-    assert ["set-option", "-t", "1:", "status", "off"] in commands
-    assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
-    assert ["set-window-option", "-t", "1:", "pane-active-border-style", "fg=#7c3aed"] in commands
+    assert ["set-option", "-t", "=1:", "status", "off"] in commands
+    assert ["set-option", "-t", "=1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
+    assert ["set-window-option", "-t", "=1:", "pane-active-border-style", "fg=#7c3aed"] in commands
     assert commands[-1] == ["refresh-client", "-S"]
     assert webapp.tmux_theme_color == "purple"
 
@@ -3630,10 +3630,10 @@ def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
     assert payload == {"session": "1", "status": "bottom"}
     commands = [args for args, _timeout in tmux_calls]
     assert commands == [
-        ["show-options", "-A", "-t", "1:", "-v", "status"],
-        ["show-options", "-A", "-t", "1:", "-v", "status-position"],
-        ["set-option", "-t", "1:", "status", "on"],
-        ["set-option", "-t", "1:", "status-position", "bottom"],
+        ["show-options", "-A", "-t", "=1:", "-v", "status"],
+        ["show-options", "-A", "-t", "=1:", "-v", "status-position"],
+        ["set-option", "-t", "=1:", "status", "on"],
+        ["set-option", "-t", "=1:", "status-position", "bottom"],
     ]
 
 def test_cycle_tmux_status_mode_turns_bottom_off(monkeypatch):
@@ -3653,7 +3653,7 @@ def test_cycle_tmux_status_mode_turns_bottom_off(monkeypatch):
 
     assert status == HTTPStatus.OK
     assert payload == {"session": "1", "status": "none"}
-    assert [args for args, _timeout in tmux_calls][-1] == ["set-option", "-t", "1:", "status", "off"]
+    assert [args for args, _timeout in tmux_calls][-1] == ["set-option", "-t", "=1:", "status", "off"]
 
 
 def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
@@ -7252,7 +7252,7 @@ def test_active_window_for_can_refresh_live_tmux_window_off_input_path(monkeypat
     webapp = app_module.TmuxWebtermApp(["7770"])
 
     def fake_tmux(args, timeout=5.0):
-        assert args == ["display-message", "-p", "-t", "7770:", "#{window_index}"]
+        assert args == ["display-message", "-p", "-t", "=7770:", "#{window_index}"]
         return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
 
     try:

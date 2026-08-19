@@ -89,7 +89,7 @@ def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch, make_a
     assert payload["renamed"] is True
     assert payload["new_session"] == "agent"
     assert payload["sessions"] == ["agent", "ant"]
-    assert calls == [["rename-session", "-t", "1:", "agent"]]
+    assert calls == [["rename-session", "-t", "=1:", "agent"]]
 
 
 def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch, make_app):
@@ -125,7 +125,7 @@ def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch, mak
     assert status == HTTPStatus.OK
     assert payload["renamed"] is True
     assert payload["new_session"] == "dynamo-utils_dev"
-    assert calls == [["rename-session", "-t", "1:", "dynamo-utils_dev"]]
+    assert calls == [["rename-session", "-t", "=1:", "dynamo-utils_dev"]]
 
 
 def test_rename_session_detects_collision_after_sanitizing(monkeypatch, make_app):
@@ -165,7 +165,7 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     assert status == HTTPStatus.OK
     assert payload["killed"] is True
     assert payload["sessions"] == ["ant"]
-    assert calls == [["kill-session", "-t", "1:"], ["join-retirement", retirement_identity]]
+    assert calls == [["kill-session", "-t", "=1:"], ["join-retirement", retirement_identity]]
 
 
 def test_kill_session_refuses_success_when_an_exact_process_birth_survives(monkeypatch, make_app):
@@ -216,7 +216,7 @@ def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeyp
     assert payload == {"session": "1", "window": "3", "ok": True}
     assert invalid_status == HTTPStatus.BAD_REQUEST
     assert "window" in invalid_payload["error"]
-    assert calls == [["select-window", "-t", "1:3"]]
+    assert calls == [["select-window", "-t", "=1:3"]]
     assert not any(args and args[0] == "switch-client" for args in calls)
 
 
@@ -314,7 +314,7 @@ def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch, make_app)
             return FakeTmuxResult(stdout="1\n")
         if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{buffer_created}:#{buffer_size}:#{buffer_sample}":
             return FakeTmuxResult(stdout="100:3:old\n")
-        if args[:3] == ["send-keys", "-t", "1:"]:
+        if args[:3] == ["send-keys", "-t", "=1:"]:
             return FakeTmuxResult()
         if args == ["save-buffer", "-"]:
             raise AssertionError("must not read a stale buffer when copy did not create one")
@@ -328,4 +328,4 @@ def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch, make_app)
     assert payload["copied"] is False
     assert payload["text"] == ""
     assert payload["error"] == "no tmux selection copied"
-    assert calls[-1] == ["send-keys", "-t", "1:", "-X", "cancel"]
+    assert calls[-1] == ["send-keys", "-t", "=1:", "-X", "cancel"]
