@@ -1510,6 +1510,25 @@ def invalidated_buckets_for_instants(instants: Iterable[float]) -> tuple[tuple[i
     return tuple(sorted(pairs))
 
 
+def pending_invalidation_cells(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[int, int, int], ...]:
+    """Every unapplied invalidation as (resolution, bucket_start, source_generation).
+
+    Bounded by the ring's fixed slot count, because actionability already guarantees each row names
+    a populated slot. This is the DURABLE half of the dirty set: the service's in-memory
+    `_pending_ring_dirty` does not survive a restart, so after one this ledger is the only record
+    that those buckets still owe a rebuild.
+    """
+    return tuple(
+        (int(row[0]), int(row[1]), int(row[2]))
+        for row in connection.execute(
+            "SELECT resolution_seconds, bucket_start, source_generation FROM ring_invalidations "
+            "WHERE applied_at IS NULL ORDER BY resolution_seconds, bucket_start"
+        )
+    )
+
+
 def _slots_intersecting_intervals(
     connection: sqlite3.Connection, intervals: Iterable[tuple[float, float | None]],
 ) -> set[tuple[int, int]]:
@@ -2526,6 +2545,19 @@ class Store:
             store_generation,
             tuple(sorted(stale_starts)),
         )
+
+    def pending_invalidation_cells(self) -> tuple[tuple[int, int, int], ...]:
+        """Every unapplied invalidation as (resolution, bucket_start, source_generation).
+
+        A PUBLIC method rather than a module function taking `_connection()`, because the service
+        is the caller and reaching through a private accessor both breaks the owner boundary and
+        breaks every store double that legitimately does not have one.
+
+        Bounded by the ring's fixed slot count: actionability already guarantees each row names a
+        populated slot. This is the DURABLE half of the dirty set, and after a restart it is the
+        only record that those buckets still owe a rebuild.
+        """
+        return pending_invalidation_cells(self._connection())
 
     def last_vacuumed_at(self) -> float:
         """Return the persisted completion time for the last successful VACUUM."""

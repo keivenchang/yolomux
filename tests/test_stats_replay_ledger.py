@@ -1231,3 +1231,146 @@ def test_two_handles_overlapping_a_mutation_and_a_publication(tmp_path, resoluti
         assert (resolution_seconds, bucket_start) in _pending(reopened), (
             "pending state did not converge across reopen"
         )
+
+
+# --- the restart repair transition --------------------------------------------------------------
+# `_pending_ring_dirty` lives in memory and does not survive a restart. Recording an invalidation
+# hides its bucket, but only a republication answers one, and republication is driven by that
+# in-memory set -- so after a restart the durable ledger owed buckets that nothing could hear, and
+# the right edge stayed hidden forever. A served page rendered a permanent gap with zero cost.
+
+
+def _cells_owed(store_obj: storage.Store) -> set[tuple[int, int]]:
+    return {
+        (r, b) for r, b, _g in storage.pending_invalidation_cells(store_obj._connection())
+    }
+
+
+def test_a_restart_repairs_the_buckets_the_durable_ledger_still_owes(tmp_path):
+    """The exact missing transition, at backend level and deterministic."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert (resolution_seconds, bucket_start) in _cells_owed(opened)
+
+    # RESTART: a brand-new service object, so the in-memory dirty set is empty by construction.
+    restarted = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as reopened:
+        restarted.writer = reopened
+        assert not restarted._pending_ring_dirty, "the fixture did not actually simulate a restart"
+        restarted._build_once(reopened, True, frozenset())
+        # The flush deadline is deliberately far away: repair must not depend on the cadence.
+        monotonic_now[0] += 10_000.0
+        restarted._next_ring_flush_at = monotonic_now[0] + 10_000.0
+
+        published = restarted.repair_pending_ring_slots(reopened)
+
+        assert published is not None, "the restart owed buckets and repaired none"
+        assert (resolution_seconds, bucket_start) not in _cells_owed(reopened), (
+            "the owed bucket was not answered by the repair"
+        )
+        window = reopened.read_ring_window(
+            range_seconds=RANGE_SECONDS, resolution_seconds=RESOLUTION, window_end=7_200,
+        )
+        assert bucket_start not in window.pending_invalidations
+
+
+def test_the_repair_is_bounded_to_the_slots_the_ledger_names(tmp_path):
+    """Exact-slot repair, not a full-ring rebuild.
+
+    A repair that rewrote every slot would also make the test above pass, and would reintroduce the
+    cost this ledger exists to avoid.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        service._flush_ring_if_due()
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        bucket_start = int(slot[1])
+        opened.append_batch(observations=[_observation("one", float(bucket_start) + 0.5)])
+        owed = len(_cells_owed(opened))
+
+    restarted = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as reopened:
+        restarted.writer = reopened
+        restarted._build_once(reopened, True, frozenset())
+        # Drain the FULL-build dirty set first, so what follows measures the repair's OWN work
+        # rather than the cold build's. Without this the assertion reads 1,248 buckets for 4 owed
+        # cells and blames the repair for a full-ring publication it did not cause.
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        restarted._flush_ring_if_due(reopened)
+        still_owed = len(_cells_owed(reopened))
+        monotonic_now[0] += 10_000.0
+        restarted._next_ring_flush_at = monotonic_now[0] + 10_000.0
+        published = restarted.repair_pending_ring_slots(reopened)
+
+    if still_owed == 0:
+        # The cold flush already answered everything; the repair correctly has nothing to do.
+        assert published is None
+    else:
+        assert published is not None
+        assert published.buckets_updated <= still_owed, (
+            f"repair rewrote {published.buckets_updated} buckets for {still_owed} owed cells"
+        )
+
+
+def test_a_restart_with_nothing_owed_repairs_nothing(tmp_path):
+    """Negative control: repair must be driven by the ledger, not run unconditionally."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        service._flush_ring_if_due()
+        assert not _cells_owed(opened)
+
+    restarted = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as reopened:
+        restarted.writer = reopened
+        restarted._build_once(reopened, True, frozenset())
+        assert restarted.repair_pending_ring_slots(reopened) is None
+
+
+def test_the_repair_cannot_let_a_stale_generation_retire_a_newer_contradiction(tmp_path):
+    """Safety: repair reuses the generation-gated retirement, it does not bypass it."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as opened:
+        opened.initialize_ring_storage()
+        opened.publish_ring_buckets(buckets=[_bucket(7_140)], source_generation=0, published_at=1.0)
+        opened.append_batch(observations=[_observation("a", 7_140.5)])
+        opened.append_batch(observations=[_observation("b", 7_141.5)])
+        newer = max(_pending_generations(opened))
+
+        opened.publish_ring_buckets(
+            buckets=[_bucket(7_140, value=3)], source_generation=newer - 1, published_at=9_999.0,
+        )
+
+        assert (RESOLUTION, 7_140) in _pending(opened), (
+            "a stale-generation publication retired a newer contradiction"
+        )

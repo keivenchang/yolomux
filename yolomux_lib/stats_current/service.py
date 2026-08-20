@@ -1760,6 +1760,54 @@ class StatsCurrentService:
                 retained.add(cell)
         return frozenset(retained)
 
+    def repair_pending_ring_slots(
+        self,
+        publisher: storage.Store | None = None,
+    ) -> storage.RingPublication | None:
+        """Rebuild exactly the buckets the durable ledger still owes, without waiting for cadence.
+
+        THE MISSING TRANSITION after `c611891d2`. Recording an invalidation made
+        `read_ring_window` hide that bucket, but the thing that answers an invalidation is a
+        republication, and republication is driven by `_pending_ring_dirty` -- which lives in
+        memory and does not survive a restart. So after a restart the ledger said "these buckets
+        owe a rebuild" and nothing was left that could hear it: the right edge stayed hidden
+        forever and a served page rendered a permanent gap with zero cost.
+
+        This seeds the SAME in-memory dirty set from the durable ledger and hands it to the SAME
+        publication owner. No second builder, cache, ledger, or publication path.
+
+        Bounded by exact slots, not a full-ring rebuild: only the cells the ledger names are
+        staged, and `_ring_writes` writes only those. The flush deadline is brought forward rather
+        than removed, because a page that has just restarted cannot wait a whole flush interval to
+        stop showing a gap -- and waiting is what the periodic cadence is for, not what correctness
+        should depend on.
+        """
+        ring_writer = self.writer if publisher is None else publisher
+        if ring_writer is None or self._cache is None:
+            return None
+        # Through the public store method, and tolerant of a store that does not offer one: a
+        # reader or a test double has no ledger to repair from, and that is not an error.
+        reader = getattr(ring_writer, "pending_invalidation_cells", None)
+        if reader is None:
+            return None
+        pending = reader()
+        if not pending:
+            return None
+        cells = frozenset(
+            materializer.DirtyCell(resolution_seconds, bucket_start)
+            for resolution_seconds, bucket_start, _generation in pending
+        )
+        with self.work_lock:
+            self._pending_ring_dirty.update(cells)
+            self._ring_source_generation = max(
+                self._ring_source_generation,
+                max(generation for _r, _b, generation in pending),
+            )
+            # Due NOW. The cells are exact and already bounded by the ring's slot count, so this is
+            # a bounded repair rather than a bypass of the coalescing cadence.
+            self._next_ring_flush_at = self.monotonic()
+        return self._flush_ring_if_due(publisher)
+
     def _flush_ring_if_due(
         self,
         publisher: storage.Store | None = None,
@@ -1865,6 +1913,11 @@ class StatsCurrentService:
                 work = self._take_work(scheduled=True)
                 if work is not None:
                     self._build_once(reader, *work)
+                    # Immediately after the build that produced a generation to publish FROM, and
+                    # before the ordinary cadence. A restart leaves the in-memory dirty set empty
+                    # while the durable ledger still owes buckets, so without this the right edge
+                    # stays hidden until something else happens to dirty it.
+                    self.repair_pending_ring_slots(publisher)
                 self._flush_ring_if_due(publisher)
         finally:
             try:
