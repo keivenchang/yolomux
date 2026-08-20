@@ -72,15 +72,14 @@ def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_
     # The directory is now the host partition rather than the state root, because a
     # shared NFS home gives two machines the same absolute path and WAL cannot span
     # hosts; the legacy database is left in place beside it, never moved.
-    assert client.database_path.name == storage.DATABASE_FILENAME
-    assert client.database_path.name == storage.DATABASE_FILENAME
+    assert client.database_path.name == storage.DATABASE_FILENAME == "stats-v8.sqlite3"
     assert client.database_path == storage.default_database_path(tmp_path)
     assert client.database_path.parent != tmp_path
     # The socket name identifies both the protocol/schema and the database it
     # owns; its directory stays host-local because a Unix socket cannot live on
     # an NFS state root.
     assert client_module.default_socket_path().name.startswith(
-        storage.SOCKET_FILENAME.removesuffix(".sock") + "."
+        "statsd.p24s8."
     )
     assert client_module.default_socket_path().name.endswith(".sock")
     assert client_module.default_socket_path() == storage.default_socket_path()
@@ -89,6 +88,7 @@ def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_
     )
     assert client._transport.registry.spec.socket_name == client._transport.socket_path.name
     assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
+    assert storage.SCHEMA_VERSION == 8
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
     assert client._transport.registry.spec.extra_args == ("--database", str(client.database_path))
     # The registry must track wherever the socket actually lives, rather than a

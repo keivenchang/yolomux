@@ -1776,12 +1776,8 @@ def test_the_first_cold_request_after_readiness_serves_the_repaired_bucket(tmp_p
         assert (resolution_seconds, bucket_start) not in _cells_owed(reopened)
 
 
-# --- the honest-gap storage owner: exact identity, exact rows -----------------------------------
-# `retire_unrebuildable_ring_cells` is the only path that may drop a payload WITHOUT a
-# republication answering it, so its authority is bounded by exact slot identity. These rows are
-# what stops it becoming a general-purpose ring eraser.
-
-
+# The honest-gap owner drops a payload without a republication, so every row below pins its exact
+# slot and pending-ledger authority against current, lapped, retired, and replaced identities.
 def test_the_honest_gap_owner_clears_and_retires_only_the_named_cell(tmp_path):
     kept_start = RESOLUTION * 4_000
     gapped_start = kept_start + RESOLUTION
@@ -1796,10 +1792,9 @@ def test_the_honest_gap_owner_clears_and_retires_only_the_named_cell(tmp_path):
             _observation("gapped", float(gapped_start) + 0.5),
         ])
         assert {(RESOLUTION, kept_start), (RESOLUTION, gapped_start)} <= _pending(store_obj)
+        pending = [row for row in store_obj.pending_invalidation_cells() if row[1] == gapped_start]
         before = _slot_state(store_obj)
-
-        retired = store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, gapped_start)])
-
+        retired = store_obj.retire_unrebuildable_ring_cells(pending)
         assert retired == ((RESOLUTION, gapped_start),)
         after = _slot_state(store_obj)
         gapped_address = (RESOLUTION, storage.ring_slot_index(RESOLUTION, gapped_start))
@@ -1807,35 +1802,40 @@ def test_the_honest_gap_owner_clears_and_retires_only_the_named_cell(tmp_path):
         assert after[gapped_address] == (None, None, 0, 0, 0, 0.0, 0)
         assert after[kept_address] == before[kept_address]
         assert (RESOLUTION, gapped_start) not in _pending(store_obj)
-        assert (RESOLUTION, kept_start) in _pending(store_obj), (
-            "retiring one cell dropped a row that a republication still owes"
-        )
-        # Idempotent: the second call has no slot to clear, so it claims nothing.
-        assert store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, gapped_start)]) == ()
+        assert (RESOLUTION, kept_start) in _pending(store_obj)
+        assert store_obj.retire_unrebuildable_ring_cells(pending) == ()
         assert _slot_state(store_obj) == after
 
 
-def test_the_honest_gap_owner_refuses_a_slot_that_wrapped_to_another_bucket(tmp_path):
-    """A lapped slot holds a DIFFERENT bucket. Clearing it would erase a live, uncontradicted one."""
+@pytest.mark.parametrize("transition", ("lapped", "republished", "replaced"))
+def test_stale_honest_gap_work_cannot_erase_a_newer_identity(tmp_path, transition):
     slot_count = CAPACITIES[RESOLUTION]
     old_start = RESOLUTION * slot_count * 4
     lapped_start = old_start + RESOLUTION * slot_count
-    assert storage.ring_slot_index(RESOLUTION, old_start) == storage.ring_slot_index(RESOLUTION, lapped_start)
-    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store_obj:
-        store_obj.initialize_ring_storage()
-        store_obj.publish_ring_buckets(
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as stale_owner:
+        stale_owner.initialize_ring_storage()
+        stale_owner.publish_ring_buckets(
             buckets=[_bucket(old_start)], source_generation=0, published_at=1.0,
         )
-        store_obj.publish_ring_buckets(
-            buckets=[_bucket(lapped_start, value=2)], source_generation=1, published_at=2.0,
-        )
-        before = _slot_state(store_obj)
-
-        assert store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, old_start)]) == ()
-
-        assert _slot_state(store_obj) == before, (
-            "the honest-gap owner erased the bucket that lapped the named one"
-        )
+        stale_owner.append_batch(observations=[
+            _observation("contradiction", float(old_start) + 0.5),
+        ])
+        stale_work = stale_owner.pending_invalidation_cells()
+        with storage.Store.open(database) as concurrent_owner:
+            if transition == "replaced":
+                concurrent_owner.append_batch(observations=[
+                    _observation("newer", float(old_start) + 1.5),
+                ])
+            else:
+                current_start = lapped_start if transition == "lapped" else old_start
+                concurrent_owner.publish_ring_buckets(
+                    buckets=[_bucket(current_start, value=2)],
+                    source_generation=1, published_at=2.0,
+                )
+            current = (_slot_state(concurrent_owner), concurrent_owner.pending_invalidation_cells())
+        assert stale_owner.retire_unrebuildable_ring_cells(stale_work) == ()
+        assert (_slot_state(stale_owner), stale_owner.pending_invalidation_cells()) == current
 
 
 def test_the_honest_gap_owner_refuses_a_reader(tmp_path):
@@ -1847,4 +1847,4 @@ def test_the_honest_gap_owner_refuses_a_reader(tmp_path):
         )
     with storage.Store.open_reader(database) as reader:
         with pytest.raises(storage.StatsCurrentError):
-            reader.retire_unrebuildable_ring_cells([(RESOLUTION, RESOLUTION * 4_000)])
+            reader.retire_unrebuildable_ring_cells([(RESOLUTION, RESOLUTION * 4_000, 0)])

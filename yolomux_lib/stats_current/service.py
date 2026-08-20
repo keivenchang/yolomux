@@ -1796,8 +1796,8 @@ class StatsCurrentService:
     def _retire_unrebuildable_owed_cells(
         self,
         ring_writer: storage.Store,
-        cells: frozenset[materializer.DirtyCell],
-    ) -> frozenset[materializer.DirtyCell]:
+        pending: tuple[tuple[int, int, int], ...],
+    ) -> tuple[tuple[int, int, int], ...]:
         """Settle owed cells the current generation cannot rebuild, and return the rest.
 
         THE FIRST INCORRECT TRANSITION this closes: after a restart whose wall clock has advanced,
@@ -1817,7 +1817,7 @@ class StatsCurrentService:
         with self.cache_lock:
             candidate = None if self._cache is None else self._cache.generation
         if candidate is None:
-            return cells
+            return pending
         rebuildable = {
             (layer.resolution, bucket.start)
             for layer in candidate.layers
@@ -1826,17 +1826,16 @@ class StatsCurrentService:
         materialized_resolutions = {
             layer.resolution for layer in candidate.layers if layer.buckets
         }
-        unrebuildable = frozenset(
-            cell for cell in cells
-            if cell.resolution in materialized_resolutions
-            and (cell.resolution, cell.start) not in rebuildable
+        unrebuildable = tuple(
+            row for row in pending
+            if row[0] in materialized_resolutions
+            and (row[0], row[1]) not in rebuildable
         )
         if not unrebuildable:
-            return cells
-        ring_writer.retire_unrebuildable_ring_cells(
-            (cell.resolution, cell.start) for cell in unrebuildable
-        )
-        return cells - unrebuildable
+            return pending
+        ring_writer.retire_unrebuildable_ring_cells(unrebuildable)
+        unrebuildable_identities = frozenset(unrebuildable)
+        return tuple(row for row in pending if row not in unrebuildable_identities)
 
     def repair_pending_ring_slots(
         self,
@@ -1866,15 +1865,17 @@ class StatsCurrentService:
         pending = ring_writer.pending_invalidation_cells()
         if not pending:
             return None
+        # An owed cell that has aged out of the materializer's candidate window can never be
+        # rebuilt: staging it produces no write, so no publication answers it and the row stays
+        # pending forever while the read path hides the slot. Settle those as honest gaps FIRST,
+        # preserving the observed ledger generation through the storage transaction. A second
+        # publisher can settle or replace the row after this snapshot, and stale startup work must
+        # then become a no-op instead of clearing or republishing over the newly published slot.
+        pending = self._retire_unrebuildable_owed_cells(ring_writer, pending)
         cells = frozenset(
             materializer.DirtyCell(resolution_seconds, bucket_start)
             for resolution_seconds, bucket_start, _generation in pending
         )
-        # An owed cell that has aged out of the materializer's candidate window can never be
-        # rebuilt: staging it produces no write, so no publication answers it and the row stays
-        # pending forever while the read path hides the slot. Settle those as honest gaps FIRST,
-        # so only genuinely rebuildable cells are staged for republication below.
-        cells = self._retire_unrebuildable_owed_cells(ring_writer, cells)
         if not cells:
             return None
         # TRACED FIRST INCORRECT TRANSITION: at restart `_stage_ring_candidate` has already staged
@@ -1985,12 +1986,13 @@ class StatsCurrentService:
             # sqlite3 connections are thread-owned. This connection belongs to
             # the elected statsd worker; work_lock still serializes it with the
             # listener thread's append/prune connection.
-            publisher = self.store_opener(
-                self.database_path,
-                writer_protocol=storage.MIN_WRITER_PROTOCOL,
-                writer_build=storage.MIN_WRITER_BUILD,
-                include_browser_diagnostics=True,
-            )
+            with self.work_lock:
+                publisher = self.store_opener(
+                    self.database_path,
+                    writer_protocol=storage.MIN_WRITER_PROTOCOL,
+                    writer_build=storage.MIN_WRITER_BUILD,
+                    include_browser_diagnostics=True,
+                )
         except (OSError, sqlite3.Error, storage.StatsCurrentError) as error:
             self._record_build_failure(error)
             if reader is not None:

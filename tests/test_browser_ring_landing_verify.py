@@ -983,16 +983,16 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         after = _durable_ring_state(prepared.database_path)
         aged_out = {
             "left_edge": left_edge,
-            "lapping_bucket": left_edge + second_capacity,
-            "restart_wall": time.time(),
             "before_slot": before["slots"][aging_address],
             "after_slot": after["slots"][aging_address],
             "still_pending": (1, left_edge) in after["pending"],
             "ring_writer": restarted_status.get("ring_writer"),
         }
         assert (1, left_edge) not in after["pending"], aged_out
-        assert after["slots"][aging_address]["bucket_start"] is None, (
-            "the out-of-window contradicted payload survived the repair and can still be served: "
+        # The modular slot may already hold its next-lap bucket. The logical contract is only that
+        # the contradicted old identity is gone; clearing a legitimate new occupant would be loss.
+        assert after["slots"][aging_address]["bucket_start"] != left_edge, (
+            "the out-of-window contradicted payload remained logically readable after repair: "
             + json.dumps(aged_out, sort_keys=True, default=str)
         )
         assert (60, rebuildable_start) not in after["pending"], after["pending"]

@@ -2450,9 +2450,9 @@ class Store:
 
     def retire_unrebuildable_ring_cells(
         self,
-        cells: Iterable[tuple[int, int]],
+        cells: Iterable[tuple[int, int, int]],
     ) -> tuple[tuple[int, int], ...]:
-        """Clear an exact contradicted slot and retire its exact pending row, together.
+        """Clear an exact contradicted slot and retire its observed pending row, together.
 
         The ONE owner of the honest-gap transition. A pending invalidation is answered by a
         republication (`publish_ring_buckets`), and that is the only path that may retire a row
@@ -2468,10 +2468,11 @@ class Store:
         `_retire_unactionable_invalidations`, because no publication ever answered this row --
         stamping `applied_at` would claim a republication that did not happen.
 
-        Exactness is the whole safety argument. A slot is cleared only while it still holds that
-        EXACT `bucket_start`; a slot the ring has lapped onto another bucket is a different
-        identity and is left untouched, and its row is left to the ordinary unactionable sweep.
-        Callers must only pass cells they have measured to be unrebuildable.
+        Exactness is the whole safety argument. The caller passes the pending row's observed source
+        generation, and the transaction proceeds only while that exact row is still pending and
+        the slot still holds the older bucket it contradicts. A row another publisher retired or
+        replaced, or a slot that publisher rebuilt or lapped, leaves stale repair work no authority
+        over the new state. Callers must only pass rows they measured to be unrebuildable.
         """
         if self.read_only:
             raise StatsCurrentError("stats store reader cannot retire ring cells")
@@ -2479,31 +2480,42 @@ class Store:
             (
                 _validate_nonnegative_integer(resolution_seconds, "resolution_seconds"),
                 _validate_nonnegative_integer(bucket_start, "bucket_start"),
+                _validate_nonnegative_integer(source_generation, "source_generation"),
             )
-            for resolution_seconds, bucket_start in cells
+            for resolution_seconds, bucket_start, source_generation in cells
         })
         if not addressed:
             return ()
         connection = self._require_ring_storage()
         retired: list[tuple[int, int]] = []
         with _transaction(connection):
-            for resolution_seconds, bucket_start in addressed:
+            for resolution_seconds, bucket_start, source_generation in addressed:
                 cleared = connection.execute(
                     "UPDATE aggregate_ring_slots SET bucket_start = NULL, bucket_json = NULL, "
                     "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0, "
                     "payload_version = 0 "
-                    "WHERE resolution_seconds = ? AND bucket_start = ? AND bucket_json IS NOT NULL",
-                    (resolution_seconds, bucket_start),
+                    "WHERE resolution_seconds = ? AND bucket_start = ? AND bucket_json IS NOT NULL "
+                    "AND source_generation < ? AND EXISTS ("
+                    "SELECT 1 FROM ring_invalidations WHERE resolution_seconds = ? "
+                    "AND bucket_start = ? AND source_generation = ? AND applied_at IS NULL)",
+                    (
+                        resolution_seconds, bucket_start, source_generation,
+                        resolution_seconds, bucket_start, source_generation,
+                    ),
                 ).rowcount
                 if not cleared:
-                    # Wrapped, never published, or already cleared: a different identity now owns
-                    # that slot, so this method has no authority over either half of the pair.
+                    # Retired/replaced work, a rebuilt slot, or a lapped slot is a different
+                    # identity, so this stale observation has no authority over either half.
                     continue
-                connection.execute(
+                deleted = connection.execute(
                     "DELETE FROM ring_invalidations WHERE resolution_seconds = ? "
-                    "AND bucket_start = ? AND applied_at IS NULL",
-                    (resolution_seconds, bucket_start),
-                )
+                    "AND bucket_start = ? AND source_generation = ? AND applied_at IS NULL",
+                    (resolution_seconds, bucket_start, source_generation),
+                ).rowcount
+                if deleted != 1:
+                    raise SchemaMismatchError(
+                        "pending ring invalidation changed inside honest-gap transaction"
+                    )
                 retired.append((resolution_seconds, bucket_start))
         return tuple(retired)
 

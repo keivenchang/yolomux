@@ -303,20 +303,20 @@ def test_store_open_is_deferred_until_generic_runtime_owns_the_lock(tmp_path, mo
     assert service._next_vacuum_at == 3_610.0
 
 
-def test_worker_open_failure_stops_the_listener(tmp_path):
-    def fail_open(*_args, **_kwargs):
-        raise OSError("reader unavailable")
+def test_worker_publisher_open_failure_is_serialized_and_stops_the_listener(tmp_path):
+    """The worker's mutating Store.open shares the listener's write owner."""
 
+    def fail_open(*_args, **_kwargs):
+        assert service.work_lock.locked()
+        raise OSError("reader unavailable")
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
-        reader_opener=fail_open,
+        store_opener=fail_open,
+        reader_opener=lambda *_args, **_kwargs: FakeStore(),
     )
-
     service._worker_loop()
-
-    assert service.stop_event.is_set() is True
-    assert service._failed_builds == 1
+    assert service.stop_event.is_set() is True and service._failed_builds == 1
 
 
 def test_worker_reader_skips_diagnostics_but_pruning_publisher_retains_them(tmp_path):
