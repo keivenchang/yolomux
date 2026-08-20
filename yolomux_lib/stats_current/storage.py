@@ -1501,6 +1501,63 @@ def invalidated_buckets_for_instants(instants: Iterable[float]) -> tuple[tuple[i
     return tuple(sorted(pairs))
 
 
+def _populated_ring_slots(
+    connection: sqlite3.Connection, pairs: Iterable[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    """Of these (resolution, bucket_start) pairs, the ones a populated slot actually holds.
+
+    An invalidation is only meaningful when a PUBLISHED slot currently contradicts the facts. If no
+    slot holds that bucket -- never published, cold, or already overwritten by ring wraparound --
+    `read_ring_window` already reports it missing and routes it to the materializer, so a ledger row
+    would add nothing and could never be retired: retirement happens in `publish_ring_buckets`, and
+    nothing will republish a bucket the ring does not hold.
+
+    Matching on `bucket_start` and not on slot index alone is what makes wraparound correct: a
+    lapped slot holds a DIFFERENT bucket, so the old bucket is genuinely gone.
+    """
+    matched: set[tuple[int, int]] = set()
+    for resolution_seconds, bucket_start in pairs:
+        row = connection.execute(
+            "SELECT 1 FROM aggregate_ring_slots WHERE resolution_seconds = ? AND bucket_start = ? "
+            "AND bucket_json IS NOT NULL",
+            (resolution_seconds, bucket_start),
+        ).fetchone()
+        if row is not None:
+            matched.add((resolution_seconds, bucket_start))
+    return matched
+
+
+def _retire_unactionable_invalidations(connection: sqlite3.Connection) -> int:
+    """Delete pending rows whose slot can no longer be rebuilt, in the caller's transaction.
+
+    A pending row survives only while a concrete populated slot still holds its bucket. Once the
+    ring has lapped past it, or the slot was cleared, no publication will ever retire it and the
+    read path already reports that bucket missing -- so the row is pure accumulation, and this is
+    what stopped repeated prunes leaking rows per generation.
+
+    Deleting is safe precisely BECAUSE the slot is gone: there is no stale payload left to be
+    falsely clean about. A row whose slot is still populated is never touched here.
+    """
+    stale = [
+        (int(row[0]), int(row[1]))
+        for row in connection.execute(
+            "SELECT i.resolution_seconds, i.bucket_start FROM ring_invalidations AS i "
+            "LEFT JOIN aggregate_ring_slots AS s "
+            "ON s.resolution_seconds = i.resolution_seconds AND s.bucket_start = i.bucket_start "
+            "AND s.bucket_json IS NOT NULL "
+            "WHERE i.applied_at IS NULL AND s.bucket_start IS NULL"
+        )
+    ]
+    if not stale:
+        return 0
+    connection.executemany(
+        "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+        "AND applied_at IS NULL",
+        stale,
+    )
+    return len(stale)
+
+
 def _record_invalidations(
     connection: sqlite3.Connection,
     observed_range: tuple[float, float],
@@ -1525,6 +1582,12 @@ def _record_invalidations(
         if instants is not None
         else invalidated_buckets(observed_range, end_exclusive=end_exclusive)
     )
+    # ACTIONABILITY, not just cardinality. The horizon clamp bounded each call to at most 1,248
+    # rows but every one of them was still recorded whether or not a slot existed to rebuild, so a
+    # cold store accumulated 1,252 permanently pending rows PER PRUNE -- measured 3,756 after three
+    # cycles with zero populated slots and no publication at all.
+    actionable = _populated_ring_slots(connection, pairs)
+    pairs = tuple(pair for pair in pairs if pair in actionable)
     if not pairs:
         return 0
     connection.executemany(
@@ -1533,6 +1596,22 @@ def _record_invalidations(
         "VALUES(?, ?, ?, ?, ?, NULL)",
         [
             (resolution_seconds, bucket_start, int(source_generation), str(reason), float(now))
+            for resolution_seconds, bucket_start in pairs
+        ],
+    )
+    # AT MOST ONE PENDING ROW PER BUCKET. The primary key includes the generation, so a bucket
+    # contradicted again at a newer generation gained a second pending row -- and a store that is
+    # mutated repeatedly without republishing accumulated one per generation forever.
+    #
+    # Superseding is also the correct meaning, not merely the cheaper one: the bucket is
+    # contradicted as of the NEWEST generation, and retirement already clears every pending row for
+    # that bucket at or below the publishing generation, so the older rows carry no information the
+    # newer one lacks. Only PENDING rows are collapsed; retired rows are history and stay.
+    connection.executemany(
+        "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+        "AND applied_at IS NULL AND source_generation < ?",
+        [
+            (resolution_seconds, bucket_start, int(source_generation))
             for resolution_seconds, bucket_start in pairs
         ],
     )
@@ -2683,6 +2762,7 @@ class Store:
                         source_generation=generation,
                         now=float(retention_cutoff),
                     )
+                    _retire_unactionable_invalidations(connection)
                 if mutated:
                     # `created_at` is the observed instant that caused the staleness, not a wall
                     # clock read: this module deliberately takes every timestamp as data so a store
@@ -3120,6 +3200,10 @@ class Store:
                     source_generation=generation,
                     now=cutoff,
                 )
+                # AFTER recording, in the same transaction. Ordering matters: a real contradiction
+                # recorded above for a still-populated slot must be inserted before this sweep can
+                # consider anything, and this only ever removes rows whose slot no longer exists.
+                _retire_unactionable_invalidations(connection)
         # Recorded only after the transaction commits: a prune that failed must
         # stay due, or one bad night silently becomes a skipped day.
         self._record_pruned_at(now)

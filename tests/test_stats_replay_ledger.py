@@ -116,6 +116,22 @@ def _bucket(bucket_start: int, value: int = 1) -> storage.RingBucketWrite:
     )
 
 
+
+def _publish_for(store_obj: storage.Store, *instants: float, generation: int = 0) -> None:
+    """Publish a real slot for every bucket these instants touch, at the 60s resolution.
+
+    An invalidation is only recorded when a POPULATED slot contradicts the facts, because a bucket
+    the ring does not hold already reads as missing and no publication would ever retire a row for
+    it. So a test asserting that a mutation records work has to establish the published slot first;
+    without it the fixture was asserting behaviour the product deliberately no longer has.
+    """
+    store_obj.initialize_ring_storage()
+    buckets = sorted({int(max(0.0, i) // RESOLUTION) * RESOLUTION for i in instants})
+    store_obj.publish_ring_buckets(
+        buckets=[_bucket(b) for b in buckets], source_generation=generation, published_at=1.0,
+    )
+
+
 # --- P0-1: tombstone-only append -----------------------------------------------------------
 
 def test_a_tombstone_only_append_invalidates_the_deleted_atoms_bucket(store):
@@ -126,6 +142,7 @@ def test_a_tombstone_only_append_invalidates_the_deleted_atoms_bucket(store):
     append recorded NOTHING and the contradicted bucket kept serving its pre-deletion total.
     """
     observed_at = 7_000.0
+    _publish_for(store, observed_at)
     store.append_batch(usage_atoms=[_usage("codex:t1:e1", observed_at)])
     baseline = _pending_rows(store)
 
@@ -142,6 +159,7 @@ def test_a_tombstone_only_append_invalidates_the_deleted_atoms_bucket(store):
 def test_a_tombstone_never_invalidates_a_bucket_derived_from_a_non_timestamp_field(store):
     """Red-capable control: a thread id must never be interpretable as an observed instant."""
     observed_at = 7_000.0
+    _publish_for(store, observed_at)
     store.append_batch(usage_atoms=[_usage("codex:99:e1", observed_at, thread_id="99")])
     baseline = _pending_rows(store)
 
@@ -158,6 +176,7 @@ def test_a_tombstone_never_invalidates_a_bucket_derived_from_a_non_timestamp_fie
 def test_an_explicit_prune_invalidates_the_range_it_actually_deleted(store):
     """`Store.prune` advanced the generation and recorded no invalidation whatsoever."""
     old = 1_000.0
+    _publish_for(store, old)
     store.append_batch(observations=[_observation("e-old", old)])
     baseline = _pending_rows(store)
 
@@ -172,6 +191,7 @@ def test_an_explicit_prune_invalidates_the_range_it_actually_deleted(store):
 def test_append_time_retention_prune_invalidates_the_deleted_range_not_the_offered_rows(store):
     """The pruned range is old; the offered rows are new. Recording the offered range is wrong."""
     old = 1_000.0
+    _publish_for(store, old)
     store.append_batch(observations=[_observation("e-old", old)])
     baseline = _pending_rows(store)
     fresh = old + storage.RETENTION_SECONDS + 10 * RESOLUTION
@@ -190,6 +210,7 @@ def test_append_time_retention_prune_invalidates_the_deleted_range_not_the_offer
 # --- coverage and unavailable ---------------------------------------------------------------
 
 def test_a_coverage_or_unavailable_change_invalidates_its_span(store):
+    _publish_for(store, 6_000.0, 6_300.0, 6_600.0, 6_900.0)
     baseline = _pending(store)
 
     store.append_batch(
@@ -218,6 +239,9 @@ def test_a_publication_built_before_newer_facts_cannot_retire_their_invalidation
     """
     store.initialize_ring_storage()
     bucket_start = 7_140
+    # Populate the slot FIRST: with nothing published there is no contradiction to record, so the
+    # race this row exists to catch could not be set up at all.
+    store.publish_ring_buckets(buckets=[_bucket(bucket_start)], source_generation=0, published_at=1.0)
     store.append_batch(observations=[_observation("e1", float(bucket_start) + 1.0)])
     first_generation = max(_pending_generations(store))
     store.publish_ring_buckets(
@@ -462,6 +486,7 @@ def test_an_ordinary_short_range_is_unchanged_by_the_clamp():
 def test_an_explicit_prune_still_records_the_recent_buckets_it_deleted(store):
     """End-to-end control: the clamp must not stop a prune recording real work."""
     old = 1_787_000_000.0
+    _publish_for(store, old)
     store.append_batch(observations=[_observation("e-old", old)])
     baseline = _pending_rows(store)
 
@@ -687,6 +712,7 @@ def test_a_sparse_batch_through_append_records_the_old_bucket_not_just_the_futur
     """
     old_instant = 1_000.0
     future_instant = 1_900_000_000.0
+    _publish_for(store, old_instant, future_instant)
     baseline = _pending_rows(store)
 
     store.append_batch(observations=[
@@ -701,5 +727,261 @@ def test_a_sparse_batch_through_append_records_the_old_bucket_not_just_the_futur
         "the old contradicted bucket was dropped; the batch was collapsed to a clamped span"
     )
     assert (RESOLUTION, future_bucket) in recorded
-    # And not the span between them, which would be ~31 million 60s buckets.
-    assert len(recorded) == 2 * len(CAPACITIES), f"recorded {len(recorded)} rows for a two-fact batch"
+    # Exactly the two touched buckets at the one resolution whose slots were published. The other
+    # resolutions hold no slot for these buckets, so a row there could never be retired -- recording
+    # it is the accumulation this slice removes, not coverage this assertion should demand.
+    assert recorded == {(RESOLUTION, old_bucket), (RESOLUTION, future_bucket)}, (
+        f"recorded {sorted(recorded)} for a two-fact batch"
+    )
+
+
+# --- actionability: every durable row must name a slot that can still be rebuilt ---------------
+# The clamp bounded each prune to at most 1,248 rows but recorded them whether or not a slot
+# existed. Measured on a COLD store with zero populated slots and no publication: 1,252 permanently
+# pending rows per cycle, 3,756 after three, none retirable by any publication.
+
+
+def _ledger(store_obj: storage.Store) -> set[tuple[int, int, int, float | None]]:
+    return {
+        (int(r[0]), int(r[1]), int(r[2]), None if r[3] is None else float(r[3]))
+        for r in store_obj._connection().execute(
+            "SELECT resolution_seconds, bucket_start, source_generation, applied_at "
+            "FROM ring_invalidations"
+        )
+    }
+
+
+def _prune_cycle(store_obj: storage.Store, event: str, instant: float) -> None:
+    store_obj.append_batch(observations=[_observation(event, instant)])
+    store_obj.prune(now=instant + storage.RETENTION_SECONDS + RESOLUTION)
+
+
+def test_repeated_prune_on_a_cold_store_accumulates_nothing(store):
+    """The measured leak: 1,252 rows per cycle on a store with no populated slot at all."""
+    for cycle in range(5):
+        _prune_cycle(store, f"cold-{cycle}", 1_787_000_000.0 + cycle * 3_600)
+
+    assert _ledger(store) == set(), (
+        f"a cold store accumulated {len(_ledger(store))} unactionable rows"
+    )
+
+
+def test_repeated_prune_across_generations_does_not_leak_per_generation(store):
+    """Generation advance must not turn one bucket into a new permanent row each cycle."""
+    instant = 1_787_000_000.0
+    _publish_for(store, instant)
+    for cycle in range(5):
+        _prune_cycle(store, f"gen-{cycle}", instant + cycle)
+
+    pending = {(r, b) for r, b, _g, applied in _ledger(store) if applied is None}
+    assert len(pending) <= 1, f"per-generation leak: {sorted(pending)}"
+
+
+def test_a_populated_slot_still_records_its_contradiction(store):
+    """Negative control: actionability must not become 'record nothing'."""
+    instant = 7_000.0
+    _publish_for(store, instant)
+    baseline = _pending_rows(store)
+
+    store.append_batch(observations=[_observation("real", instant)])
+
+    recorded = {(r, b) for r, b, _g in (_pending_rows(store) - baseline)}
+    assert (RESOLUTION, int(instant // RESOLUTION) * RESOLUTION) in recorded
+
+
+def test_a_wrapped_around_slot_stops_being_actionable_and_is_removed(store):
+    """Ring wraparound: the lapped slot holds a DIFFERENT bucket, so the old one is truly gone.
+
+    Matching on `bucket_start` rather than slot index is what makes this correct; a slot-index match
+    would have called the lapped slot a live contradiction forever.
+    """
+    slot_count = CAPACITIES[RESOLUTION]
+    original = RESOLUTION * slot_count * 4
+    _publish_for(store, float(original))
+    store.append_batch(observations=[_observation("contradiction", float(original) + 1.0)])
+    assert (RESOLUTION, original) in _pending(store)
+
+    # One full lap later the same slot index holds a different bucket.
+    lapped = original + slot_count * RESOLUTION
+    store.publish_ring_buckets(
+        buckets=[_bucket(lapped)], source_generation=99, published_at=200.0,
+    )
+    store.prune(now=float(lapped) + storage.RETENTION_SECONDS + RESOLUTION)
+
+    assert (RESOLUTION, original) not in _pending(store), (
+        "a pending row survived the wraparound that destroyed its slot"
+    )
+
+
+def test_an_absent_publication_records_nothing_and_an_empty_ring_stays_empty(store):
+    """Cold slot and absent publication, asserted as exact emptiness rather than a ceiling."""
+    store.initialize_ring_storage()
+    store.append_batch(observations=[_observation("no-slot", 7_000.0)])
+
+    assert _ledger(store) == set()
+
+
+def test_an_already_pending_row_is_not_duplicated_by_a_second_mutation(store):
+    """Repeated prune within one generation must not re-add the same row."""
+    instant = 7_000.0
+    _publish_for(store, instant)
+    store.append_batch(observations=[_observation("first", instant)])
+    after_first = _ledger(store)
+
+    store.prune(now=instant + storage.RETENTION_SECONDS + RESOLUTION)
+    store.prune(now=instant + storage.RETENTION_SECONDS + 2 * RESOLUTION)
+
+    pending_now = {row for row in _ledger(store) if row[3] is None}
+    buckets = [(r, b) for r, b, _g, _a in pending_now]
+    assert len(buckets) == len(set(buckets)), (
+        f"a bucket carries more than one pending row: {sorted(pending_now)}"
+    )
+    assert len(pending_now) <= len(after_first)
+
+
+def test_an_already_retired_row_is_never_resurrected_or_deleted(store):
+    """A retired row is history; the sweep only removes PENDING rows."""
+    instant = 7_000.0
+    _publish_for(store, instant)
+    store.append_batch(observations=[_observation("e", instant)])
+    generation = max(_pending_generations(store))
+    store.publish_ring_buckets(
+        buckets=[_bucket(int(instant // RESOLUTION) * RESOLUTION)],
+        source_generation=generation, published_at=500.0,
+    )
+    retired = {row for row in _ledger(store) if row[3] is not None}
+    assert retired, "fixture retired nothing"
+
+    store.prune(now=instant + storage.RETENTION_SECONDS + RESOLUTION)
+
+    assert retired <= _ledger(store), "the sweep deleted an already-retired row"
+
+
+# --- end-to-end close/reopen/rebuild/republish -------------------------------------------------
+
+def test_a_contradiction_survives_close_and_reopen_then_retires_only_on_republication(tmp_path):
+    """The durable path, across real close/reopen boundaries rather than one live handle.
+
+    Reopen at every boundary must yield either the still-actionable pending row or the rebuilt
+    publication, never a falsely clean stale ring.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    bucket_start = 7_140
+
+    with storage.Store.open(database) as opened:
+        _publish_for(opened, float(bucket_start))
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 1.0)])
+        generation = max(_pending_generations(opened))
+        assert (RESOLUTION, bucket_start) in _pending(opened)
+
+    with storage.Store.open(database) as reopened:
+        # Survived the close: still pending, and still hidden from a served window.
+        assert (RESOLUTION, bucket_start) in _pending(reopened)
+        window = reopened.read_ring_window(
+            range_seconds=RANGE_SECONDS, resolution_seconds=RESOLUTION, window_end=7_200,
+        )
+        assert bucket_start in window.missing_bucket_starts
+        assert bucket_start in window.pending_invalidations
+        # Rebuild and republish at the contradicting generation.
+        reopened.publish_ring_buckets(
+            buckets=[_bucket(bucket_start, value=7)], source_generation=generation, published_at=900.0,
+        )
+        assert (RESOLUTION, bucket_start) not in _pending(reopened)
+
+    with storage.Store.open(database) as final:
+        # The replacement survives the second close; the row stays retired, not resurrected.
+        window = final.read_ring_window(
+            range_seconds=RANGE_SECONDS, resolution_seconds=RESOLUTION, window_end=7_200,
+        )
+        assert bucket_start not in window.missing_bucket_starts
+        served = [row for row in window.rows if row.bucket_start == bucket_start]
+        assert served and json.loads(served[0].bucket_json)["series"]["v"]["value"] == 7
+        assert (RESOLUTION, bucket_start) not in _pending(final)
+
+
+def test_a_coverage_change_uses_the_same_owner_and_survives_reopen(tmp_path):
+    """Coverage/unavailable share the invalidation owner, so they get the same durable path."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as opened:
+        _publish_for(opened, 6_000.0, 6_300.0)
+        opened.append_batch(
+            coverage_epochs=[CoverageEpoch("cpu", "host", "epoch-c", 6_000.0, 6_300.0, 1.0, 1)],
+        )
+        expected = {(RESOLUTION, 6_000), (RESOLUTION, 6_300)}
+        assert expected <= _pending(opened)
+
+    with storage.Store.open(database) as reopened:
+        assert expected <= _pending(reopened)
+
+
+# --- forced concurrency, deterministic ---------------------------------------------------------
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_a_mutation_landing_between_build_and_publish_is_not_retired_by_it(tmp_path, resolution_seconds):
+    """Deterministic interleaving, not a sleep or a retry.
+
+    The materializer reads a generation-N snapshot, the mutation commits at N+1, and only then does
+    the N publication land. The immediate transition is asserted -- the row must still be pending --
+    and then convergence after reopen, rather than only a final snapshot.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    slot_count = CAPACITIES[resolution_seconds]
+    bucket_start = resolution_seconds * slot_count * 4
+
+    with storage.Store.open(database) as opened:
+        opened.initialize_ring_storage()
+        opened.publish_ring_buckets(
+            buckets=[storage.RingBucketWrite(
+                resolution_seconds=resolution_seconds, bucket_start=bucket_start,
+                bucket_json=_bucket(0).bucket_json, complete=True,
+            )],
+            source_generation=0, published_at=1.0,
+        )
+        # BARRIER: the publication's snapshot generation is captured here, before the mutation.
+        snapshot_generation = 0
+
+        # +0.5, not +1.0: at the 1s resolution a whole second lands in the NEXT bucket, so the
+        # mutation would contradict a bucket that was never published and record nothing.
+        opened.append_batch(observations=[_observation("mid", float(bucket_start) + 0.5)])
+        contradicting = max(_pending_generations(opened))
+        assert contradicting > snapshot_generation
+
+        # The in-flight publication from the older snapshot now lands.
+        opened.publish_ring_buckets(
+            buckets=[storage.RingBucketWrite(
+                resolution_seconds=resolution_seconds, bucket_start=bucket_start,
+                bucket_json=_bucket(0).bucket_json, complete=True,
+            )],
+            source_generation=snapshot_generation, published_at=9_999.0,
+        )
+
+        assert (resolution_seconds, bucket_start) in _pending(opened), (
+            "a publication built before the mutation retired its invalidation"
+        )
+
+    with storage.Store.open(database) as reopened:
+        assert (resolution_seconds, bucket_start) in _pending(reopened), (
+            "the pending state did not converge across reopen"
+        )
+
+
+def test_a_mutation_to_an_unheld_bucket_records_nothing_even_when_other_slots_are_populated(store):
+    """Actionability matches the exact BUCKET, not merely 'this resolution has some slot'.
+
+    A resolution-only match would call every mutation actionable as soon as any bucket at that
+    resolution were published, reintroducing the accumulation for buckets the ring does not hold.
+    The unactionable sweep would then hide it, which is why this asserts at the RECORDING step
+    rather than at the end state.
+    """
+    held = 7_140
+    unheld = 60_000
+    _publish_for(store, float(held))
+    baseline = _pending_rows(store)
+
+    store.append_batch(observations=[_observation("elsewhere", float(unheld) + 1.0)])
+
+    recorded = {(r, b) for r, b, _g in (_pending_rows(store) - baseline)}
+    assert (RESOLUTION, unheld) not in recorded, (
+        "a bucket the ring does not hold was recorded because another slot at its resolution was"
+    )
+    assert recorded == set()
