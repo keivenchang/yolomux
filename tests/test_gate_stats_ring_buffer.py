@@ -2082,3 +2082,118 @@ def test_downtime_is_a_gap_and_is_not_synthesized_as_quiet_zero(tmp_path: Path) 
 
     assert window.rows == ()
     assert set(window.missing_bucket_starts) == set(range(6_360, 7_260, 60))
+
+
+# --- publication generation versus store generation ------------------------------------------
+# `publish_ring_buckets` and `append_batch` commit in SEPARATE transactions: facts land with a
+# bumped `schema_meta.source_generation`, and the ring follows up to RING_FLUSH_SECONDS later.
+# Until now `read_ring_window` returned only the generation the ring was published FROM, so no
+# consumer could tell a ring that is one flush behind from one that is answering for a store that
+# no longer exists. Both readings were invisible in exactly the same way.
+
+
+def _store_generation(store: storage.Store) -> int:
+    return int(
+        store._connection()
+        .execute("SELECT source_generation FROM schema_meta WHERE singleton = 1")
+        .fetchone()[0]
+    )
+
+
+def _set_store_generation(store: storage.Store, value: int) -> None:
+    connection = store._connection()
+    connection.execute(
+        "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1", (value,)
+    )
+    connection.commit()
+
+
+def test_a_caught_up_ring_reports_no_publication_lag(tmp_path: Path) -> None:
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.source_generation == window.store_source_generation
+    assert window.publication_lag == 0
+
+
+def test_a_ring_behind_the_store_is_measured_and_still_served(tmp_path: Path) -> None:
+    """The ORDINARY steady state, and it must not be refused.
+
+    Publication coalesces on RING_FLUSH_SECONDS, so the store is routinely ahead. Refusing on any
+    difference would disable the cold-cache ring path permanently and force every restart back
+    through a whole-window materializer build -- the exact cost the ring exists to avoid.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        _set_store_generation(store, _store_generation(store) + 7)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.publication_lag == 7
+    assert window.rows, "a lagging ring is still authoritative for the buckets it did publish"
+
+
+def test_a_publication_ahead_of_the_store_is_measured_rather_than_assumed_impossible(tmp_path: Path) -> None:
+    """A publication generation LEADING the store is not rejected here, and that is deliberate.
+
+    In production `service._flush_ring_if_due` publishes `candidate.source_generation`, which comes
+    from `snapshot.schema.source_generation` -- the store's own value -- so a leading publication
+    would indeed mean the raw store moved backward. But `publish_ring_buckets` takes the generation
+    as a CALLER-SUPPLIED argument and does not derive it, so the storage layer is not the owner of
+    that invariant, and this suite's own fixtures publish decoupled literals against a fresh store.
+    Enforcing it here would have forced eight pinned ring invariants to change to satisfy a rule
+    this layer does not own. The pair is measured instead, so the service layer that DOES own the
+    provenance can act on it once a durable cursor exists to say what the correct response is.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=9, published_at=1_000.0)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.source_generation == 9
+    assert window.store_source_generation == 0
+    # `publication_lag` clamps at zero rather than reporting a negative distance, so a caller that
+    # only reads the lag cannot mistake this state for "behind".
+    assert window.publication_lag == 0
+
+
+def test_the_generation_pair_survives_a_crash_boundary_reopen(tmp_path: Path) -> None:
+    """Facts durable, publication stale: the exact separate-transaction crash boundary.
+
+    A crash between `append_batch`'s commit and the next `_flush_ring_if_due` leaves the store
+    ahead of the ring. After reopen the pair must still be readable and still describe that
+    distance, because a cold cache serves this ring before the materializer warms.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        _set_store_generation(store, _store_generation(store) + 3)
+
+    with storage.Store.open(database) as reopened:
+        window = reopened.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.publication_lag == 3
+    assert window.store_source_generation == 3
+    assert window.rows, "the published bucket survives the reopen"
+
+
+def test_a_missing_schema_metadata_row_refuses_the_ring_read(tmp_path: Path) -> None:
+    """Negative control for the pair: with no store generation there is nothing to compare against.
+
+    Serving a ring whose counterpart cannot be read would reintroduce exactly the blind state this
+    pair removes, so the read fails closed rather than defaulting the missing side to zero.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        connection = store._connection()
+        connection.execute("DELETE FROM schema_meta WHERE singleton = 1")
+        connection.commit()
+
+        with pytest.raises(storage.SchemaMismatchError) as raised:
+            store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert "schema metadata row is missing" in str(raised.value)

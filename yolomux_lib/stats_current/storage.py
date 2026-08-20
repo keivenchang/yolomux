@@ -451,6 +451,20 @@ class RingWindow:
     source_generation: int
     ring_generation: int
     published_at: float
+    # The RAW STORE's generation, read in the same transaction as the publication row above, so the
+    # two can be compared without racing a concurrent append. ``source_generation`` is what the ring
+    # was published FROM; this is what the store holds NOW.
+    #
+    # A lag between them is the ORDINARY steady state, not an error: publication coalesces on
+    # RING_FLUSH_SECONDS, so the store is routinely ahead by up to one flush. What this field makes
+    # possible is measuring that distance instead of guessing at it, which is the prerequisite for
+    # the durable cursor and invalidation ledger that will eventually bound it.
+    store_source_generation: int = 0
+
+    @property
+    def publication_lag(self) -> int:
+        """How many store generations the published ring is behind. Zero when fully caught up."""
+        return max(0, self.store_source_generation - self.source_generation)
 
 
 @dataclass(frozen=True)
@@ -1948,6 +1962,12 @@ class Store:
             ).fetchone()
             if publication is None:
                 raise SchemaMismatchError("aggregate publication row is missing")
+            store_row = connection.execute(
+                "SELECT source_generation FROM schema_meta WHERE singleton = 1"
+            ).fetchone()
+            if store_row is None:
+                raise SchemaMismatchError("stats schema metadata row is missing")
+            store_generation = int(store_row[0])
             slot_rows = {
                 int(row[0]): row
                 for row in connection.execute(
@@ -1986,6 +2006,7 @@ class Store:
             int(publication[1]),
             int(publication[0]),
             float(publication[2]),
+            store_generation,
         )
 
     def last_vacuumed_at(self) -> float:
