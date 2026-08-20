@@ -32,7 +32,14 @@ from . import resolution as stats_resolution
 # combination makes the legacy writer's read-only header fence stop before it
 # can reinterpret or mutate this intentionally incompatible schema.
 APPLICATION_ID = 0x594F5354
-SCHEMA_VERSION = 7
+# Schema 8 adds the ring's durability kernel: a per-resolution replay cursor, an invalidation
+# ledger, and a versioned slot payload. It is a SIDE-BY-SIDE format, not an in-place upgrade --
+# DATABASE_FILENAME embeds the version, so a v8 build creates `stats-v8.sqlite3` and never opens,
+# writes, or WAL-touches an existing `stats-v7.sqlite3`. Migration is an explicit, bounded copy
+# (`migrate_v7_to_v8`), so the rollback boundary is simply "keep running the v7 build against the
+# v7 file". SOCKET_FILENAME also embeds the version, so a v8 build and a v7 build address different
+# statsd sockets and cannot half-share a store.
+SCHEMA_VERSION = 8
 MIN_WRITER_PROTOCOL = 24
 # Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
 # strict process-memory payload. Build 6 makes the same census the sole owner of
@@ -166,8 +173,24 @@ _COLUMNS = {
     ),
 }
 _RING_TABLES = frozenset(
+    {
+        "aggregate_publication",
+        "aggregate_rings",
+        "aggregate_ring_slots",
+        "ring_replay_cursor",
+        "ring_invalidations",
+    }
+)
+# The fixed-row triggers guard the three tables whose row set is pre-allocated and immutable. The
+# two schema-8 tables are deliberately NOT in that set: the cursor has one row per resolution but
+# the ledger is append-and-retire by nature, so pinning its rows would defeat its purpose.
+_RING_FIXED_ROW_TABLES = frozenset(
     {"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"}
 )
+# The payload schema `bucket_json` is written with. Schema 8 stops accepting shape-only ring data:
+# serving decodes named fields out of this blob, so a blob written by a build with a different
+# payload contract must be refused as data rather than mis-decoded into a plausible chart.
+RING_PAYLOAD_VERSION = 1
 _RING_COLUMNS = {
     "aggregate_publication": (
         "singleton", "ring_generation", "source_generation", "published_at",
@@ -177,12 +200,28 @@ _RING_COLUMNS = {
     ),
     "aggregate_ring_slots": (
         "resolution_seconds", "slot_index", "bucket_start", "bucket_json", "complete",
-        "source_generation", "ring_generation", "published_at",
+        "source_generation", "ring_generation", "published_at", "payload_version",
+    ),
+    # One row per resolution: how far replay has folded, and the store generation it folded at.
+    # `folded_through_observed_at` is the durable answer to "which facts are already in the ring",
+    # which nothing could answer before: `newest_bucket_start` is a head with no tail, and
+    # `source_generation` is a change counter with no time semantics.
+    "ring_replay_cursor": (
+        "resolution_seconds", "folded_through_observed_at", "folded_source_generation", "updated_at",
+    ),
+    # Every published bucket a later mutation contradicted, bound to the exact bucket, resolution
+    # and store generation that invalidated it. A usage tombstone hard-DELETEs its atoms and prune
+    # removes facts outright; without this row the affected slot stays published and permanently
+    # over-counted, because the materializer only republishes cells it independently knows are
+    # dirty and cannot know about facts that no longer exist.
+    "ring_invalidations": (
+        "resolution_seconds", "bucket_start", "source_generation", "reason", "created_at",
+        "applied_at",
     ),
 }
 _RING_TRIGGER_NAMES = frozenset(
     f"{table}_reject_{operation}"
-    for table in _RING_TABLES
+    for table in _RING_FIXED_ROW_TABLES
     for operation in ("insert", "delete")
 )
 
@@ -1371,12 +1410,20 @@ def _unavailable_values(span: UnavailableSpan) -> tuple[object, ...]:
 
 
 def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
+    """Every table of the ring extension, matched by NAME SET rather than by prefix.
+
+    Schema 8 added `ring_replay_cursor` and `ring_invalidations`, which do not share the
+    `aggregate_` prefix the original three were discovered by. Intersecting against `_RING_TABLES`
+    keeps one list authoritative instead of coupling the extension's membership to a naming
+    convention that a later table can silently fall outside of -- which is exactly how a partial
+    ring shape would have been admitted as complete.
+    """
     return frozenset(
         str(row[0])
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'aggregate_%'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
-    )
+    ) & _RING_TABLES
 
 
 def _validate_ring_schema(connection: sqlite3.Connection) -> None:
@@ -1436,7 +1483,7 @@ def _validate_ring_schema(connection: sqlite3.Connection) -> None:
         str(row[0])
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-            "AND tbl_name LIKE 'aggregate_%'"
+            "AND tbl_name IN (SELECT name FROM sqlite_master WHERE type = 'table')"
         )
     )
     if trigger_names != _RING_TRIGGER_NAMES:
@@ -1475,13 +1522,47 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
             "source_generation INTEGER NOT NULL DEFAULT 0 CHECK (source_generation >= 0), "
             "ring_generation INTEGER NOT NULL DEFAULT 0 CHECK (ring_generation >= 0), "
             "published_at REAL NOT NULL DEFAULT 0 CHECK (published_at >= 0), "
+            "payload_version INTEGER NOT NULL DEFAULT 0 CHECK (payload_version >= 0), "
             "PRIMARY KEY (resolution_seconds, slot_index), "
             "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
             "CHECK (bucket_start IS NULL OR bucket_start >= 0), "
             "CHECK (bucket_start IS NULL OR bucket_start % resolution_seconds = 0), "
             "CHECK ((bucket_start IS NULL AND bucket_json IS NULL AND complete = 0 "
-            "AND source_generation = 0 AND ring_generation = 0 AND published_at = 0) "
-            "OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL))) WITHOUT ROWID"
+            "AND source_generation = 0 AND ring_generation = 0 AND published_at = 0 "
+            "AND payload_version = 0) "
+            "OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL AND payload_version > 0))) WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE ring_replay_cursor ("
+            "resolution_seconds INTEGER PRIMARY KEY, "
+            "folded_through_observed_at REAL NOT NULL DEFAULT 0 "
+            "CHECK (folded_through_observed_at >= 0), "
+            "folded_source_generation INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (folded_source_generation >= 0), "
+            "updated_at REAL NOT NULL DEFAULT 0 CHECK (updated_at >= 0), "
+            "CHECK (resolution_seconds > 0), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds)"
+            ") WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE ring_invalidations ("
+            "resolution_seconds INTEGER NOT NULL, "
+            "bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0), "
+            "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+            "reason TEXT NOT NULL, "
+            "created_at REAL NOT NULL CHECK (created_at >= 0), "
+            "applied_at REAL, "
+            "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+            "CHECK (bucket_start % resolution_seconds = 0), "
+            "CHECK (applied_at IS NULL OR applied_at >= created_at)"
+            ") WITHOUT ROWID"
+        )
+        # Outstanding work first: a replay that must find unapplied rows cannot afford a scan of
+        # every retired one, and this is the only index the ledger needs.
+        connection.execute(
+            "CREATE INDEX ring_invalidations_pending "
+            "ON ring_invalidations(resolution_seconds, bucket_start) WHERE applied_at IS NULL"
         )
         connection.execute(
             "INSERT INTO aggregate_publication("
@@ -1492,6 +1573,12 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
             "resolution_seconds, slot_count, newest_bucket_start) VALUES(?, ?, NULL)",
             stats_resolution.RING_CAPACITIES.items(),
         )
+        # After aggregate_rings, because both schema-8 tables carry a foreign key to it and
+        # `foreign_keys` is ON for every connection this store opens.
+        connection.executemany(
+            "INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(?)",
+            ((resolution_seconds,) for resolution_seconds in stats_resolution.RING_CAPACITIES),
+        )
         connection.executemany(
             "INSERT INTO aggregate_ring_slots(resolution_seconds, slot_index) VALUES(?, ?)",
             (
@@ -1500,7 +1587,7 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
                 for slot_index in range(slot_count)
             ),
         )
-        for table in sorted(_RING_TABLES):
+        for table in sorted(_RING_FIXED_ROW_TABLES):
             for operation in ("insert", "delete"):
                 connection.execute(
                     f"CREATE TRIGGER {table}_reject_{operation} "
@@ -1564,6 +1651,12 @@ class Store:
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
             connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
+            # Schema 8 makes the ring extension part of the FORMAT rather than an opt-in a caller
+            # remembers to request. The durability kernel -- replay cursor and invalidation ledger
+            # -- has to exist before the first append can be recorded as un-folded, and an optional
+            # kernel is one that is absent exactly when a crash needs it. Creation is idempotent:
+            # an existing extension is validated, not rebuilt.
+            _initialize_ring_schema(connection)
             if include_browser_diagnostics:
                 _initialize_browser_diagnostics(connection)
             # A clean writer takeover must not inherit the largest WAL allocation
@@ -1898,11 +1991,12 @@ class Store:
             for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared:
                 changed = connection.execute(
                     "UPDATE aggregate_ring_slots SET bucket_start = ?, bucket_json = ?, "
-                    "complete = ?, source_generation = ?, ring_generation = ?, published_at = ? "
+                    "complete = ?, source_generation = ?, ring_generation = ?, published_at = ?, "
+                    "payload_version = ? "
                     "WHERE resolution_seconds = ? AND slot_index = ?",
                     (
                         bucket_start, bucket_json, complete, source, ring_generation, published,
-                        resolution_seconds, slot_index,
+                        RING_PAYLOAD_VERSION, resolution_seconds, slot_index,
                     ),
                 ).rowcount
                 if changed != 1:
@@ -1972,7 +2066,7 @@ class Store:
                 int(row[0]): row
                 for row in connection.execute(
                     "SELECT slot_index, bucket_start, bucket_json, complete, "
-                    "source_generation, ring_generation, published_at "
+                    "source_generation, ring_generation, published_at, payload_version "
                     "FROM aggregate_ring_slots WHERE resolution_seconds = ?",
                     (resolution_value,),
                 )
@@ -1983,6 +2077,14 @@ class Store:
                 slot_index = (bucket_start // resolution_value) % slot_count
                 candidate = slot_rows.get(slot_index)
                 if candidate is None or candidate[1] is None or int(candidate[1]) != bucket_start:
+                    missing.append(bucket_start)
+                    continue
+                if int(candidate[7]) != RING_PAYLOAD_VERSION:
+                    # Shape-only acceptance ends here. Serving decodes named fields out of
+                    # `bucket_json`, so a blob written under a different payload contract would be
+                    # mis-decoded into a chart that looks plausible and is wrong. Reporting the
+                    # bucket as MISSING routes it to the materializer, which rebuilds it from facts
+                    # that are still authoritative, rather than refusing the whole window.
                     missing.append(bucket_start)
                     continue
                 rows.append(

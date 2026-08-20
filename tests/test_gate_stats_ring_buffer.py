@@ -23,7 +23,9 @@ from yolomux_lib.stats_current import storage
 
 RING_CAPACITIES = {1: 300, 10: 180, 60: 480, 300: 288}
 TOTAL_RING_SLOTS = 1_248
-RING_TABLES = ("aggregate_publication", "aggregate_rings", "aggregate_ring_slots")
+# Derived from the production owner rather than restated. This was a hand-maintained copy of the
+# same list, so schema 8's two new tables made it silently wrong in five places at once.
+RING_TABLES = tuple(sorted(storage._RING_TABLES))
 
 
 def _ring_table_names(store: storage.Store) -> set[str]:
@@ -31,9 +33,9 @@ def _ring_table_names(store: storage.Store) -> set[str]:
     return {
         str(row[0])
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'aggregate_%'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
-    }
+    } & set(storage._RING_TABLES)
 
 
 def _ring_counts(store: storage.Store) -> dict[int, int]:
@@ -427,9 +429,20 @@ def test_ring_capacities_and_minimum_density_derive_the_current_view_matrix() ->
         assert resolution.explicit_resolutions(range_seconds) == derived
 
 
+
+def _ring_publication_generation(store: storage.Store) -> int:
+    return int(
+        store._connection()
+        .execute("SELECT ring_generation FROM aggregate_publication WHERE singleton = 1")
+        .fetchone()[0]
+    )
+
 def test_fixed_slot_row_count_survives_one_hour_of_ingest(tmp_path: Path) -> None:
     with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
-        assert _ring_table_names(store) == set()
+        # Schema 8 creates the ring extension with the database. It stopped being an opt-in a
+        # caller had to remember, because the durability kernel is absent exactly when a crash
+        # needs it if its creation is optional.
+        assert _ring_table_names(store) == set(storage._RING_TABLES)
         store.initialize_ring_storage()
         assert _ring_counts(store) == RING_CAPACITIES
         store.initialize_ring_storage()
@@ -672,10 +685,13 @@ def test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer
         service.writer = store
         service._build_once(store, True, frozenset())
 
-        assert _ring_table_names(store) == set()
+        # The TABLES exist from open in schema 8; what must still be absent before the flush
+        # deadline is any PUBLICATION. That is the behaviour this row actually guards.
+        assert _ring_table_names(store) == set(storage._RING_TABLES)
+        assert _ring_publication_generation(store) == 0
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS - 0.001
         assert service._flush_ring_if_due() is None
-        assert _ring_table_names(store) == set()
+        assert _ring_publication_generation(store) == 0
 
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS
         seeded = service._flush_ring_if_due()
@@ -1891,8 +1907,11 @@ def test_snapshot_distinguishes_zero_cold_and_one_lap_stale_slots(
         stale_start = cached["window_end"] - 2
         connection = store._connection()
         connection.execute(
+            # `payload_version` is part of the empty-slot shape in schema 8, and the CHECK enforces
+            # it: a cold slot is fully cold or it is not cold at all.
             "UPDATE aggregate_ring_slots SET bucket_start = NULL, bucket_json = NULL, "
-            "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0 "
+            "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0, "
+            "payload_version = 0 "
             "WHERE resolution_seconds = 1 AND slot_index = ?",
             (cold_start % resolution.RING_CAPACITIES[1],),
         )
@@ -2050,11 +2069,14 @@ def test_materializer_worker_wakes_itself_at_the_ring_flush_deadline(
         assert service._status()["ring_writer"]["publications"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Deferred, not in current release scope: schema v8 shadow creation and byte-preserving v7 coexistence are intentionally unbuilt",
-)
 def test_schema_v8_creation_leaves_v7_database_untouched(tmp_path: Path) -> None:
+    """v8 is a SIDE-BY-SIDE format, so creating it must not touch the v7 file at all.
+
+    `DATABASE_FILENAME` embeds the schema version, so a v8 build addresses `stats-v8.sqlite3` and an
+    existing `stats-v7.sqlite3` is not opened, not written, and not even WAL-touched -- an opened
+    SQLite file grows `-wal`/`-shm` sidecars, so their absence is the evidence that nothing looked
+    at it. That is the whole rollback boundary: the v7 build keeps running against its own file.
+    """
     assert storage.SCHEMA_VERSION == 8
     assert storage.DATABASE_FILENAME == "stats-v8.sqlite3"
     previous = tmp_path / "stats-v7.sqlite3"
