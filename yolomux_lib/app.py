@@ -194,6 +194,7 @@ from .watchd_protocol import WATCHD_DESCRIPTOR_RESYNC_SECONDS
 from .watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
 from .watchd_protocol import WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS
 from .watchd_protocol import WATCHD_SNAPSHOT_DEADLINE_SECONDS
+from .watchd_protocol import watchd_failure_detail
 from .watch_diff import payload_from_products as watch_diff_payload_from_products
 from .watch_diff import responses_by_index as watch_diff_responses_by_index
 from .settings import default_settings
@@ -630,7 +631,7 @@ CONTEXT_OPERATION_DEADLINE_SECONDS = 15.0
 FS_BATCH_OPERATION_DEADLINE_SECONDS = 120.0
 WATCHD_OPERATION_PRODUCT_LIMIT = 64
 WATCHD_FAILURE_ACTIONS = frozenset({"acquire", "upsert", "remove", "wait_revision"})
-WATCHD_FAILURE_CODES = frozenset({"deadline_expired", "handler_failed", "producer_failed", "service_unavailable", "stale_generation", "unknown_lease", "upgrade_required"})
+WATCHD_FAILURE_CODES = frozenset({"deadline_expired", "handler_failed", "native_capacity_exceeded", "producer_failed", "service_unavailable", "stale_generation", "unknown_lease", "upgrade_required"})
 WATCHD_FAILURE_LOG_GRACE_SECONDS = 2.0
 SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
@@ -3073,6 +3074,7 @@ class WatchBridge:
             record.watchd_failure_delivery = ""
             record.watchd_failure_action = ""
             record.watchd_failure_error_code = ""
+            record.watchd_failure_error_detail = ""
             record.watchd_failure_published = False
         if not recovered_published:
             return
@@ -3109,10 +3111,12 @@ class WatchBridge:
         error_code = str(response.get("error_code") or "service_unavailable")
         if error_code not in WATCHD_FAILURE_CODES:
             error_code = "service_unavailable"
+        error_detail = watchd_failure_detail(error_code, response)
         now = time.monotonic()
         publish_failure = False
         failure_action = ""
         failure_error_code = ""
+        failure_error_detail = ""
         failure_delivery = ""
         with self.state.lock:
             if self.state.event_watcher_record is not record or record.stop_event.is_set():
@@ -3125,6 +3129,7 @@ class WatchBridge:
                 record.watchd_failure_delivery = delivery
                 record.watchd_failure_action = action
                 record.watchd_failure_error_code = error_code
+                record.watchd_failure_error_detail = error_detail
             record.watchd_state = state
             record.filesystem_healthy = False
             if (
@@ -3135,13 +3140,14 @@ class WatchBridge:
                 publish_failure = True
                 failure_action = record.watchd_failure_action
                 failure_error_code = record.watchd_failure_error_code
+                failure_error_detail = record.watchd_failure_error_detail
                 failure_delivery = record.watchd_failure_delivery
         if publish_failure:
             failure_retrying = failure_delivery == "retrying"
             emit_server_log(
                 "warning" if failure_retrying else "error",
                 "watchd",
-                f"watchd {failure_action} failed ({failure_error_code}); retrying" if failure_retrying else f"watchd {failure_action} failed ({failure_error_code})",
+                f"watchd {failure_action} failed ({failure_error_code}{failure_error_detail}); retrying" if failure_retrying else f"watchd {failure_action} failed ({failure_error_code}{failure_error_detail})",
                 category="transport",
                 dedupe_key=f"watchd-failure:{record.watchd_failure_episode}",
                 request_id=f"watchd-episode-{record.watchd_failure_episode}",
