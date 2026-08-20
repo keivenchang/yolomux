@@ -1701,6 +1701,10 @@ class StatsCurrentService:
             for layer in candidate.layers
         }
         persisted: dict[tuple[int, int], bool] = {}
+        # The durable restart work list. A cell whose bucket carries an unapplied invalidation is
+        # KNOWN-CONTRADICTED, so the filter below must not drop it as already-persisted: the whole
+        # point of the ledger is that this restart is the thing that owes it a rebuild.
+        invalidated: set[tuple[int, int]] = set()
         ring_generation = 0
         for layer in candidate.layers:
             window = ring_writer.read_ring_window(
@@ -1716,6 +1720,9 @@ class StatsCurrentService:
                 (row.resolution_seconds, row.bucket_start): row.complete
                 for row in window.rows
             })
+            invalidated.update(
+                (layer.resolution, bucket_start) for bucket_start in window.pending_invalidations
+            )
         if ring_generation <= 0:
             return cells
         buckets = {
@@ -1725,6 +1732,11 @@ class StatsCurrentService:
         }
         retained = set()
         for cell in cells:
+            if (cell.resolution, cell.start) in invalidated:
+                # Unconditional: a contradicted bucket is retained whatever the persisted slot
+                # says, because the persisted slot is exactly what is wrong.
+                retained.add(cell)
+                continue
             selected = buckets.get((cell.resolution, cell.start))
             if selected is None:
                 continue

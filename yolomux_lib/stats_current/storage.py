@@ -509,6 +509,10 @@ class RingWindow:
     # possible is measuring that distance instead of guessing at it, which is the prerequisite for
     # the durable cursor and invalidation ledger that will eventually bound it.
     store_source_generation: int = 0
+    # The buckets in THIS window with unapplied invalidations. Already read to hide them from
+    # `rows`, so exposing them costs no extra query and gives the restart owner the durable work
+    # list rather than making it re-derive one.
+    pending_invalidations: tuple[int, ...] = ()
 
     @property
     def publication_lag(self) -> int:
@@ -1623,7 +1627,12 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
             "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
             "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
             "CHECK (bucket_start % resolution_seconds = 0), "
-            "CHECK (applied_at IS NULL OR applied_at >= created_at)"
+            # `created_at` and `applied_at` are DIFFERENT CLOCKS and must not be ordered against
+            # each other. `created_at` is the OBSERVED instant of the fact that caused the
+            # staleness -- data time, so this module needs no ambient clock -- while `applied_at`
+            # is the publication's wall clock. Ordering them rejected correct retirements whenever
+            # data time ran ahead of wall clock, which is routine for a store replaying history.
+            "CHECK (applied_at IS NULL OR applied_at >= 0)"
             ") WITHOUT ROWID"
         )
         # Outstanding work first: a replay that must find unapplied rows cannot afford a scan of
@@ -2082,9 +2091,14 @@ class Store:
             connection.executemany(
                 "UPDATE ring_invalidations SET applied_at = ? "
                 "WHERE resolution_seconds = ? AND bucket_start = ? AND applied_at IS NULL "
-                "AND created_at <= ?",
+                # Retirement authority is the SOURCE GENERATION, never the wall clock. A
+                # publication built from a generation-N snapshot cannot contain facts that arrived
+                # at N+1, so it must not clear their invalidation merely because its clock is
+                # later -- which `created_at <= published_at` allowed, marking a bucket reconciled
+                # that the publication demonstrably could not account for.
+                "AND source_generation <= ?",
                 [
-                    (published, resolution_seconds, bucket_start, published)
+                    (published, resolution_seconds, bucket_start, source)
                     for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared
                 ],
             )
@@ -2092,13 +2106,17 @@ class Store:
             # it can never claim work that a crash then loses. It records the newest instant this
             # ring has folded, per resolution.
             connection.executemany(
-                "UPDATE ring_replay_cursor SET folded_through_observed_at = ?, "
+                "UPDATE ring_replay_cursor SET folded_through_observed_at = max(folded_through_observed_at, ?), "
                 "folded_source_generation = ?, updated_at = ? "
-                "WHERE resolution_seconds = ? AND folded_through_observed_at < ?",
+                # Gated on GENERATION, not on the horizon moving. A republication of the same
+                # bucket at a newer generation is exactly what replaying contradicted work looks
+                # like, and the horizon does not move for it -- so a horizon-gated update left
+                # `folded_source_generation` stale precisely when it mattered most.
+                "WHERE resolution_seconds = ? AND folded_source_generation <= ?",
                 [
                     (
                         float(newest + resolution_seconds), source, published,
-                        resolution_seconds, float(newest + resolution_seconds),
+                        resolution_seconds, source,
                     )
                     for resolution_seconds, newest in newest_by_resolution.items()
                 ],
@@ -2226,6 +2244,7 @@ class Store:
             int(publication[0]),
             float(publication[2]),
             store_generation,
+            tuple(sorted(stale_starts)),
         )
 
     def last_vacuumed_at(self) -> float:
@@ -2366,9 +2385,17 @@ class Store:
 
     def _apply_usage_tombstones(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> tuple[int, int, tuple[tuple[object, ...], ...]]:
+    ) -> tuple[int, int, tuple[tuple[object, ...], ...], tuple[float, ...]]:
+        """Also return the observed instants of the atoms actually DELETED.
+
+        The caller needs the range to invalidate, and it is this function -- the only code that
+        knows which tombstones matched a stored atom -- that can name it. Returning it here removes
+        the caller's need to index a prepared tuple at all: that indexing read the last field,
+        which is `thread_id`, so a tombstone-only append invalidated nothing.
+        """
         accepted = duplicate = 0
         accepted_values: list[tuple[object, ...]] = []
+        deleted_observed_at: list[float] = []
         for values in prepared:
             key = values[:5]
             previous = connection.execute(
@@ -2389,7 +2416,10 @@ class Store:
             )
             accepted += 1
             accepted_values.append(values)
-        return accepted, duplicate, tuple(accepted_values)
+            # `previous[0]` is the stored atom's own observed instant, and the equality check above
+            # has already proven it equals the tombstone's, so this is the deleted fact's time.
+            deleted_observed_at.append(float(previous[0]))
+        return accepted, duplicate, tuple(accepted_values), tuple(deleted_observed_at)
 
     def _apply_unavailable_spans(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
@@ -2467,9 +2497,10 @@ class Store:
             usage_accepted, usage_attribution_conflicts, accepted_usage = self._apply_usage_atoms(
                 connection, prepared_usage,
             )
-            tombstones_accepted, tombstones_duplicate, accepted_tombstones = self._apply_usage_tombstones(
-                connection, prepared_tombstones,
-            )
+            (
+                tombstones_accepted, tombstones_duplicate, accepted_tombstones,
+                tombstoned_observed_at,
+            ) = self._apply_usage_tombstones(connection, prepared_tombstones)
             unavailable_accepted = self._apply_unavailable_spans(
                 connection, prepared_unavailable,
             )
@@ -2512,10 +2543,23 @@ class Store:
                         mutated.extend(
                             float(row[index]) for row in rows if row[index] is not None
                         )
-                # A tombstone deletes a usage atom, so its key names the atom whose bucket is now
-                # contradicted; its observed instant comes from the atoms already prepared above.
-                if prepared_tombstones and not mutated:
-                    mutated.extend(float(row[-1]) for row in prepared_tombstones if isinstance(row[-1], (int, float)))
+                # From the deletion owner, which is the only code that knows which tombstones
+                # actually matched a stored atom. Not conditional on `mutated` being empty either:
+                # a batch that both appends and tombstones contradicts BOTH ranges.
+                mutated.extend(tombstoned_observed_at)
+                if retention_prune is not None and retention_prune.changed and retention_cutoff is not None:
+                    # A SEPARATE range, not merged into `mutated`. The retention prune deletes the
+                    # OLDEST facts while the offered rows are the newest, so a single min..max span
+                    # covering both would invalidate the entire store on every retention append.
+                    # Recording the deleted range on its own invalidates exactly the buckets whose
+                    # facts are gone. Before this, the append-time prune recorded nothing at all.
+                    _record_invalidations(
+                        connection,
+                        (0.0, float(retention_cutoff)),
+                        reason="retention_prune",
+                        source_generation=generation,
+                        now=float(retention_cutoff),
+                    )
                 if mutated:
                     # `created_at` is the observed instant that caused the staleness, not a wall
                     # clock read: this module deliberately takes every timestamp as data so a store
@@ -2936,6 +2980,16 @@ class Store:
                 connection.execute(
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
                     (generation,),
+                )
+                # Same transaction as the deletion. `prune` advanced the generation and recorded
+                # NOTHING, so a nightly prune left every published bucket below the cutoff serving
+                # totals for facts that no longer exist and nothing ever asked for a rebuild.
+                _record_invalidations(
+                    connection,
+                    (0.0, cutoff),
+                    reason="retention_prune",
+                    source_generation=generation,
+                    now=cutoff,
                 )
         # Recorded only after the transaction commits: a prune that failed must
         # stay due, or one bad night silently becomes a skipped day.
