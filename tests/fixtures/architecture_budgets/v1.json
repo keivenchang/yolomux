@@ -2203,6 +2203,7 @@
     "tests/test_stats_current_transcripts.py": 1260,
     "tests/test_stats_current_usage.py": 225,
     "tests/test_stats_resolution.py": 139,
+    "tests/test_stats_v7_to_v8_migration.py": 421,
     "tests/test_statusd.py": 1649,
     "tests/test_statusd_protocol.py": 86,
     "tests/test_system_status_latency_probe.py": 580,
