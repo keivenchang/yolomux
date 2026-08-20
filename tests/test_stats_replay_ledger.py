@@ -210,7 +210,7 @@ def test_append_time_retention_prune_invalidates_the_deleted_range_not_the_offer
 # --- coverage and unavailable ---------------------------------------------------------------
 
 def test_a_coverage_or_unavailable_change_invalidates_its_span(store):
-    _publish_for(store, 6_000.0, 6_300.0, 6_600.0, 6_900.0)
+    _publish_for(store, *[float(b) for b in range(6_000, 6_960, 60)])
     baseline = _pending(store)
 
     store.append_batch(
@@ -218,9 +218,14 @@ def test_a_coverage_or_unavailable_change_invalidates_its_span(store):
         unavailable_spans=[UnavailableSpan("cpu", "host", "epoch-u", 6_600.0, 6_900.0, 1.0, "down", 1)],
     )
 
-    recorded = _pending(store) - baseline
-    for instant in (6_000.0, 6_300.0, 6_600.0, 6_900.0):
-        assert (RESOLUTION, int(instant // RESOLUTION) * RESOLUTION) in recorded
+    recorded = {b for r, b in (_pending(store) - baseline) if r == RESOLUTION}
+    # EXACT half-open membership. Endpoint flattening recorded only {6000, 6300, 6600, 6900},
+    # leaving every interior bucket falsely clean and marking two exclusive ends the change never
+    # touched.
+    assert recorded == {
+        6_000, 6_060, 6_120, 6_180, 6_240,   # coverage  [6000, 6300)
+        6_600, 6_660, 6_720, 6_780, 6_840,   # unavailable [6600, 6900)
+    }, sorted(recorded)
 
 
 # --- P0-3: retirement authority -------------------------------------------------------------
@@ -903,12 +908,13 @@ def test_a_coverage_change_uses_the_same_owner_and_survives_reopen(tmp_path):
     """Coverage/unavailable share the invalidation owner, so they get the same durable path."""
     database = tmp_path / storage.DATABASE_FILENAME
     with storage.Store.open(database) as opened:
-        _publish_for(opened, 6_000.0, 6_300.0)
+        _publish_for(opened, *[float(b) for b in range(6_000, 6_360, 60)])
         opened.append_batch(
             coverage_epochs=[CoverageEpoch("cpu", "host", "epoch-c", 6_000.0, 6_300.0, 1.0, 1)],
         )
-        expected = {(RESOLUTION, 6_000), (RESOLUTION, 6_300)}
-        assert expected <= _pending(opened)
+        expected = {(RESOLUTION, b) for b in (6_000, 6_060, 6_120, 6_180, 6_240)}
+        assert {p for p in _pending(opened) if p[0] == RESOLUTION} == expected
+        assert (RESOLUTION, 6_300) not in _pending(opened), "the exclusive end was marked"
 
     with storage.Store.open(database) as reopened:
         assert expected <= _pending(reopened)
@@ -985,3 +991,243 @@ def test_a_mutation_to_an_unheld_bucket_records_nothing_even_when_other_slots_ar
         "a bucket the ring does not hold was recorded because another slot at its resolution was"
     )
     assert recorded == set()
+
+
+# --- exact interval membership, every resolution -----------------------------------------------
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_a_coverage_interval_marks_every_interior_bucket_and_no_exclusive_end(tmp_path, resolution_seconds):
+    """Endpoint flattening left the interior falsely clean and marked an end it never touched."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    span_buckets = 5
+    start = resolution_seconds * CAPACITIES[resolution_seconds] * 4
+    end = start + span_buckets * resolution_seconds
+    published = [start + index * resolution_seconds for index in range(span_buckets + 2)]
+
+    with storage.Store.open(database) as opened:
+        opened.initialize_ring_storage()
+        opened.publish_ring_buckets(
+            buckets=[
+                storage.RingBucketWrite(
+                    resolution_seconds=resolution_seconds, bucket_start=bucket,
+                    bucket_json=_bucket(0).bucket_json, complete=True,
+                )
+                for bucket in published
+            ],
+            source_generation=0, published_at=1.0,
+        )
+        opened.append_batch(coverage_epochs=[
+            CoverageEpoch("cpu", "host", "epoch-x", float(start), float(end), 1.0, 1),
+        ])
+        recorded = {b for r, b in _pending(opened) if r == resolution_seconds}
+
+    expected = {start + index * resolution_seconds for index in range(span_buckets)}
+    assert recorded == expected, f"interval [{start},{end}) -> {sorted(recorded)}"
+    assert end not in recorded, "the exclusive end bucket was marked"
+
+
+def test_an_open_coverage_epoch_marks_from_its_start_without_enumerating(tmp_path):
+    """`ended_at is None` runs to the present; it must not collapse to a single start bucket."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    start = 6_000
+    with storage.Store.open(database) as opened:
+        opened.initialize_ring_storage()
+        opened.publish_ring_buckets(
+            buckets=[_bucket(b) for b in range(5_940, 6_300, RESOLUTION)],
+            source_generation=0, published_at=1.0,
+        )
+        opened.append_batch(coverage_epochs=[
+            CoverageEpoch("cpu", "host", "epoch-open", float(start), None, 1.0, 1),
+        ])
+        recorded = {b for r, b in _pending(opened) if r == RESOLUTION}
+
+    assert recorded == {6_000, 6_060, 6_120, 6_180, 6_240}
+    assert 5_940 not in recorded, "a bucket entirely before the open epoch was marked"
+
+
+# --- production-epoch exclusive end -------------------------------------------------------------
+
+@pytest.mark.parametrize("cutoff", (60_000, 1_700_000_000, 1_787_200_000))
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_the_exclusive_cutoff_bucket_is_excluded_at_every_scale(cutoff, resolution_seconds):
+    """`end - 1e-9` is below the float ULP at production epochs and did not move the value at all.
+
+    Measured before: at cutoff 1_700_000_000 with r=1 the excluded cutoff bucket was included.
+    """
+    aligned = cutoff - (cutoff % resolution_seconds)
+    buckets = {
+        b for r, b in storage.invalidated_buckets((0.0, float(aligned)), end_exclusive=True)
+        if r == resolution_seconds
+    }
+
+    assert aligned not in buckets, f"aligned cutoff {aligned} at r={resolution_seconds} was included"
+    assert max(buckets) == aligned - resolution_seconds
+
+    inside = aligned + resolution_seconds // 2 if resolution_seconds > 1 else aligned + 0.5
+    inside_buckets = {
+        b for r, b in storage.invalidated_buckets((0.0, float(inside)), end_exclusive=True)
+        if r == resolution_seconds
+    }
+    assert aligned in inside_buckets, "a partially pruned bucket was excluded"
+
+
+# --- overwrite cleanup without a prune ----------------------------------------------------------
+
+def test_a_full_lap_overwrite_retires_the_displaced_row_without_any_prune(store):
+    """Cleanup ran only inside prune, so a no-op prune left the row forever."""
+    slot_count = CAPACITIES[RESOLUTION]
+    original = RESOLUTION * slot_count * 4
+    _publish_for(store, float(original))
+    store.append_batch(observations=[_observation("c", float(original) + 0.5)])
+    assert (RESOLUTION, original) in _pending(store)
+
+    store.publish_ring_buckets(
+        buckets=[_bucket(original + slot_count * RESOLUTION)],
+        source_generation=99, published_at=200.0,
+    )
+
+    assert (RESOLUTION, original) not in _pending(store), (
+        "the displaced bucket's row survived the overwrite that destroyed its slot"
+    )
+
+
+def test_an_overwrite_does_not_erase_a_contradiction_for_the_newly_published_bucket(store):
+    """Only the DISPLACED bucket is cleaned; the new bucket's own row is generation-gated."""
+    slot_count = CAPACITIES[RESOLUTION]
+    original = RESOLUTION * slot_count * 4
+    lapped = original + slot_count * RESOLUTION
+    _publish_for(store, float(original))
+    store.publish_ring_buckets(
+        buckets=[_bucket(lapped)], source_generation=1, published_at=10.0,
+    )
+    store.append_batch(observations=[_observation("new", float(lapped) + 0.5)])
+    store.append_batch(observations=[_observation("newer", float(lapped) + 1.5)])
+    contradiction = max(_pending_generations(store))
+    assert (RESOLUTION, lapped) in _pending(store)
+    assert contradiction > 1, "the contradiction must be NEWER than the republication generation"
+
+    # Rewriting the SAME bucket from an OLDER snapshot must not silently drop a contradiction it
+    # cannot answer. A republication AT the contradicting generation legitimately does retire it --
+    # that is the accepted generation-gated behaviour, not this case.
+    store.publish_ring_buckets(
+        buckets=[_bucket(lapped, value=5)], source_generation=1, published_at=11.0,
+    )
+
+    assert (RESOLUTION, lapped) in _pending(store), (
+        "rewriting a bucket erased its own unanswered contradiction"
+    )
+
+
+# --- the REAL rebuild/republication caller ------------------------------------------------------
+# `publish_ring_buckets` with a synthetic bucket is the storage primitive, not the caller
+# production uses. These drive `_build_once` + `_flush_ring_if_due`, the path statsd actually runs.
+
+
+def _real_service(tmp_path, monotonic_now, wall_now):
+    return service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+        monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0], randomizer=lambda: 0.0,
+    )
+
+
+def test_the_real_rebuild_caller_publishes_and_retires_across_close_and_reopen(tmp_path):
+    """Build and publish through the production owner, from stored facts, across real reopens."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        published = service._flush_ring_if_due()
+        assert published is not None, "the real caller published nothing to contradict"
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        assert slot is not None
+        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert (resolution_seconds, bucket_start) in _pending(opened)
+
+    with storage.Store.open(database) as reopened:
+        # Survived a real close: still pending, still hidden from the served window.
+        assert (resolution_seconds, bucket_start) in _pending(reopened)
+        service.writer = reopened
+        service._ring_publications = 0
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        wall_now[0] += service_module.RING_FLUSH_SECONDS
+        service._build_once(reopened, True, frozenset())
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        republished = service._flush_ring_if_due()
+        assert republished is not None, "the real caller did not republish"
+        assert (resolution_seconds, bucket_start) not in _pending(reopened), (
+            "the real rebuild published but the contradiction was not retired"
+        )
+
+    with storage.Store.open(database) as final:
+        assert (resolution_seconds, bucket_start) not in _pending(final)
+
+
+# --- real transaction overlap, two handles, barriers --------------------------------------------
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_two_handles_overlapping_a_mutation_and_a_publication(tmp_path, resolution_seconds):
+    """TWO open handles with an explicit barrier, not one sequential handle.
+
+    Handle A opens a write transaction and appends the contradicting fact. Handle B's publication,
+    built from the pre-mutation generation, lands only AFTER A commits. The immediate state at that
+    first crossed boundary is asserted, then convergence after both close and a reopen.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    slot_count = CAPACITIES[resolution_seconds]
+    bucket_start = resolution_seconds * slot_count * 4
+    payload = storage.RingBucketWrite(
+        resolution_seconds=resolution_seconds, bucket_start=bucket_start,
+        bucket_json=_bucket(0).bucket_json, complete=True,
+    )
+
+    with storage.Store.open(database) as writer:
+        writer.initialize_ring_storage()
+        writer.publish_ring_buckets(buckets=[payload], source_generation=0, published_at=1.0)
+        snapshot_generation = 0
+
+        # BARRIER 1: handle B is opened while A still holds the pre-mutation view.
+        with storage.Store.open_reader(database) as observer:
+            before = {
+                (int(r[0]), int(r[1])) for r in observer._connection().execute(
+                    "SELECT resolution_seconds, bucket_start FROM ring_invalidations "
+                    "WHERE applied_at IS NULL"
+                )
+            }
+            assert (resolution_seconds, bucket_start) not in before
+
+        # A commits the contradicting mutation.
+        writer.append_batch(observations=[_observation("mid", float(bucket_start) + 0.5)])
+        contradicting = max(_pending_generations(writer))
+        assert contradicting > snapshot_generation
+
+        # BARRIER 2: a second handle observes the committed contradiction before B publishes.
+        with storage.Store.open_reader(database) as observer:
+            crossed = {
+                (int(r[0]), int(r[1])) for r in observer._connection().execute(
+                    "SELECT resolution_seconds, bucket_start FROM ring_invalidations "
+                    "WHERE applied_at IS NULL"
+                )
+            }
+        assert (resolution_seconds, bucket_start) in crossed, (
+            "the second handle could not observe the committed contradiction"
+        )
+
+        # B's stale publication lands last, with a far later clock.
+        writer.publish_ring_buckets(
+            buckets=[payload], source_generation=snapshot_generation, published_at=9_999.0,
+        )
+        assert (resolution_seconds, bucket_start) in _pending(writer)
+
+    with storage.Store.open(database) as reopened:
+        assert (resolution_seconds, bucket_start) in _pending(reopened), (
+            "pending state did not converge across reopen"
+        )

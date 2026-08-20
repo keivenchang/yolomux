@@ -1465,7 +1465,16 @@ def invalidated_buckets(
         if end_exclusive:
             if end_instant <= 0.0:
                 continue
-            last = int((end_instant - 1e-9) // resolution_seconds) * resolution_seconds
+            # EXACT half-open math, never epsilon arithmetic. `end - 1e-9` is below the float ULP
+            # at production epoch values: measured at cutoff 1_700_000_000 with r=1 it did not move
+            # the value at all, so the excluded cutoff bucket was included. Deciding on the
+            # remainder is exact at every magnitude.
+            quotient = math.floor(end_instant / resolution_seconds)
+            last = int(quotient) * resolution_seconds
+            if last == end_instant:
+                last -= resolution_seconds
+            if last < 0:
+                continue
         else:
             last = int(end_instant // resolution_seconds) * resolution_seconds
         horizon_start = last - (slot_count - 1) * resolution_seconds
@@ -1499,6 +1508,46 @@ def invalidated_buckets_for_instants(instants: Iterable[float]) -> tuple[tuple[i
         for resolution_seconds in stats_resolution.RING_CAPACITIES:
             pairs.add((resolution_seconds, int(moment // resolution_seconds) * resolution_seconds))
     return tuple(sorted(pairs))
+
+
+def _slots_intersecting_intervals(
+    connection: sqlite3.Connection, intervals: Iterable[tuple[float, float | None]],
+) -> set[tuple[int, int]]:
+    """Every currently published bucket whose half-open span intersects a changed half-open span.
+
+    THE one interval-to-slot owner, for coverage epochs and unavailable spans alike. Flattening an
+    interval to its two endpoints was wrong in both directions at once: a coverage change over
+    `[6000, 6300)` recorded only `{6000, 6300}`, so the interior buckets 6060/6120/6180/6240 stayed
+    FALSELY CLEAN while the exclusive end 6300 -- which the change never touched -- was marked.
+
+    Derived FROM the persisted slots rather than by enumerating the interval. That is what makes an
+    OPEN coverage epoch (`ended_at is None`, so `[started_at, +inf)`) expressible at all without an
+    epoch-sized walk, and it keeps the result inherently actionable and bounded by the ring's fixed
+    slot count.
+
+    Both spans are half-open: a bucket `[b, b + r)` intersects `[start, end)` exactly when
+    `b < end and b + r > start`. That single comparison is what excludes the end bucket and
+    includes every interior one.
+    """
+    spans = [
+        (max(0.0, float(start)), None if end is None else float(end))
+        for start, end in intervals
+    ]
+    if not spans:
+        return set()
+    matched: set[tuple[int, int]] = set()
+    for row in connection.execute(
+        "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+        "WHERE bucket_json IS NOT NULL"
+    ):
+        resolution_seconds = int(row[0])
+        bucket_start = int(row[1])
+        bucket_end = bucket_start + resolution_seconds
+        for span_start, span_end in spans:
+            if bucket_end > span_start and (span_end is None or bucket_start < span_end):
+                matched.add((resolution_seconds, bucket_start))
+                break
+    return matched
 
 
 def _populated_ring_slots(
@@ -1567,6 +1616,7 @@ def _record_invalidations(
     now: float,
     end_exclusive: bool = False,
     instants: Iterable[float] | None = None,
+    slots: set[tuple[int, int]] | None = None,
 ) -> int:
     """Record stale buckets INSIDE the caller's transaction, never after it.
 
@@ -1577,17 +1627,23 @@ def _record_invalidations(
     """
     if not _aggregate_tables(connection):
         return 0
-    pairs = (
-        invalidated_buckets_for_instants(instants)
-        if instants is not None
-        else invalidated_buckets(observed_range, end_exclusive=end_exclusive)
-    )
+    if slots is not None:
+        # Already derived FROM persisted slots by the interval owner, so it is actionable by
+        # construction and must not be re-intersected against a bucket enumeration.
+        pairs = tuple(sorted(slots))
+    else:
+        pairs = (
+            invalidated_buckets_for_instants(instants)
+            if instants is not None
+            else invalidated_buckets(observed_range, end_exclusive=end_exclusive)
+        )
     # ACTIONABILITY, not just cardinality. The horizon clamp bounded each call to at most 1,248
     # rows but every one of them was still recorded whether or not a slot existed to rebuild, so a
     # cold store accumulated 1,252 permanently pending rows PER PRUNE -- measured 3,756 after three
     # cycles with zero populated slots and no publication at all.
-    actionable = _populated_ring_slots(connection, pairs)
-    pairs = tuple(pair for pair in pairs if pair in actionable)
+    if slots is None:
+        actionable = _populated_ring_slots(connection, pairs)
+        pairs = tuple(pair for pair in pairs if pair in actionable)
     if not pairs:
         return 0
     connection.executemany(
@@ -2266,6 +2322,20 @@ class Store:
                 raise StorageValidationError("published_at cannot move backward")
             ring_generation = int(previous[0]) + 1
             newest_by_resolution: dict[int, int] = {}
+            # A slot about to be REWRITTEN may currently hold a different bucket. That older
+            # bucket is displaced by this write and can never be rebuilt from the ring again, so
+            # any pending row naming it is dead the moment the write lands. Cleanup previously ran
+            # only inside prune, so a full-lap overwrite followed by a no-op prune left the row
+            # forever. Reading the occupant BEFORE the update is what makes this exact.
+            displaced: list[tuple[int, int]] = []
+            for resolution_seconds, slot_index, bucket_start, _json, _complete in prepared:
+                occupant = connection.execute(
+                    "SELECT bucket_start FROM aggregate_ring_slots "
+                    "WHERE resolution_seconds = ? AND slot_index = ? AND bucket_json IS NOT NULL",
+                    (resolution_seconds, slot_index),
+                ).fetchone()
+                if occupant is not None and occupant[0] is not None and int(occupant[0]) != bucket_start:
+                    displaced.append((resolution_seconds, int(occupant[0])))
             for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared:
                 changed = connection.execute(
                     "UPDATE aggregate_ring_slots SET bucket_start = ?, bucket_json = ?, "
@@ -2282,6 +2352,15 @@ class Store:
                 newest_by_resolution[resolution_seconds] = max(
                     bucket_start,
                     newest_by_resolution.get(resolution_seconds, bucket_start),
+                )
+            # Only the DISPLACED buckets, and only their PENDING rows. The newly written bucket is
+            # deliberately untouched here: its own contradiction is settled by the generation-gated
+            # retirement below, not by having been overwritten.
+            if displaced:
+                connection.executemany(
+                    "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+                    "AND applied_at IS NULL",
+                    displaced,
                 )
             # Retire each invalidation in the SAME transaction as the republication that answers
             # it, and only for the exact buckets actually rewritten. This is the whole
@@ -2730,20 +2809,33 @@ class Store:
                 # invalidates slightly more than it strictly must. That direction is deliberate:
                 # over-invalidating costs one rebuild from authoritative facts, while
                 # under-invalidating leaves a contradicted bucket being served as current.
+                # POINT facts contribute instants; INTERVAL facts contribute spans. Coverage
+                # epochs and unavailable spans are intervals, and flattening them to their two
+                # endpoints left every interior bucket falsely clean while marking an exclusive end
+                # the change never touched.
                 mutated: list[float] = []
                 for table, rows in (
                     ("observations", prepared_observations),
                     ("usage_atoms", prepared_usage),
+                ):
+                    index = _COLUMNS[table].index("observed_at")
+                    mutated.extend(float(row[index]) for row in rows if row[index] is not None)
+                changed_intervals: list[tuple[float, float | None]] = []
+                for table, rows in (
                     ("coverage_epochs", prepared_coverage),
                     ("unavailable_spans", prepared_unavailable),
                 ):
-                    for column in ("observed_at", "started_at", "ended_at"):
-                        if column not in _COLUMNS[table]:
+                    start_index = _COLUMNS[table].index("started_at")
+                    end_index = _COLUMNS[table].index("ended_at")
+                    for row in rows:
+                        if row[start_index] is None:
                             continue
-                        index = _COLUMNS[table].index(column)
-                        mutated.extend(
-                            float(row[index]) for row in rows if row[index] is not None
-                        )
+                        # `ended_at is None` is an OPEN epoch running to the present, carried as an
+                        # unbounded interval rather than collapsed to its start.
+                        changed_intervals.append((
+                            float(row[start_index]),
+                            None if row[end_index] is None else float(row[end_index]),
+                        ))
                 # From the deletion owner, which is the only code that knows which tombstones
                 # actually matched a stored atom. Not conditional on `mutated` being empty either:
                 # a batch that both appends and tombstones contradicts BOTH ranges.
@@ -2763,6 +2855,21 @@ class Store:
                         now=float(retention_cutoff),
                     )
                     _retire_unactionable_invalidations(connection)
+                if changed_intervals:
+                    # Through the one interval-to-slot owner: exactly the published buckets whose
+                    # half-open span intersects a changed half-open span, interior included and
+                    # exclusive end excluded.
+                    _record_invalidations(
+                        connection,
+                        (0.0, 0.0),
+                        reason="fact_mutation",
+                        source_generation=generation,
+                        now=max(
+                            (span[1] if span[1] is not None else span[0])
+                            for span in changed_intervals
+                        ),
+                        slots=_slots_intersecting_intervals(connection, changed_intervals),
+                    )
                 if mutated:
                     # `created_at` is the observed instant that caused the staleness, not a wall
                     # clock read: this module deliberately takes every timestamp as data so a store
