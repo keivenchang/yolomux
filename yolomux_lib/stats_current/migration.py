@@ -260,6 +260,17 @@ class _RetirementPlan:
         return self.state_dir / RETIREMENT_JOURNAL_FILENAME
 
 
+def _v7_migration_source(state_dir: Path) -> Path | None:
+    """The released v7 store to migrate, or None when there is nothing to migrate.
+
+    Its own function so the startup dispatch has one seam a test can bypass. A dispatch assertion
+    with no bypass control proves only that the code agrees with itself: deleting the v7 arm from
+    `migrate()` would leave it building an empty v8 and the suite still green.
+    """
+    candidate = state_dir / V7_DATABASE_FILENAME
+    return candidate if candidate.is_file() else None
+
+
 def migrate(
     inputs: MigrationInputs,
     active_database: Path | None = None,
@@ -312,6 +323,12 @@ def migrate(
             ))
         else:
             return _retire_sources_beside_existing_current(state_dir, legacy, target, report)
+    # Newest released format first. A v7 store is the CURRENT history of a running build; a v5 file
+    # beside it is a leftover from an earlier one. Checking v5 first would let a stale artifact
+    # shadow live history, and adding v7 after v5 would have exactly that effect.
+    v7_source = _v7_migration_source(state_dir)
+    if v7_source is not None:
+        return migrate_current_v7_database(state_dir, target, v7_source, now=finished_at)
     v5_source = state_dir / V5_DATABASE_FILENAME
     if v5_source.is_file():
         return _migrate_current_v5_database(state_dir, target, v5_source)

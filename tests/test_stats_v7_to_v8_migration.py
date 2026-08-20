@@ -523,3 +523,73 @@ def test_no_migration_outcome_disturbs_a_pre_existing_v7_artifact(tmp_path, v7_s
     assert set(after) == set(before)
     for name, expected in before.items():
         assert after[name] == expected, f"{name} changed during a {outcome} migration"
+
+
+# --- real startup dispatch ---------------------------------------------------------------------
+# Adding a migration function proves nothing if nothing calls it. `migrate()` is the one entry the
+# service startup uses, and it dispatched v5 while ignoring v7 entirely -- so a v8 build starting
+# beside a valid v7 store would have activated an EMPTY v8 and reported success.
+
+
+def test_startup_dispatch_migrates_a_released_v7_instead_of_activating_an_empty_v8(tmp_path, v7_source):
+    """The real entry point, not the migration function directly."""
+    target = tmp_path / storage.DATABASE_FILENAME
+
+    report = migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+
+    assert target.exists()
+    assert _counts(target) == _counts(v7_source)
+    assert report.observations == OBSERVATION_COUNT, (
+        "startup activated a store that does not contain the released v7 history"
+    )
+
+
+def test_a_bypassed_dispatcher_is_caught_rather_than_reported_green(tmp_path, v7_source, monkeypatch):
+    """Failing control: if the v7 arm is removed, the dispatch test above must fail.
+
+    Without this row, deleting the dispatch would leave `migrate()` happily building an empty v8
+    and the suite would still be green -- which is exactly the state this slice found.
+    """
+    monkeypatch.setattr(migration_module, "_v7_migration_source", lambda _state_dir: None)
+    target = tmp_path / storage.DATABASE_FILENAME
+
+    report = migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+
+    assert report.observations == 0, (
+        "the bypass control did not actually bypass; the dispatch assertion above proves nothing"
+    )
+    assert _counts(target)["observations"] == 0
+
+
+def test_a_released_v7_takes_precedence_over_an_older_v5_source(tmp_path, v7_source):
+    """Newest released format wins. A v5 file left behind must not shadow the live v7 history."""
+    (tmp_path / migration_module.V5_DATABASE_FILENAME).write_bytes(b"stale v5 leftovers")
+    target = tmp_path / storage.DATABASE_FILENAME
+
+    report = migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+
+    assert report.observations == OBSERVATION_COUNT
+    assert _counts(target) == _counts(v7_source)
+
+
+def test_repeated_startup_leaves_one_marker_and_does_not_rewrite_the_target(tmp_path, v7_source):
+    """Startup runs on every boot, so it must be a no-op once the v8 store is active."""
+    target = tmp_path / storage.DATABASE_FILENAME
+    migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+    first_bytes = target.read_bytes()
+    first_mtime = target.stat().st_mtime_ns
+
+    migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+    migration_module.migrate(migration_module.MigrationInputs(state_dir=tmp_path), target)
+
+    assert target.read_bytes() == first_bytes
+    assert target.stat().st_mtime_ns == first_mtime
+    connection = sqlite3.connect(target)
+    try:
+        markers = connection.execute(
+            "SELECT count(*) FROM migration_reconciliation WHERE migration_id = ?",
+            (migration_module.MIGRATION_ID,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert markers == 1, "repeated startup must not accumulate reconciliation rows"
