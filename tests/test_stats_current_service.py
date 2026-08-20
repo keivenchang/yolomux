@@ -1242,6 +1242,75 @@ def test_snapshot_returns_pending_or_cached_preencoded_protocol_wire(tmp_path):
     assert same_binary == newer_binary == b""
 
 
+def test_oversized_snapshot_is_served_as_generation_pinned_size_derived_chunks(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    generation = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), ()),
+        source_generation=1,
+        cache_generation=41,
+        generated_at=100_000,
+        observed_until=100_000,
+    )
+    entries = service._encode_generation(generation)
+    assert service._publish(generation, entries) is True
+    full_body = entries[(7200, 300, None)].binary
+    full = protocol.validate_snapshot(json.loads(full_body))
+    monkeypatch.setattr(service_module, "STATS_SNAPSHOT_INLINE_MAX_BYTES", 1)
+    monkeypatch.setattr(
+        service_module,
+        "STATS_SNAPSHOT_CHUNK_TARGET_BYTES",
+        math.ceil(len(full_body) / 4),
+    )
+    request = {
+        "range_seconds": "7200",
+        "resolution": "300",
+        "client_id": "a" * 64,
+    }
+
+    first_metadata, first_body = service._snapshot(request)
+    first = protocol.validate_snapshot_chunk(json.loads(first_body))
+    assert first_metadata["chunk_index"] == 0
+    assert first_metadata["chunk_count"] == 4
+    assert first_metadata["chunk_generation"] == first["cache_generation"]
+    assert len(first_body) <= service_module.LOCAL_RPC_MAX_BINARY_BYTES
+
+    advanced = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 2, 0), (), (), (), (), ()),
+        source_generation=2,
+        cache_generation=42,
+        generated_at=100_001,
+        observed_until=100_001,
+    )
+    assert service._publish(advanced, service._encode_generation(advanced)) is True
+
+    chunks = [first]
+    for chunk_index in range(1, first_metadata["chunk_count"]):
+        chunk_metadata, chunk_body = service._snapshot({
+            **request,
+            "chunk_index": str(chunk_index),
+            "chunk_generation": str(first["cache_generation"]),
+        })
+        chunk = protocol.validate_snapshot_chunk(json.loads(chunk_body))
+        assert chunk_metadata["chunk_index"] == chunk_index
+        assert chunk_metadata["cache_generation"] == first["cache_generation"]
+        assert len(chunk_body) <= service_module.LOCAL_RPC_MAX_BINARY_BYTES
+        chunks.append(chunk)
+    assert [bucket for chunk in chunks for bucket in chunk["buckets"]] == full["buckets"]
+    assert all(chunk["cost_report"] == full["cost_report"] for chunk in chunks)
+
+    pending, pending_body = service._snapshot({
+        **request,
+        "chunk_index": "1",
+        "chunk_generation": str(first["cache_generation"] - 1),
+    })
+    assert pending["status"] == "pending"
+    assert "generation advanced" in pending["reason"]
+    assert pending_body == b""
+
+
 def test_incremental_encode_slices_only_cells_published_at_this_cadence(tmp_path, monkeypatch):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,

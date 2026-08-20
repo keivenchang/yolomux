@@ -935,6 +935,69 @@ def test_persisted_ring_snapshot_advances_at_warm_materializer_cadence_before_ri
     assert service._ring_publications == 1
 
 
+def test_live_cursor_survives_contradicted_ring_handoff_beyond_delta_retention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        database,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    with storage.Store.open(database) as store:
+        service.writer = store
+        service._build_once(store, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+
+        _metadata, binary = service.handle_with_binary(_snapshot_request(
+            requested_resolution=resolution.AUTO,
+            client_id="continuous-sse-cursor",
+        ))
+        snapshot = protocol.validate_snapshot(json.loads(binary))
+        cursor = snapshot["cache_generation"]
+        revision_number = 0
+
+        for delivery in range(1, 12):
+            wall_now[0] += 1.0
+            dirty = frozenset({materializer.DirtyCell(1, math.floor(wall_now[0]))})
+            service._build_once(store, False, dirty)
+            assert service._cache is not None
+
+            if delivery == 6:
+                monkeypatch.setattr(
+                    service,
+                    "_read_ring_snapshot",
+                    lambda *_args, **_kwargs: service_module.RingSnapshotRead(
+                        None, "ring_contradicted",
+                    ),
+                )
+                service._publish_ring_views(
+                    store,
+                    service._cache.generation,
+                    frozenset({1}),
+                )
+                monkeypatch.undo()
+
+            delta_metadata, delta_binary = service.handle_with_binary(_delta_request(
+                client_id="continuous-sse-cursor",
+                after_cache_generation=cursor,
+                after_revision=revision_number,
+            ))
+            delta = protocol.validate_delta(json.loads(delta_binary))
+            assert delta_metadata["base_cache_generation"] == cursor
+            cursor = delta["cache_generation"]
+            revision_number = delta["revision"]
+
+    assert revision_number == 11
+    assert service._delta_repairs == 0
+
+
 def test_public_delta_keeps_the_exact_served_base_across_same_cursor_ring_republication(
     tmp_path: Path,
 ) -> None:

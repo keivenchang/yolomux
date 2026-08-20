@@ -242,8 +242,17 @@ def test_snapshot_revalidates_typed_or_query_requests_before_rpc(tmp_path, monke
 
     monkeypatch.setattr(client_module, "local_service_request", rpc)
     client = client_module.StatsCurrentClient(tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME)
-    valid = protocol.parse_snapshot_request({"range_seconds": "900", "resolution": "10", "client_id": "browser-a"})
+    valid = protocol.parse_snapshot_request({
+        "range_seconds": "7200",
+        "resolution": "300",
+        "client_id": "browser-a",
+        "chunk_index": "1",
+        "chunk_generation": "9",
+    })
     assert client.snapshot(valid)[1] == b"snapshot"
+    payload = calls[0][0][1].payload
+    assert payload["chunk_index"] == 1
+    assert payload["chunk_generation"] == 9
     with pytest.raises(protocol.UnsupportedRequest):
         client.snapshot({"range_seconds": "900", "resolution": "1", "client_id": "browser-a"})
     with pytest.raises(protocol.UnsupportedRequest):

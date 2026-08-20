@@ -1123,13 +1123,29 @@ test('System renders bounded recurring-work diagnostics without client identity 
 });
 
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {
-  assert.match(currentSource, /exactUrl\('\/api\/stats-snapshot'/);
+  assert.match(currentSource, /exactUrl\('\/api\/stats-stream'/);
+  assert.doesNotMatch(currentSource, /exactUrl\('\/api\/stats-snapshot'/);
   assert.doesNotMatch(source, /\/api\/stats-snapshot/);
   const clientOwner = sourceFunction('ensureJsDebugCurrentStatsClient', 'syncJsDebugCurrentStatsClient');
-  assert.match(clientOwner, /createBrowserClient\(\{\s*fetch: apiFetch,/, 'YO!stats routes snapshot reads through the browser-wide API capacity owner');
+  assert.match(clientOwner, /createBrowserClient\(\{\s*fetch: apiFetch,/, 'YO!stats routes capabilities and recovery through the browser-wide API owner');
   assert.match(source, /function applyJsDebugCurrentSnapshot\(/);
   assert.match(source, /debugGraphApplyServerRecord\(jsDebugCurrentBucketRecord/);
   assert.doesNotMatch(source, /fetchJsDebugStatsJson\(jsDebugStatsSampleQuery/);
+});
+
+test('every range selection defaults to AUTO', () => {
+  const functionText = sourceFunction('debugGraphDefaultResolutionForRange', 'debugGraphAvailableResolutionChoices');
+  const context = {result: null};
+  vm.runInNewContext(`
+    function normalizedJsDebugGraphRange(value) { return Number(value); }
+    function debugGraphExactResolutionChoices(rangeSeconds) {
+      return ({300: [1, 10], 900: [10, 60], 3600: [60, 300], 86400: [300]})[rangeSeconds] || [];
+    }
+    ${functionText}
+    result = [300, 900, 3600, 86400].map(debugGraphDefaultResolutionForRange);
+  `, context);
+  assert.deepEqual([...context.result], [0, 0, 0, 0]);
+  assert.match(sourceFunction('setDebugGraphRange', 'setDebugGraphResolutionOverride'), /graphResolutionOverrideSeconds = debugGraphDefaultResolutionForRange/);
 });
 
 test('cost backfill labels distinguish unknown, pending, and complete cursor state', () => {
@@ -2186,6 +2202,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
 test('the established renderer consumes the protocol-v2 exact stream', () => {
   assert.match(source, /globalThis\.YOLOmuxStatsCurrent\.createBrowserClient/);
   assert.match(source, /onGeneration\(snapshot\)[\s\S]*paintJsDebugCurrentStatsGeneration/);
+  assert.doesNotMatch(source, /onSnapshotProgress|paintJsDebugCurrentStatsProgress/);
   assert.match(source, /client\.select\(selection\.rangeSeconds, selection\.resolution\)/);
   assert.match(source, /onState\(state, error\)[\s\S]*requestedRangeSeconds: liveSelection\.rangeSeconds[\s\S]*error\?\.reason/);
   assert.match(source, /initialHistoryOverlayOwnsLoading \|\| jsDebugHistoryReadiness\.phase === 'error'/);
@@ -2194,6 +2211,111 @@ test('the established renderer consumes the protocol-v2 exact stream', () => {
   const initializeSource = sourceFunction('initializeJsDebugStatsBeforeStreams', 'jsDebugTextForClipboard');
   assert.match(initializeSource, /syncJsDebugCurrentStatsClient\(\)/);
   assert.doesNotMatch(initializeSource, /await jsDebugCurrentStatsClientState\.startPromise/, 'hidden stats startup cannot delay normal page boot');
+});
+
+test('a complete snapshot replaces graph data once and resolves readiness', () => {
+  const functionText = sourceFunction('updateJsDebugCurrentSnapshotState', 'scheduleJsDebugStatsHistoryFlush');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const applied = [];
+    const resolved = [];
+    let jsDebugStatsServerSequence = 0;
+    const jsDebugHistoryReadiness = {phase: 'loading-older', reason: 'range', overlayVisible: true};
+    const jsDebugStatsPollState = {firstSampleReceived: true};
+    function clearJsDebugGraphData() { applied.length = 0; }
+    function jsDebugCurrentBucketRecord(bucket, includeRangeCost) { return {bucket, includeRangeCost}; }
+    function debugGraphApplyServerRecord(record) { applied.push(record); }
+    function jsDebugCurrentCoverageIntervals(snapshot) {
+      return snapshot.buckets.map(bucket => ({startSeconds: bucket.start, endSeconds: bucket.start + bucket.duration}));
+    }
+    function debugGraphApplyUsageAtomBackfill() {}
+    function jsDebugCurrentSnapshotAgentWindowRevision() { return 0; }
+    function resolveDebugGraphResolutionChange() { resolved.push(true); }
+    function armJsDebugStatsPolling() {}
+    function scheduleJsDebugPanelRefresh() {}
+    ${functionText}
+    const snapshot = {
+      window_start: 0, window_end: 7200, resolution_seconds: 60, cache_generation: 9,
+      buckets: [{start: 0, duration: 60}, {start: 3600, duration: 60}],
+      no_data: [], cost_report: {},
+    };
+    applyJsDebugCurrentSnapshot(snapshot);
+    result = {
+      phase: jsDebugHistoryReadiness.phase,
+      overlayVisible: jsDebugHistoryReadiness.overlayVisible,
+      intervals: jsDebugHistoryReadiness.requestCoverageIntervals,
+      rangeCostFlags: applied.map(record => record.includeRangeCost),
+      resolved: resolved.length,
+    };
+  `, context);
+  assert.equal(context.result.phase, 'ready');
+  assert.equal(context.result.overlayVisible, false);
+  assert.deepEqual([...context.result.intervals].map(interval => [interval.startSeconds, interval.endSeconds]), [[0, 7200]]);
+  assert.deepEqual([...context.result.rangeCostFlags], [false, true]);
+  assert.equal(context.result.resolved, 1);
+});
+
+test('eleven live deltas mutate only named graph buckets without clearing retained history', () => {
+  const deleteSource = sourceFunction('debugGraphDeleteServerRecord', 'debugGraphCostOptionalInteger');
+  const applySource = sourceFunction('updateJsDebugCurrentSnapshotState', 'scheduleJsDebugStatsHistoryFlush');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const jsDebugGraphRawBucketMs = 1000;
+    const jsDebugGraphBuckets = new Map();
+    let clearCalls = 0;
+    const applied = [];
+    let jsDebugStatsServerSequence = 0;
+    const jsDebugHistoryReadiness = {};
+    const jsDebugStatsPollState = {firstSampleReceived: true, agentWindowSnapshotRevision: 0};
+    function clearJsDebugGraphData() { clearCalls += 1; jsDebugGraphBuckets.clear(); }
+    function jsDebugCurrentBucketRecord(bucket) { return bucket; }
+    function debugGraphApplyServerRecord(record) {
+      applied.push(record.start);
+      jsDebugGraphBuckets.set(String(record.start * 1000) + ':' + String(record.duration * 1000), record);
+    }
+    function jsDebugCurrentCoverageIntervals() { return []; }
+    function debugGraphApplyUsageAtomBackfill() {}
+    function jsDebugCurrentSnapshotAgentWindowRevision() { return 0; }
+    function resolveDebugGraphResolutionChange() {}
+    function armJsDebugStatsPolling() {}
+    function scheduleJsDebugPanelRefresh() {}
+    ${deleteSource}
+    ${applySource}
+
+    let buckets = Array.from({length: 21}, (_unused, start) => ({start, duration: 1, open: start === 20}));
+    let snapshot = {
+      window_start: 0, window_end: 21, resolution_seconds: 1, cache_generation: 1,
+      buckets, no_data: [], cost_report: {}, usage_atom_backfill: {},
+    };
+    applyJsDebugCurrentSnapshot(snapshot);
+    const retained = jsDebugGraphBuckets.get('15000:1000');
+    const initialApplyCount = applied.length;
+    for (let second = 1; second <= 11; second += 1) {
+      const previousTail = buckets.at(-1);
+      const closedTail = {...previousTail, open: false};
+      const newTail = {start: 20 + second, duration: 1, open: true};
+      buckets = [...buckets.slice(1, -1), closedTail, newTail];
+      snapshot = {...snapshot, window_start: second, window_end: 21 + second, cache_generation: second + 1, buckets};
+      applyJsDebugCurrentDelta(snapshot, {
+        buckets: [closedTail, newTail],
+        tombstones: [{kind: 'bucket', start: second - 1, duration: 1}],
+      });
+    }
+    result = {
+      clearCalls,
+      initialApplyCount,
+      deltaApplies: applied.slice(initialApplyCount),
+      retainedIdentity: jsDebugGraphBuckets.get('15000:1000') === retained,
+      keys: [...jsDebugGraphBuckets.keys()],
+    };
+  `, context);
+  assert.equal(context.result.clearCalls, 1, 'only the initial snapshot clears graph storage');
+  assert.equal(context.result.initialApplyCount, 21);
+  assert.equal(context.result.deltaApplies.length, 22, 'each delta applies its two changed records only');
+  assert.equal(context.result.retainedIdentity, true, 'unchanged graph records remain in the established Map');
+  assert.equal(context.result.keys.length, 21, 'tombstones and replacements keep the moving window bounded');
+  assert.equal(context.result.keys.includes('0:1000'), false);
+  assert.equal(context.result.keys.includes('31000:1000'), true);
 });
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {

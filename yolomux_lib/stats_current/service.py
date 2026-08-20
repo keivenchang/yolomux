@@ -24,7 +24,7 @@ from types import MappingProxyType
 
 from yolomux_lib import common
 from yolomux_lib.control import send_yolomux_control_request
-from yolomux_lib.local_services.rpc import safe_socket_path
+from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES, safe_socket_path
 from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yolomux_lib.local_services.runtime import acquire_client_lease, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import run_local_rpc_service
@@ -104,6 +104,10 @@ MAX_BROWSER_QUEUE_EXEMPLARS = 8
 MAX_BROWSER_QUEUE_DIMENSIONS = 16
 BROWSER_QUEUE_HISTOGRAM_BOUNDS_MS = (25, 100, 250, 1_000, 3_000, 10_000)
 MAX_USAGE_CONFLICTS = 32
+STATS_SNAPSHOT_CHUNK_TARGET_BYTES = min(1024 * 1024, LOCAL_RPC_MAX_BINARY_BYTES)
+STATS_SNAPSHOT_INLINE_MAX_BYTES = STATS_SNAPSHOT_CHUNK_TARGET_BYTES
+SNAPSHOT_CHUNK_BATCH_TTL_SECONDS = 60.0
+MAX_SNAPSHOT_CHUNK_BATCHES = 4
 
 FENCE_FIELDS = frozenset("action protocol_version schema_generation".split())
 OBSERVATION_FIELDS = frozenset("event_id family source_id observed_at epoch_id owner_generation payload".split())
@@ -281,6 +285,15 @@ class DecoratedSnapshotBody:
     base_digest: bytes
     status_signature: tuple[object, ...]
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotChunkBatchRecord:
+    key: CacheKey
+    cache_generation: int
+    chunks: tuple[CacheEntry, ...]
+    created_at: float
+    expires_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1154,7 +1167,7 @@ class StatsCurrentService:
         reader_opener: Callable[..., storage.Store] = storage.Store.open_reader,
         full_builder: Callable[..., materializer.Generation] = materializer.build_generation,
         incremental_builder: Callable[..., materializer.Generation] = materializer.update_generation,
-        encoder: Callable[[protocol.SnapshotWire | protocol.DeltaWire], bytes] = _json_bytes,
+        encoder: Callable[[protocol.SnapshotWire | protocol.SnapshotChunkWire | protocol.DeltaWire], bytes] = _json_bytes,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         randomizer: Callable[[], float] = random.random,
@@ -1304,6 +1317,7 @@ class StatsCurrentService:
         self._usage_atom_backfill: dict[str, object] | None = None
         self._snapshot_body_decoration_lock = threading.Lock()
         self._snapshot_body_decoration_cache: DecoratedSnapshotBody | None = None
+        self._snapshot_chunk_batches: dict[tuple[CacheKey, int], SnapshotChunkBatchRecord] = {}
         self._snapshot_body_decoration_builds = 0
         self._snapshot_body_decoration_hits = 0
         self._migration_state = "pending"
@@ -3107,9 +3121,6 @@ class StatsCurrentService:
 
         expected_cursor = (candidate.source_generation, candidate.cache_generation)
         with self.cache_lock:
-            for key in tuple(self._ring_views):
-                if key[1] in resolutions:
-                    self._ring_views.pop(key, None)
             self._ring_published_cursors.update({
                 resolution_seconds: expected_cursor
                 for resolution_seconds in resolutions
@@ -3117,6 +3128,12 @@ class StatsCurrentService:
             for key, entry in entries.items():
                 if self._entry_cursor(entry) != expected_cursor:
                     continue
+                # A pending invalidation can make one persisted view unavailable
+                # while its exact warm cursor is still authoritative. Replace a
+                # view only after its new persisted wire is readable; clearing all
+                # resolution siblings first strands an established SSE cursor
+                # because the warm owner intentionally did not duplicate its
+                # retained chain in _delta_entries.
                 previous_state = previous_states[key]
                 previous = bases.get(key)
                 if (
@@ -4335,10 +4352,189 @@ class StatsSnapshotProjector:
                     "cache_generation": cache_generation,
                 }, b"", "not_modified")
             body = self._snapshot_body_with_backfill_status(entry.binary)
+            chunk_key: CacheKey = (
+                parsed.range_seconds,
+                parsed.resolution,
+                private_source_id,
+            )
+            retained_batch = StatsSnapshotProjector._retained_snapshot_chunk_batch(
+                self,
+                chunk_key,
+                parsed.chunk_generation,
+                newer_than=parsed.since_generation,
+            )
+            if parsed.chunk_generation is not None and retained_batch is None and parsed.chunk_generation != cache_generation:
+                self._snapshot_pending += 1
+                return finish(
+                    protocol.pending_response(
+                        parsed,
+                        1,
+                        "snapshot generation advanced while chunks were loading",
+                    ),
+                    b"",
+                    "chunk_generation_advanced",
+                )
+            chunk_index = parsed.chunk_index
+            if chunk_index is not None or len(body) > STATS_SNAPSHOT_INLINE_MAX_BYTES:
+                batch = retained_batch or StatsSnapshotProjector._snapshot_chunk_batch(
+                    self,
+                    chunk_key,
+                    entry,
+                    body,
+                )
+                if chunk_index is not None and chunk_index >= len(batch.chunks):
+                    return finish(
+                        protocol.unsupported_response(
+                            "chunk_index lies outside the retained snapshot batch",
+                            parsed.range_seconds,
+                        ),
+                        b"",
+                        "unsupported",
+                    )
+                selected = batch.chunks[chunk_index or 0]
+                self._snapshot_bytes += len(selected.binary)
+                return finish(selected.metadata, selected.binary, "chunk")
             self._snapshot_bytes += len(body)
             return finish(entry.metadata, body, "hit")
         finally:
             self._record_request_latency("snapshot", started)
+
+    def _retained_snapshot_chunk_batch(
+        self,
+        key: CacheKey,
+        generation: int | None,
+        *,
+        newer_than: int | None = None,
+    ) -> SnapshotChunkBatchRecord | None:
+        now = self.monotonic()
+        with self.cache_lock:
+            self._snapshot_chunk_batches = {
+                batch_key: batch
+                for batch_key, batch in self._snapshot_chunk_batches.items()
+                if batch.expires_at > now
+            }
+            candidates = [
+                batch
+                for (batch_key, batch_generation), batch in self._snapshot_chunk_batches.items()
+                if batch_key == key
+                and (generation is None or batch_generation == generation)
+                and (newer_than is None or batch_generation > newer_than)
+            ]
+            return max(candidates, key=lambda batch: batch.cache_generation, default=None)
+
+    def _snapshot_chunk_batch(
+        self,
+        key: CacheKey,
+        entry: CacheEntry,
+        body: bytes,
+    ) -> SnapshotChunkBatchRecord:
+        snapshot = json.loads(body)
+        cache_generation = int(snapshot["cache_generation"])
+        existing = StatsSnapshotProjector._retained_snapshot_chunk_batch(
+            self,
+            key,
+            cache_generation,
+        )
+        if existing is not None:
+            return existing
+        bucket_count = len(snapshot.get("buckets", ()))
+        if bucket_count < 2:
+            raise ValueError("oversized snapshot does not contain enough buckets to split")
+        chunk_limit = min(bucket_count, protocol.MAX_SNAPSHOT_CHUNKS)
+        chunk_count = min(
+            chunk_limit,
+            max(2, math.ceil(len(body) / STATS_SNAPSHOT_CHUNK_TARGET_BYTES)),
+        )
+        while True:
+            encoded_chunks = []
+            for chunk_index in range(chunk_count):
+                chunk = _snapshot_chunk_wire(snapshot, chunk_index, chunk_count)
+                encoded_chunks.append((chunk, self.encoder(chunk)))
+            largest = max(len(binary) for _chunk, binary in encoded_chunks)
+            if largest <= LOCAL_RPC_MAX_BINARY_BYTES:
+                break
+            if chunk_count >= chunk_limit:
+                raise ValueError("one snapshot chunk exceeds the local RPC response limit")
+            chunk_count = min(
+                chunk_limit,
+                max(chunk_count + 1, math.ceil(chunk_count * largest / LOCAL_RPC_MAX_BINARY_BYTES)),
+            )
+        chunks = [
+            CacheEntry(MappingProxyType({
+                **entry.metadata,
+                "bytes": len(binary),
+                "chunk_index": chunk["chunk_index"],
+                "chunk_count": chunk["chunk_count"],
+                "chunk_generation": chunk["cache_generation"],
+            }), binary)
+            for chunk, binary in encoded_chunks
+        ]
+        now = self.monotonic()
+        candidate = SnapshotChunkBatchRecord(
+            key,
+            cache_generation,
+            tuple(chunks),
+            now,
+            now + SNAPSHOT_CHUNK_BATCH_TTL_SECONDS,
+        )
+        with self.cache_lock:
+            batch_key = (key, cache_generation)
+            current = self._snapshot_chunk_batches.get(batch_key)
+            if current is not None and current.expires_at > now:
+                return current
+            self._snapshot_chunk_batches[batch_key] = candidate
+            while len(self._snapshot_chunk_batches) > MAX_SNAPSHOT_CHUNK_BATCHES:
+                oldest = min(
+                    self._snapshot_chunk_batches,
+                    key=lambda item: self._snapshot_chunk_batches[item].created_at,
+                )
+                self._snapshot_chunk_batches.pop(oldest, None)
+        return candidate
+
+
+def _snapshot_chunk_wire(
+    snapshot: Mapping[str, object],
+    chunk_index: int,
+    chunk_count: int,
+) -> dict[str, object]:
+    """Project one size-derived exact slice without creating a second snapshot owner."""
+
+    base = {name: snapshot[name] for name in protocol.SNAPSHOT_FIELDS}
+    validated = protocol.validate_snapshot(base)
+    bucket_count = len(validated["buckets"])
+    if isinstance(chunk_count, bool) or not isinstance(chunk_count, int) or not 2 <= chunk_count <= min(bucket_count, protocol.MAX_SNAPSHOT_CHUNKS):
+        raise ValueError("snapshot chunk count lies outside the supported bounds")
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, int) or not 0 <= chunk_index < chunk_count:
+        raise ValueError("snapshot chunk index lies outside the requested range")
+    first_bucket = chunk_index * bucket_count // chunk_count
+    final_bucket = (chunk_index + 1) * bucket_count // chunk_count
+    chunk_start = validated["buckets"][first_bucket]["start"]
+    chunk_end = validated["buckets"][final_bucket - 1]["start"] + validated["resolution_seconds"]
+    chunk: dict[str, object] = {
+        **{name: validated[name] for name in protocol.SNAPSHOT_FIELDS - {"buckets", "no_data"}},
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "chunk_start": chunk_start,
+        "chunk_end": chunk_end,
+        "buckets": [
+            bucket
+            for bucket in validated["buckets"]
+            if chunk_start <= int(bucket["start"]) < chunk_end
+        ],
+        "no_data": [
+            {
+                **span,
+                "start": max(chunk_start, span["start"]),
+                "end": min(chunk_end, span["end"]),
+            }
+            for span in validated["no_data"]
+            if span["end"] > chunk_start and span["start"] < chunk_end
+        ],
+    }
+    protocol.validate_snapshot_chunk(chunk)
+    if "usage_atom_backfill" in snapshot:
+        chunk["usage_atom_backfill"] = snapshot["usage_atom_backfill"]
+    return chunk
 
 
 class StatsDeltaProjector:
