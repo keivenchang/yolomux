@@ -1434,14 +1434,32 @@ def invalidated_buckets(observed_range: tuple[float, float]) -> tuple[tuple[int,
 
     The range is INCLUSIVE at both ends. A fact exactly on a bucket boundary belongs to the bucket
     it starts, and a fact exactly at the end instant still lands in the bucket containing it.
+
+    CLAMPED TO THE BOUNDED RING HORIZON, per resolution, and that clamp is the whole reason this is
+    one owner rather than arithmetic each caller repeats.
+
+    A ring holds exactly `RING_CAPACITIES[resolution]` slots, so nothing older than
+    `resolution * capacity` before the range end can be stored OR served. A prune passes
+    `(0, cutoff)` because it deletes everything below the cutoff, and expanding that literally
+    walked from the Unix epoch: measured at a current cutoff, 2,001,470,467 pairs across the four
+    resolutions, roughly 134 GiB, materialized in one list inside the mutating transaction. Every
+    pair beyond the horizon named a slot that cannot exist and could never be retired.
+
+    Clamping makes the result depend on the range's LENGTH, never on how far the epoch is from the
+    start, so the worst case is `sum(RING_CAPACITIES.values())` pairs no matter how old the clock
+    is.
     """
     start, end = observed_range
     if end < start:
         raise StorageValidationError("invalidated range end precedes its start")
     pairs: list[tuple[int, int]] = []
-    for resolution_seconds in sorted(stats_resolution.RING_CAPACITIES):
-        first = int(max(0.0, start) // resolution_seconds) * resolution_seconds
+    for resolution_seconds, slot_count in sorted(stats_resolution.RING_CAPACITIES.items()):
         last = int(max(0.0, end) // resolution_seconds) * resolution_seconds
+        horizon_start = last - (slot_count - 1) * resolution_seconds
+        first = int(max(0.0, start) // resolution_seconds) * resolution_seconds
+        first = max(first, horizon_start, 0)
+        if first > last:
+            continue
         pairs.extend(
             (resolution_seconds, bucket_start)
             for bucket_start in range(first, last + resolution_seconds, resolution_seconds)

@@ -406,3 +406,67 @@ def test_a_restart_still_drops_a_historically_open_cell(tmp_path):
     assert cell not in retained, (
         "the restart filter retained a historically open cell; downtime will read as quiet zero"
     )
+
+
+# --- bounded invalidation cardinality ---------------------------------------------------------
+
+RING_SLOT_TOTAL = sum(storage.stats_resolution.RING_CAPACITIES.values())
+
+
+@pytest.mark.parametrize("cutoff", (100_000.0, 1_700_000_000.0, 1_787_200_000.0))
+def test_a_prune_range_is_bounded_by_the_ring_horizon_not_by_the_unix_epoch(cutoff):
+    """The production OOM: `(0, cutoff)` walked from 1970.
+
+    Measured before the clamp, at a current cutoff: 2,001,470,467 pairs across the four
+    resolutions, roughly 134 GiB, materialized in ONE list inside the mutating transaction. Every
+    pair past the horizon named a ring slot that cannot exist and could never be retired, so the
+    cost bought nothing. Parametrized across three decades of cutoff because the defect scaled with
+    the clock: a test at a single recent instant would not show that the bound is epoch-independent.
+    """
+    pairs = storage.invalidated_buckets((0.0, cutoff))
+
+    assert len(pairs) <= RING_SLOT_TOTAL, (
+        f"a prune at cutoff {cutoff} produced {len(pairs):,} pairs against a {RING_SLOT_TOTAL} "
+        f"slot ceiling; the epoch walk is back"
+    )
+    assert len(pairs) == len(set(pairs)), "the bounded range emitted duplicates"
+
+
+def test_the_bound_holds_for_every_configured_resolution_independently():
+    """Per resolution, never more pairs than that ring has slots."""
+    pairs = storage.invalidated_buckets((0.0, 1_787_200_000.0))
+    per_resolution: dict[int, int] = {}
+    for resolution_seconds, _bucket_start in pairs:
+        per_resolution[resolution_seconds] = per_resolution.get(resolution_seconds, 0) + 1
+
+    assert set(per_resolution) == set(storage.stats_resolution.RING_CAPACITIES)
+    for resolution_seconds, count in per_resolution.items():
+        assert count <= storage.stats_resolution.RING_CAPACITIES[resolution_seconds]
+
+
+def test_an_ordinary_short_range_is_unchanged_by_the_clamp():
+    """Negative control: clamping must not silently drop buckets a real mutation touches.
+
+    A bound that returned nothing would satisfy every assertion above and destroy the ledger.
+    """
+    start = 1_787_200_000.0
+    pairs = storage.invalidated_buckets((start, start + 120.0))
+
+    by_resolution = {r: [b for r2, b in pairs if r2 == r] for r, _ in pairs}
+    assert by_resolution[60], "a two-minute mutation invalidated no 60s bucket"
+    assert len(by_resolution[60]) >= 2, "a two-minute span must cover at least two 60s buckets"
+    assert all(len(v) >= 1 for v in by_resolution.values())
+
+
+def test_an_explicit_prune_still_records_the_recent_buckets_it_deleted(store):
+    """End-to-end control: the clamp must not stop a prune recording real work."""
+    old = 1_787_000_000.0
+    store.append_batch(observations=[_observation("e-old", old)])
+    baseline = _pending_rows(store)
+
+    result = store.prune(now=old + storage.RETENTION_SECONDS + RESOLUTION)
+
+    assert result.observations_deleted == 1
+    recorded = _pending_rows(store) - baseline
+    assert recorded, "the clamped prune recorded nothing at all"
+    assert len(recorded) <= RING_SLOT_TOTAL
