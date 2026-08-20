@@ -1423,7 +1423,9 @@ def _unavailable_values(span: UnavailableSpan) -> tuple[object, ...]:
     )
 
 
-def invalidated_buckets(observed_range: tuple[float, float]) -> tuple[tuple[int, int], ...]:
+def invalidated_buckets(
+    observed_range: tuple[float, float], *, end_exclusive: bool = False,
+) -> tuple[tuple[int, int], ...]:
     """The exact (resolution, bucket_start) pairs one mutated time range makes stale.
 
     THE one range-to-buckets owner. Every producer that can contradict a published aggregate --
@@ -1454,7 +1456,18 @@ def invalidated_buckets(observed_range: tuple[float, float]) -> tuple[tuple[int,
         raise StorageValidationError("invalidated range end precedes its start")
     pairs: list[tuple[int, int]] = []
     for resolution_seconds, slot_count in sorted(stats_resolution.RING_CAPACITIES.items()):
-        last = int(max(0.0, end) // resolution_seconds) * resolution_seconds
+        # A prune deletes facts strictly BELOW its cutoff, so its range is half-open. With an
+        # inclusive end an aligned cutoff C both included bucket C -- which holds only facts at or
+        # after C and is therefore untouched -- and omitted C-Nr at the far end, so the boundary
+        # was wrong at BOTH ends by exactly one bucket. An inside-bucket cutoff still lands on the
+        # bucket containing it, because that bucket really did lose facts.
+        end_instant = max(0.0, end)
+        if end_exclusive:
+            if end_instant <= 0.0:
+                continue
+            last = int((end_instant - 1e-9) // resolution_seconds) * resolution_seconds
+        else:
+            last = int(end_instant // resolution_seconds) * resolution_seconds
         horizon_start = last - (slot_count - 1) * resolution_seconds
         first = int(max(0.0, start) // resolution_seconds) * resolution_seconds
         first = max(first, horizon_start, 0)
@@ -1467,6 +1480,27 @@ def invalidated_buckets(observed_range: tuple[float, float]) -> tuple[tuple[int,
     return tuple(pairs)
 
 
+def invalidated_buckets_for_instants(instants: Iterable[float]) -> tuple[tuple[int, int], ...]:
+    """The exact buckets a SET of mutated instants touches, with no span between them.
+
+    A batch is not an interval. Collapsing one to `(min, max)` and clamping to the ring horizon
+    dropped genuinely contradicted old buckets whenever the same batch also carried a far-future
+    timestamp: the clamp anchors to the newest instant, so a sparse batch of one old fact plus one
+    future fact invalidated the future end and silently left the old published bucket serving
+    contradicted data.
+
+    Deriving per instant removes the span entirely. The result is bounded by
+    `len(instants) * len(RING_CAPACITIES)` and is exact rather than conservative, so it also stops
+    an ordinary two-point batch from invalidating everything between its ends.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for instant in instants:
+        moment = max(0.0, float(instant))
+        for resolution_seconds in stats_resolution.RING_CAPACITIES:
+            pairs.add((resolution_seconds, int(moment // resolution_seconds) * resolution_seconds))
+    return tuple(sorted(pairs))
+
+
 def _record_invalidations(
     connection: sqlite3.Connection,
     observed_range: tuple[float, float],
@@ -1474,6 +1508,8 @@ def _record_invalidations(
     reason: str,
     source_generation: int,
     now: float,
+    end_exclusive: bool = False,
+    instants: Iterable[float] | None = None,
 ) -> int:
     """Record stale buckets INSIDE the caller's transaction, never after it.
 
@@ -1484,7 +1520,11 @@ def _record_invalidations(
     """
     if not _aggregate_tables(connection):
         return 0
-    pairs = invalidated_buckets(observed_range)
+    pairs = (
+        invalidated_buckets_for_instants(instants)
+        if instants is not None
+        else invalidated_buckets(observed_range, end_exclusive=end_exclusive)
+    )
     if not pairs:
         return 0
     connection.executemany(
@@ -1580,9 +1620,73 @@ def _validate_ring_schema(connection: sqlite3.Connection) -> None:
         raise SchemaMismatchError("aggregate ring fixed-row triggers do not match the exact schema")
 
 
+# The cross-clock constraint shipped by the first schema-8 build. `created_at` is the OBSERVED
+# instant of the causing fact and `applied_at` is the publication's WALL CLOCK, so ordering them
+# rejected correct retirements whenever data time ran ahead of wall clock. New databases stopped
+# carrying it, but `_validate_ring_schema` compares columns, rows and triggers -- never table SQL --
+# so an EXISTING v8 kept it and still refuses valid replay today.
+_RING_INVALIDATIONS_RETIRED_CHECK = "applied_at >= created_at"
+
+
+def _ring_invalidations_needs_check_upgrade(connection: sqlite3.Connection) -> bool:
+    """Whether this database still carries the retired cross-clock CHECK."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ring_invalidations'"
+    ).fetchone()
+    return bool(row) and _RING_INVALIDATIONS_RETIRED_CHECK in str(row[0])
+
+
+def _upgrade_ring_invalidations_check(connection: sqlite3.Connection) -> None:
+    """Rebuild `ring_invalidations` without the retired CHECK, preserving every row.
+
+    A table rebuild rather than an in-place edit because SQLite cannot drop a CHECK. The whole
+    sequence runs in ONE transaction, so a crash leaves the old table intact rather than a
+    half-migrated ledger: failure-atomic by construction, not by cleanup.
+
+    Keeps the schema-version identity at v8 deliberately. The public contract -- table set,
+    columns, capacities, triggers -- is unchanged; only an internal constraint that was always
+    wrong is removed. Bumping the version would strand every existing v8 store behind a filename
+    and socket change for a defect that is invisible to any consumer.
+
+    Idempotent because the caller only invokes it when the retired text is present, and after the
+    rebuild it is not.
+    """
+    with _transaction(connection):
+        connection.execute(
+            "CREATE TABLE ring_invalidations_upgraded ("
+            "resolution_seconds INTEGER NOT NULL, "
+            "bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0), "
+            "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+            "reason TEXT NOT NULL, "
+            "created_at REAL NOT NULL CHECK (created_at >= 0), "
+            "applied_at REAL, "
+            "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+            "CHECK (bucket_start % resolution_seconds = 0), "
+            "CHECK (applied_at IS NULL OR applied_at >= 0)"
+            ") WITHOUT ROWID"
+        )
+        connection.execute(
+            "INSERT INTO ring_invalidations_upgraded("
+            "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+            "SELECT resolution_seconds, bucket_start, source_generation, reason, created_at, "
+            "applied_at FROM ring_invalidations"
+        )
+        connection.execute("DROP TABLE ring_invalidations")
+        connection.execute("ALTER TABLE ring_invalidations_upgraded RENAME TO ring_invalidations")
+        connection.execute(
+            "CREATE INDEX ring_invalidations_pending "
+            "ON ring_invalidations(resolution_seconds, bucket_start) WHERE applied_at IS NULL"
+        )
+
+
 def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
     tables = _aggregate_tables(connection)
     if tables:
+        # Before validation, because the retired CHECK is exactly what an existing store carries
+        # and validation does not inspect table SQL at all.
+        if _ring_invalidations_needs_check_upgrade(connection):
+            _upgrade_ring_invalidations_check(connection)
         _validate_ring_schema(connection)
         return
     with _transaction(connection):
@@ -2574,6 +2678,7 @@ class Store:
                     _record_invalidations(
                         connection,
                         (0.0, float(retention_cutoff)),
+                        end_exclusive=True,
                         reason="retention_prune",
                         source_generation=generation,
                         now=float(retention_cutoff),
@@ -2583,12 +2688,17 @@ class Store:
                     # clock read: this module deliberately takes every timestamp as data so a store
                     # has no ambient clock dependency, and the causing instant is the more useful
                     # value anyway when reconciling a late write against its bucket.
+                    # EXACT INSTANTS, not `(min, max)`. Collapsing a batch to a span and
+                    # clamping it to the ring horizon anchored on the NEWEST instant, so a sparse
+                    # batch carrying one old fact and one far-future fact invalidated the future
+                    # end and left the old contradicted bucket serving stale data.
                     _record_invalidations(
                         connection,
-                        (min(mutated), max(mutated)),
+                        (0.0, 0.0),
                         reason="fact_mutation",
                         source_generation=generation,
                         now=max(mutated),
+                        instants=mutated,
                     )
         return AppendResult(
             generation,
@@ -3005,6 +3115,7 @@ class Store:
                 _record_invalidations(
                     connection,
                     (0.0, cutoff),
+                    end_exclusive=True,
                     reason="retention_prune",
                     source_generation=generation,
                     now=cutoff,

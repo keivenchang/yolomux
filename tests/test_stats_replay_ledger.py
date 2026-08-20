@@ -10,6 +10,7 @@ case here is about one of those two failures.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -470,3 +471,235 @@ def test_an_explicit_prune_still_records_the_recent_buckets_it_deleted(store):
     recorded = _pending_rows(store) - baseline
     assert recorded, "the clamped prune recorded nothing at all"
     assert len(recorded) <= RING_SLOT_TOTAL
+
+
+# --- exact boundaries, exact membership, every resolution -------------------------------------
+# The earlier cardinality rows asserted only "<= 1248", which a set that is bounded AND WRONG
+# satisfies. These assert the exact bucket set instead.
+
+CAPACITIES = storage.stats_resolution.RING_CAPACITIES
+
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_an_aligned_prune_cutoff_yields_exactly_the_affected_window(resolution_seconds):
+    """For aligned cutoff C: exactly [C-Nr .. C-r]. Not C, and not missing C-Nr.
+
+    Measured before: an aligned C=60000 at r=60 produced [31260 .. 60000] -- it INCLUDED bucket C,
+    which holds only facts at or after C and so lost nothing, and OMITTED C-Nr at the far end.
+    Wrong at both ends by exactly one bucket.
+    """
+    slot_count = CAPACITIES[resolution_seconds]
+    cutoff = resolution_seconds * slot_count * 4
+    expected = {
+        cutoff - index * resolution_seconds for index in range(1, slot_count + 1)
+    }
+
+    actual = {
+        bucket for res, bucket in storage.invalidated_buckets((0.0, float(cutoff)), end_exclusive=True)
+        if res == resolution_seconds
+    }
+
+    assert actual == expected
+    assert cutoff not in actual, "bucket C lost no facts and must not be invalidated"
+    assert cutoff - slot_count * resolution_seconds in actual, "the far horizon bucket was omitted"
+
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_an_inside_bucket_cutoff_includes_the_bucket_that_lost_facts(resolution_seconds):
+    """A cutoff partway through a bucket DID delete facts from it, so it must be invalidated."""
+    slot_count = CAPACITIES[resolution_seconds]
+    base = resolution_seconds * slot_count * 4
+    cutoff = base + resolution_seconds // 2 if resolution_seconds > 1 else base + 0.5
+
+    actual = {
+        bucket for res, bucket in storage.invalidated_buckets((0.0, float(cutoff)), end_exclusive=True)
+        if res == resolution_seconds
+    }
+
+    assert base in actual, "the partially pruned bucket was not invalidated"
+    assert base + resolution_seconds not in actual
+
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_sparse_old_plus_far_future_instants_keep_the_old_bucket(resolution_seconds):
+    """The `max(mutated)` horizon defect, at every resolution.
+
+    One old fact and one far-future fact in the same batch: the span-plus-clamp anchored on the
+    newest instant and dropped the old contradicted bucket entirely.
+    """
+    old_instant = 1_000.0
+    future_instant = 1_900_000_000.0
+
+    pairs = storage.invalidated_buckets_for_instants([old_instant, future_instant])
+
+    at_resolution = {bucket for res, bucket in pairs if res == resolution_seconds}
+    assert int(old_instant // resolution_seconds) * resolution_seconds in at_resolution
+    assert int(future_instant // resolution_seconds) * resolution_seconds in at_resolution
+    # Exactly the two touched buckets, not the span between them.
+    assert len(at_resolution) == 2
+
+
+def test_a_two_point_batch_does_not_invalidate_the_span_between_its_ends():
+    """Negative control: exactness must not become over-invalidation either."""
+    pairs = storage.invalidated_buckets_for_instants([6_000.0, 6_600.0])
+
+    at_60 = sorted(bucket for res, bucket in pairs if res == 60)
+    assert at_60 == [6_000, 6_600], f"the batch invalidated the span between its ends: {at_60}"
+
+
+def test_the_instant_owner_is_bounded_by_its_input_not_by_the_clock():
+    """Bounded by `len(instants) * resolutions`, and independent of how old the clock is."""
+    for instant in (1_000.0, 1_700_000_000.0, 1_900_000_000.0):
+        assert len(storage.invalidated_buckets_for_instants([instant])) == len(CAPACITIES)
+
+
+# --- existing-v8 CHECK upgrade -----------------------------------------------------------------
+# The relaxed constraint was new-database-only: `_validate_ring_schema` compares columns, rows and
+# triggers, never table SQL, so a v8 created by the first schema-8 build still rejects correct
+# cross-clock retirement today.
+
+RETIRED_CHECK_SQL = (
+    "CREATE TABLE ring_invalidations ("
+    "resolution_seconds INTEGER NOT NULL, "
+    "bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0), "
+    "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+    "reason TEXT NOT NULL, "
+    "created_at REAL NOT NULL CHECK (created_at >= 0), "
+    "applied_at REAL, "
+    "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
+    "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+    "CHECK (bucket_start % resolution_seconds = 0), "
+    "CHECK (applied_at IS NULL OR applied_at >= created_at)"
+    ") WITHOUT ROWID"
+)
+
+
+def _make_old_v8(path: Path) -> None:
+    """A v8 exactly as the first schema-8 build wrote it, carrying the retired CHECK and rows."""
+    with storage.Store.open(path) as opened:
+        connection = opened._connection()
+        connection.execute("DROP INDEX IF EXISTS ring_invalidations_pending")
+        connection.execute("DROP TABLE ring_invalidations")
+        connection.execute(RETIRED_CHECK_SQL)
+        connection.execute(
+            "CREATE INDEX ring_invalidations_pending "
+            "ON ring_invalidations(resolution_seconds, bucket_start) WHERE applied_at IS NULL"
+        )
+        # A pending row whose observed `created_at` is far ahead of any wall clock, plus a
+        # retired one, so the rebuild is proven to preserve both states.
+        connection.execute(
+            "INSERT INTO ring_invalidations(resolution_seconds, bucket_start, source_generation, "
+            "reason, created_at, applied_at) VALUES(60, 7140, 3, 'fact_mutation', 1787200000.0, NULL)"
+        )
+        connection.execute(
+            "INSERT INTO ring_invalidations(resolution_seconds, bucket_start, source_generation, "
+            "reason, created_at, applied_at) VALUES(60, 7080, 2, 'fact_mutation', 5.0, 9.0)"
+        )
+        connection.commit()
+
+
+def _table_sql(path: Path) -> str:
+    connection = sqlite3.connect(path)
+    try:
+        return str(connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ring_invalidations'"
+        ).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def test_an_existing_v8_with_the_retired_check_is_upgraded_on_open(tmp_path):
+    """Reopening a pre-fix v8 must drop the cross-clock CHECK without losing a row."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    _make_old_v8(database)
+    assert "applied_at >= created_at" in _table_sql(database), "fixture did not reproduce the defect"
+
+    with storage.Store.open(database) as opened:
+        rows = sorted(opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at "
+            "FROM ring_invalidations"
+        ))
+
+    assert "applied_at >= created_at" not in _table_sql(database)
+    assert rows == [
+        (60, 7080, 2, "fact_mutation", 5.0, 9.0),
+        (60, 7140, 3, "fact_mutation", 1787200000.0, None),
+    ], "the rebuild lost or altered a ledger row"
+
+
+def test_a_pre_fix_v8_then_accepts_the_cross_clock_retirement_it_used_to_reject(tmp_path):
+    """The behaviour the upgrade exists for, not just the DDL text."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    _make_old_v8(database)
+
+    with storage.Store.open(database) as opened:
+        # `applied_at` (wall clock) far BELOW `created_at` (observed instant) is the case the
+        # retired constraint rejected.
+        opened._connection().execute(
+            "UPDATE ring_invalidations SET applied_at = 100.0 "
+            "WHERE bucket_start = 7140 AND applied_at IS NULL"
+        )
+        opened._connection().commit()
+        retired = opened._connection().execute(
+            "SELECT applied_at FROM ring_invalidations WHERE bucket_start = 7140"
+        ).fetchone()[0]
+
+    assert retired == 100.0
+
+
+def test_the_upgrade_is_idempotent_across_repeated_opens(tmp_path):
+    """Startup runs on every boot; a rebuild on each one would churn the ledger forever."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    _make_old_v8(database)
+    with storage.Store.open(database):
+        pass
+    first_sql = _table_sql(database)
+
+    with storage.Store.open(database):
+        pass
+    with storage.Store.open(database):
+        pass
+
+    assert _table_sql(database) == first_sql
+    connection = sqlite3.connect(database)
+    try:
+        assert int(connection.execute("SELECT count(*) FROM ring_invalidations").fetchone()[0]) == 2
+    finally:
+        connection.close()
+
+
+def test_a_fresh_v8_is_not_rebuilt_because_it_never_had_the_retired_check(tmp_path):
+    """Negative control: the upgrade must be gated on the defect, not run unconditionally."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database):
+        pass
+
+    assert "applied_at >= created_at" not in _table_sql(database)
+    assert not storage._ring_invalidations_needs_check_upgrade(sqlite3.connect(database))
+
+
+def test_a_sparse_batch_through_append_records_the_old_bucket_not_just_the_future_one(store):
+    """End-to-end through `append_batch`, because the defect was in the WIRING.
+
+    Asserting `invalidated_buckets_for_instants` directly proves the helper is exact and proves
+    nothing about which helper `append_batch` calls. Reverting the caller to the span-plus-clamp
+    left those helper rows green -- the same gap as testing a filter's inputs instead of the filter.
+    """
+    old_instant = 1_000.0
+    future_instant = 1_900_000_000.0
+    baseline = _pending_rows(store)
+
+    store.append_batch(observations=[
+        _observation("sparse-old", old_instant),
+        _observation("sparse-future", future_instant),
+    ])
+
+    recorded = {(r, b) for r, b, _g in (_pending_rows(store) - baseline)}
+    old_bucket = int(old_instant // RESOLUTION) * RESOLUTION
+    future_bucket = int(future_instant // RESOLUTION) * RESOLUTION
+    assert (RESOLUTION, old_bucket) in recorded, (
+        "the old contradicted bucket was dropped; the batch was collapsed to a clamped span"
+    )
+    assert (RESOLUTION, future_bucket) in recorded
+    # And not the span between them, which would be ~31 million 60s buckets.
+    assert len(recorded) == 2 * len(CAPACITIES), f"recorded {len(recorded)} rows for a two-fact batch"
