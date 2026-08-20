@@ -419,3 +419,107 @@ print(json.dumps({{"base": base, "peak": peak, "observations": report.observatio
         f"migration grew peak RSS by {delta:.1f} MiB against a {MIGRATION_PEAK_RSS_DELTA_BUDGET_MIB} "
         f"MiB budget; a whole-store decode has come back"
     )
+
+
+# --- v7/v8 coexistence: every companion artifact, not just the main database -------------------
+# The first version of this file checked only the `.sqlite3` bytes and its -wal/-shm. That passed
+# while a v8 open was rewriting the v7 build's writer fence to `schema_version: 8`, which made the
+# still-running v7 build raise SchemaTooNewError against its OWN database. The rollback boundary
+# was destroyed and the coverage said everything was fine.
+
+V7_COMPANIONS = (
+    "stats-writer-compat.json",
+    "stats-prune.json",
+)
+
+
+def _v7_artifacts(directory: Path) -> dict[str, tuple]:
+    """Bytes, mode, inode and mtime for every v7 artifact in one state directory."""
+    captured = {}
+    for name in (V7_DATABASE_FILENAME, f"{V7_DATABASE_FILENAME}-wal", f"{V7_DATABASE_FILENAME}-shm", *V7_COMPANIONS):
+        path = directory / name
+        if not path.exists():
+            continue
+        stat = path.stat()
+        captured[name] = (path.read_bytes(), stat.st_mode, stat.st_ino, stat.st_mtime_ns)
+    return captured
+
+
+def _seed_v7_companions(directory: Path) -> None:
+    (directory / "stats-writer-compat.json").write_text(
+        json.dumps({
+            "application_id": storage.APPLICATION_ID,
+            "database_filename": V7_DATABASE_FILENAME,
+            "schema_version": V7_SCHEMA_VERSION,
+            "minimum_writer_protocol": migration_module.V7_MIN_WRITER_PROTOCOL,
+            "minimum_writer_build": migration_module.V7_MIN_WRITER_BUILD,
+        }, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "stats-prune.json").write_text(
+        json.dumps({"pruned_at": 12_345.0}), encoding="utf-8"
+    )
+    (directory / f"{V7_DATABASE_FILENAME}-wal").write_bytes(b"v7 write-ahead log")
+    (directory / f"{V7_DATABASE_FILENAME}-shm").write_bytes(b"v7 shared memory")
+
+
+def test_the_v8_companion_filenames_are_versioned_and_cannot_collide_with_v7():
+    """Every mutable companion carries the schema version, like the database and the socket."""
+    assert storage.DATABASE_FILENAME == "stats-v8.sqlite3"
+    assert storage.WRITER_FENCE_FILENAME == "stats-writer-compat-v8.json"
+    assert storage.PRUNE_STATE_FILENAME == "stats-prune-v8.json"
+    for name in (storage.WRITER_FENCE_FILENAME, storage.PRUNE_STATE_FILENAME):
+        assert name not in V7_COMPANIONS, f"{name} still collides with a v7 companion"
+
+
+def test_a_v8_open_preserves_every_v7_artifact_including_fence_and_prune_state(tmp_path, v7_source):
+    """The rollback boundary, asserted over the artifacts that actually carry it.
+
+    A v7 build reads its fence on every open and refuses a database whose fence names a NEWER
+    schema. If a v8 open rewrites that shared fence, the v7 build can no longer open its own store
+    and there is no rolling back.
+    """
+    _seed_v7_companions(tmp_path)
+    before = _v7_artifacts(tmp_path)
+    assert set(before) >= {V7_DATABASE_FILENAME, *V7_COMPANIONS}
+
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME):
+        pass
+
+    assert _v7_artifacts(tmp_path) == before
+    fence = json.loads((tmp_path / "stats-writer-compat.json").read_text())
+    assert fence["schema_version"] == V7_SCHEMA_VERSION
+    assert fence["database_filename"] == V7_DATABASE_FILENAME
+
+
+@pytest.mark.parametrize("outcome", ("success", "refused", "failed"))
+def test_no_migration_outcome_disturbs_a_pre_existing_v7_artifact(tmp_path, v7_source, outcome):
+    """Success, refusal and mid-flight failure must all leave the v7 side untouched."""
+    _seed_v7_companions(tmp_path)
+    before = _v7_artifacts(tmp_path)
+    target = tmp_path / storage.DATABASE_FILENAME
+
+    if outcome == "success":
+        migration_module.migrate_current_v7_database(tmp_path, target, v7_source)
+    elif outcome == "refused":
+        connection = sqlite3.connect(v7_source)
+        try:
+            connection.execute("PRAGMA user_version = 99")
+            connection.commit()
+        finally:
+            connection.close()
+        before = _v7_artifacts(tmp_path)
+        with pytest.raises(migration_module.MigrationError):
+            migration_module.migrate_current_v7_database(tmp_path, target, v7_source)
+    else:
+        def explode(fired: str) -> None:
+            if fired == "during_population":
+                raise migration_module.V8MigrationFault("injected")
+
+        with pytest.raises(migration_module.V8MigrationFault):
+            migration_module.migrate_current_v7_database(tmp_path, target, v7_source, fault_hook=explode)
+
+    after = _v7_artifacts(tmp_path)
+    assert set(after) == set(before)
+    for name, expected in before.items():
+        assert after[name] == expected, f"{name} changed during a {outcome} migration"

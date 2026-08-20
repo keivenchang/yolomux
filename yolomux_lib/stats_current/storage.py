@@ -39,7 +39,7 @@ APPLICATION_ID = 0x594F5354
 # (`migrate_v7_to_v8`), so the rollback boundary is simply "keep running the v7 build against the
 # v7 file". SOCKET_FILENAME also embeds the version, so a v8 build and a v7 build address different
 # statsd sockets and cannot half-share a store.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = common.STATS_SCHEMA_VERSION
 MIN_WRITER_PROTOCOL = 24
 # Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
 # strict process-memory payload. Build 6 makes the same census the sole owner of
@@ -64,12 +64,15 @@ WAL_AUTOCHECKPOINT_PAGES = 1000
 # the file. This connection policy bounds the retained allocation after a reset;
 # Store.vacuum() separately truncates the rewrite-sized allocation immediately.
 WAL_ALLOCATION_CEILING_BYTES = 8 * 1024 * 1024
-DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
+DATABASE_FILENAME = common.STATS_DATABASE_FILENAME
 # Sidecar beside the database, like WRITER_FENCE_FILENAME. The nightly prune
 # schedule needs the last successful prune to survive a restart, and schema_meta
 # cannot grow a column without a SCHEMA_VERSION bump that would strand the
 # operator's existing history.
-PRUNE_STATE_FILENAME = "stats-prune.json"
+# VERSIONED, like DATABASE_FILENAME and SOCKET_FILENAME. Prune state is mutable companion state
+# belonging to one database, and schema 8 is a SIDE-BY-SIDE format: an unversioned name would have
+# a v8 build rewriting the still-running v7 build's prune schedule.
+PRUNE_STATE_FILENAME = f"stats-prune-v{SCHEMA_VERSION}.json"
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -122,7 +125,14 @@ def socket_filename(protocol_version: int, schema_generation: int) -> str:
 # been schema-scoped since v5; it deliberately remains the durable owner for
 # all compatible protocol builds of this schema.
 SOCKET_FILENAME = socket_filename(MIN_WRITER_PROTOCOL, SCHEMA_VERSION)
-WRITER_FENCE_FILENAME = "stats-writer-compat.json"
+# VERSIONED for the same reason, and this one is load-bearing for rollback. The fence is a
+# deliberate cross-BUILD guard: a writer whose schema is older than the fence refuses to open. That
+# is correct within one format lineage and actively wrong across a side-by-side pair -- a v8 build
+# publishing `schema_version: 8` into a shared fence made the still-running v7 build raise
+# SchemaTooNewError against its OWN v7 database, destroying the rollback boundary the side-by-side
+# design exists to provide. Measured before this change: a v7 fence read `7`, and after one v8
+# `Store.open` in the same state directory it read `8` with `database_filename: stats-v8.sqlite3`.
+WRITER_FENCE_FILENAME = f"stats-writer-compat-v{SCHEMA_VERSION}.json"
 MAX_DIRTY_INTERVALS = 32
 MAX_BROWSER_FAILURE_FINGERPRINTS = 128
 MAX_RING_BUCKET_BYTES = 256 * 1024
@@ -1409,6 +1419,64 @@ def _unavailable_values(span: UnavailableSpan) -> tuple[object, ...]:
     )
 
 
+def invalidated_buckets(observed_range: tuple[float, float]) -> tuple[tuple[int, int], ...]:
+    """The exact (resolution, bucket_start) pairs one mutated time range makes stale.
+
+    THE one range-to-buckets owner. Every producer that can contradict a published aggregate --
+    a late observation, a usage tombstone, a prune, a coverage or unavailable-span change -- asks
+    this instead of computing bucket boundaries itself. Per-producer copies of this arithmetic are
+    how a resolution gets missed: the 1s ring would be invalidated and the 300s ring silently left
+    serving the contradicted value.
+
+    The range is INCLUSIVE at both ends. A fact exactly on a bucket boundary belongs to the bucket
+    it starts, and a fact exactly at the end instant still lands in the bucket containing it.
+    """
+    start, end = observed_range
+    if end < start:
+        raise StorageValidationError("invalidated range end precedes its start")
+    pairs: list[tuple[int, int]] = []
+    for resolution_seconds in sorted(stats_resolution.RING_CAPACITIES):
+        first = int(max(0.0, start) // resolution_seconds) * resolution_seconds
+        last = int(max(0.0, end) // resolution_seconds) * resolution_seconds
+        pairs.extend(
+            (resolution_seconds, bucket_start)
+            for bucket_start in range(first, last + resolution_seconds, resolution_seconds)
+        )
+    return tuple(pairs)
+
+
+def _record_invalidations(
+    connection: sqlite3.Connection,
+    observed_range: tuple[float, float],
+    *,
+    reason: str,
+    source_generation: int,
+    now: float,
+) -> int:
+    """Record stale buckets INSIDE the caller's transaction, never after it.
+
+    Recording after the mutation commits would leave a window in which the facts already
+    contradict the ring and nothing says so; a crash inside that window loses the invalidation
+    permanently, because the mutation that caused it has already been accounted for and will never
+    be replayed. Same transaction or it is not durable.
+    """
+    if not _aggregate_tables(connection):
+        return 0
+    pairs = invalidated_buckets(observed_range)
+    if not pairs:
+        return 0
+    connection.executemany(
+        "INSERT OR IGNORE INTO ring_invalidations("
+        "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+        "VALUES(?, ?, ?, ?, ?, NULL)",
+        [
+            (resolution_seconds, bucket_start, int(source_generation), str(reason), float(now))
+            for resolution_seconds, bucket_start in pairs
+        ],
+    )
+    return len(pairs)
+
+
 def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
     """Every table of the ring extension, matched by NAME SET rather than by prefix.
 
@@ -2005,6 +2073,36 @@ class Store:
                     bucket_start,
                     newest_by_resolution.get(resolution_seconds, bucket_start),
                 )
+            # Retire each invalidation in the SAME transaction as the republication that answers
+            # it, and only for the exact buckets actually rewritten. This is the whole
+            # crash-safety argument, and it is why no separate replay pass exists: there is no
+            # window where a bucket is both marked clean and not yet rewritten, and none where it
+            # has been rewritten but is still reported stale. A retry re-publishes the same bucket
+            # and retires the same already-retired row, which is idempotent.
+            connection.executemany(
+                "UPDATE ring_invalidations SET applied_at = ? "
+                "WHERE resolution_seconds = ? AND bucket_start = ? AND applied_at IS NULL "
+                "AND created_at <= ?",
+                [
+                    (published, resolution_seconds, bucket_start, published)
+                    for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared
+                ],
+            )
+            # The cursor advances only AFTER those effects are staged in this same transaction, so
+            # it can never claim work that a crash then loses. It records the newest instant this
+            # ring has folded, per resolution.
+            connection.executemany(
+                "UPDATE ring_replay_cursor SET folded_through_observed_at = ?, "
+                "folded_source_generation = ?, updated_at = ? "
+                "WHERE resolution_seconds = ? AND folded_through_observed_at < ?",
+                [
+                    (
+                        float(newest + resolution_seconds), source, published,
+                        resolution_seconds, float(newest + resolution_seconds),
+                    )
+                    for resolution_seconds, newest in newest_by_resolution.items()
+                ],
+            )
             for resolution_seconds, newest_bucket_start in newest_by_resolution.items():
                 changed = connection.execute(
                     "UPDATE aggregate_rings SET newest_bucket_start = CASE "
@@ -2071,12 +2169,31 @@ class Store:
                     (resolution_value,),
                 )
             }
+            # Bounded by the requested window, not by the whole ledger: a store that has
+            # accumulated invalidations outside this window must not make this read grow.
+            stale_starts = {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT bucket_start FROM ring_invalidations "
+                    "WHERE applied_at IS NULL AND resolution_seconds = ? "
+                    "AND bucket_start >= ? AND bucket_start < ?",
+                    (resolution_value, window_start, end),
+                )
+            }
             rows: list[RingBucketRow] = []
             missing: list[int] = []
             for bucket_start in expected_starts:
                 slot_index = (bucket_start // resolution_value) % slot_count
                 candidate = slot_rows.get(slot_index)
                 if candidate is None or candidate[1] is None or int(candidate[1]) != bucket_start:
+                    missing.append(bucket_start)
+                    continue
+                if bucket_start in stale_starts:
+                    # A fact mutation has contradicted this published bucket and no republication
+                    # has happened yet. Serving it would answer with an aggregate the store's own
+                    # facts disagree with, which is worse than answering with a gap: the gap is
+                    # visibly incomplete, the stale bucket is confidently wrong. Reporting it
+                    # MISSING routes it to the materializer, which rebuilds it from the facts.
                     missing.append(bucket_start)
                     continue
                 if int(candidate[7]) != RING_PAYLOAD_VERSION:
@@ -2369,6 +2486,48 @@ class Store:
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
                     (generation,),
                 )
+                # Same transaction as the facts that caused it. The observed range is taken from
+                # what was ACCEPTED, not from what was offered: a rejected duplicate changes no
+                # aggregate and must not invalidate a bucket that is still correct.
+                # Timestamp positions are DERIVED from `_COLUMNS`, the single owner of each
+                # table's column order, rather than written out here. Hand-indexing three
+                # different tuple layouts would be a fourth copy of that contract and would break
+                # silently the next time one of them gains a column.
+                #
+                # Prepared is a superset of accepted, so a batch containing rejected duplicates
+                # invalidates slightly more than it strictly must. That direction is deliberate:
+                # over-invalidating costs one rebuild from authoritative facts, while
+                # under-invalidating leaves a contradicted bucket being served as current.
+                mutated: list[float] = []
+                for table, rows in (
+                    ("observations", prepared_observations),
+                    ("usage_atoms", prepared_usage),
+                    ("coverage_epochs", prepared_coverage),
+                    ("unavailable_spans", prepared_unavailable),
+                ):
+                    for column in ("observed_at", "started_at", "ended_at"):
+                        if column not in _COLUMNS[table]:
+                            continue
+                        index = _COLUMNS[table].index(column)
+                        mutated.extend(
+                            float(row[index]) for row in rows if row[index] is not None
+                        )
+                # A tombstone deletes a usage atom, so its key names the atom whose bucket is now
+                # contradicted; its observed instant comes from the atoms already prepared above.
+                if prepared_tombstones and not mutated:
+                    mutated.extend(float(row[-1]) for row in prepared_tombstones if isinstance(row[-1], (int, float)))
+                if mutated:
+                    # `created_at` is the observed instant that caused the staleness, not a wall
+                    # clock read: this module deliberately takes every timestamp as data so a store
+                    # has no ambient clock dependency, and the causing instant is the more useful
+                    # value anyway when reconciling a late write against its bucket.
+                    _record_invalidations(
+                        connection,
+                        (min(mutated), max(mutated)),
+                        reason="fact_mutation",
+                        source_generation=generation,
+                        now=max(mutated),
+                    )
         return AppendResult(
             generation,
             observations_accepted,
