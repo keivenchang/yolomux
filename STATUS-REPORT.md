@@ -1,13 +1,13 @@
 # Progress
 
-Updated: 2026-08-20 03:37 PM PT
+Updated: 2026-08-20 03:55 PM PT
 Worktree: `/tmp/yolomux-0710-integration.2203800`
 
 **Goal:** v0.7.11 carries exactly two outcomes: finder/diff/process-stats and merge-macos-boot-tmux.
 
 **Goal totals:** 1/2 done (50%); 1 blocked.
 
-**State:** LOCALLY MERGED at `59f80020b`; local `main` fast-forwarded cleanly and remains unpushed with version `0.7.10`, as required by LOCAL mode. Port 7771 relaunched as PID `870823` from the exact candidate; health is 200, unauthenticated ping is 401, and served/source bundle SHA-256 both equal `448a37cedc6c1e11754db9cb482b8a4577904cb96348a215e1884cac7618eb68`. Fresh authenticated browser acceptance proved 5m AUTO=1s, 15m AUTO=10s, 1h AUTO=300s over offered 60s/300s, one fixed SSE epoch across multiple accepted deltas, and zero additional snapshot fetches when AUTO switched to an equivalent explicit resolution. The merge-macos-boot-tmux outcome remains blocked on real Darwin acceptance because the declared host inventory contains no macOS target; exact-SHA certification refused the overloaded host rather than failing product tests.
+**State:** LOCALLY MERGED at product commit `59f80020b` with final ledger candidate `3262211cb`; local `main` fast-forwarded cleanly and remains unpushed with version `0.7.10`, as required by LOCAL mode. Port 7771 relaunched as PID `870823` from the exact product candidate; health is 200, unauthenticated ping is 401, and served/source bundle SHA-256 both equal `448a37cedc6c1e11754db9cb482b8a4577904cb96348a215e1884cac7618eb68`. Fresh authenticated browser acceptance proved 5m AUTO=1s, 15m AUTO=10s, 1h AUTO=300s over offered 60s/300s, one fixed SSE epoch across multiple accepted deltas, and zero additional snapshot fetches when AUTO switched to an equivalent explicit resolution. A clean-tree exact-SHA certification attempt at `3262211cb` was host-refused before the seven units because `disk_busy_fraction_max=0.974915` exceeded the `0.9` limit; this is neither a certification pass nor a product-test failure. A fresh independent host/path audit found no macOS target in the declared inventory or SSH config, no 8880-8883 listener or autossh route, and no supported operator path to Darwin, so the real poisoned-tmux acceptance remains explicitly blocked rather than inferred from Linux evidence.
 
 ## Goal checklist
 
