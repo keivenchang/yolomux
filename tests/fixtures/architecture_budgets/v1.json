@@ -170,7 +170,7 @@
     "static_src/js/yolomux/10_core_utils.js": 7000,
     "static_src/js/yolomux/20_layout_state.js": 7038,
     "static_src/js/yolomux/40_file_explorer_files.js": 5922,
-    "static_src/js/yolomux/85_debug_panel.js": 8250,
+    "static_src/js/yolomux/85_debug_panel.js": 8240,
     "static_src/js/yolomux/99_terminal_boot.js": 6954,
     "yolomux_lib/app.py": 17302,
     "yolomux_lib/search/file_index.py": 4468,

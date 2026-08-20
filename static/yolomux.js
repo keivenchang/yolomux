@@ -56692,53 +56692,43 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
 function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
-  const pointIndexes = values
-    .map((_value, index) => index)
-    .filter(index => !hasDataValues || hasDataValues[index] === true);
-  if (!pointIndexes.length) return '';
-  const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
-  // Split the fill into runs broken ONLY at genuine no-data ranges, so a
-  // covered-but-coarser span fills continuously (matching the line) while a real
-  // recorded hole stays an honest gap under its red no-data band.
   const observedValues = debugGraphSeriesPlotObservedValues(series);
-  const runs = [];
-  let run = [];
-  let previousEndMs = NaN;
-  for (const index of pointIndexes) {
-    const startMs = debugGraphSeriesTimeMs(series, index);
+  const cells = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (hasDataValues && hasDataValues[index] !== true) continue;
+    const rawStartMs = debugGraphSeriesTimeMs(series, index);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(series.durations?.[index]) || jsDebugGraphRawBucketMs);
-    // Drop a HELD (non-observed) point that lands inside a genuine no-data range so
-    // the fill never leaks into a real hole; a real measurement is always kept.
+    const nextStartMs = debugGraphSeriesTimeMs(series, index + 1);
+    const rawEndMs = Number.isFinite(nextStartMs) && nextStartMs > rawStartMs ? Math.min(rawStartMs + durationMs, nextStartMs) : rawStartMs + durationMs;
+    const cell = {index, startMs: Math.max(Number(domain?.startMs) || rawStartMs, rawStartMs), endMs: Math.min(Number(domain?.endMs) || rawEndMs, rawEndMs)};
+    if (!Number.isFinite(cell.startMs) || !Number.isFinite(cell.endMs) || cell.endMs <= cell.startMs) continue;
     const observed = !observedValues || observedValues[index] === true;
-    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, startMs, Number.isFinite(startMs) ? startMs + durationMs : startMs + 1)) {
-      if (run.length) { runs.push(run); run = []; }
-      continue;
-    }
-    if (run.length && debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, startMs)) {
-      runs.push(run);
-      run = [];
-    }
-    run.push(index);
-    previousEndMs = Number.isFinite(startMs) ? startMs + durationMs : NaN;
+    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, cell.startMs, cell.endMs)) continue;
+    cells.push(cell);
+  }
+  if (!cells.length) return '';
+  // Connect observed bucket centers, but split an absent sample or genuine outage.
+  const runs = []; let run = [], previousEndMs = NaN, previousIndex = -2;
+  for (const cell of cells) {
+    if (run.length && (cell.index > previousIndex + 1 || debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, cell.startMs))) { runs.push(run); run = []; }
+    run.push(cell);
+    previousEndMs = cell.endMs;
+    previousIndex = cell.index;
   }
   if (run.length) runs.push(run);
   const stacked = lowerValues ? ` data-js-debug-area-stacked="${esc(series.key)}"` : '';
-  const plotCurrent = values.at(-1);
-  const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
-  return runs.map(runIndexes => {
-    const upperPoints = runIndexes.map(index => debugGraphPointForValue(values[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
-    const lowerPoints = lowerValues
-      ? runIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
-      : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
-    const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
-    const path = [
-      `M ${firstLower[0]},${firstLower[1]}`,
-      ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
-      ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
-      'Z',
-    ].join(' ');
-    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
+  return runs.map(runCells => {
+    const firstCell = runCells[0];
+    const lastCell = runCells.at(-1);
+    const centerMs = cell => cell.startMs + (cell.endMs - cell.startMs) / 2;
+    const upperPoints = [debugGraphPointForValue(values[firstCell.index], firstCell.startMs, chartMax, domain), ...runCells.map(cell => debugGraphPointForValue(values[cell.index], centerMs(cell), chartMax, domain)), debugGraphPointForValue(values[lastCell.index], lastCell.endMs, chartMax, domain)];
+    const lowerPoints = [debugGraphPointForValue(lowerValues ? lowerValues[lastCell.index] : 0, lastCell.endMs, chartMax, domain), ...runCells.slice().reverse().map(cell => debugGraphPointForValue(lowerValues ? lowerValues[cell.index] : 0, centerMs(cell), chartMax, domain)), debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain)];
+    const firstLower = debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain);
+    const plotCurrent = values[lastCell.index];
+    const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
+    const path = [`M ${firstLower[0]},${firstLower[1]}`, ...upperPoints.map(point => `L ${point[0]},${point[1]}`), ...lowerPoints.map(point => `L ${point[0]},${point[1]}`), 'Z'].join(' ');
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}" data-js-debug-area-shape="linear"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}" stroke="var(--js-debug-series-color, var(--accent-sky-strong))" stroke-linejoin="round" stroke-width="1.1" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
   }).join('');
 }
 
