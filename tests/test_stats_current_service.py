@@ -135,6 +135,15 @@ def delta_request(
 
 
 class FakeStore:
+    def pending_invalidation_cells(self):
+        """Explicit part of the store interface the service depends on.
+
+        Declared rather than absent: the service previously probed for this with `getattr` and
+        silently skipped a store without it, which hid the fact that a double did not model the
+        ledger at all. A double with no ledger returns an empty tuple, which is a real answer.
+        """
+        return ()
+
     def __init__(self):
         self.source_generation = 0
         self.reads = 0
@@ -2891,6 +2900,36 @@ def test_genuine_idle_exit_restarts_and_cold_warms_the_same_database(tmp_path):
         second.work_event.set()
         second_thread.join(timeout=3)
         assert second_thread.is_alive() is False
+
+
+def test_the_worker_thread_owns_the_handle_its_startup_repair_publishes_through(tmp_path):
+    """The first real build must reach readiness WITHOUT recording a failure.
+
+    FORCED RED before the fix: `_repair_startup_owed_slots` reached for `self.writer`, which the
+    LISTENER thread opened. sqlite3 connections are thread-owned, so reading the durable ledger
+    from the worker raised `ProgrammingError`. It was caught as a build failure -- after the cache
+    was published, before `cache_ready_event` was set -- so this service never announced readiness
+    at all. Asserting readiness alone is not enough: the previous run recovered on a LATER build
+    whenever more work arrived, which hid a failing build behind an eventually-ready service.
+    """
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        idle_seconds=30.0,
+    )
+    thread = threading.Thread(target=service.run, daemon=True)
+    thread.start()
+    try:
+        assert service.cache_ready_event.wait(10), service._status()
+        build = service._status()["build"]
+        assert build["failed"] == 0, build
+        assert build["last_failure"] == "", build
+        assert build["full"] >= 1, build
+    finally:
+        service.stop_event.set()
+        service.work_event.set()
+        thread.join(timeout=5)
+        assert thread.is_alive() is False
 
 
 def test_new_lease_reaps_dead_process_owners_instead_of_leaking_capacity(tmp_path):

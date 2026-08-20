@@ -1760,6 +1760,84 @@ class StatsCurrentService:
                 retained.add(cell)
         return frozenset(retained)
 
+    def _repair_startup_owed_slots(self, publisher: storage.Store | None) -> None:
+        """Answer every slot the durable ledger owes, before readiness is announced.
+
+        Separate from `repair_pending_ring_slots` only in that it is the BUILD OWNER's ordering
+        step: it exists so cache publication, exact pending-slot republication, ledger retirement
+        and the readiness signal happen in that order under one owner, rather than readiness racing
+        a repair that the worker performed afterwards.
+
+        `publisher` is the CALLING THREAD's writable handle. sqlite3 connections are thread-owned,
+        and `self.writer` belongs to the listener thread, so reaching for it from the worker raised
+        `ProgrammingError` inside the build. That error was caught as a build failure, which meant
+        the very first build after every restart failed AT the repair -- after the cache had been
+        published but BEFORE `cache_ready_event` was set. A process with no further work then never
+        announced readiness at all, and one with work only became ready on its second build.
+
+        A WRITABLE owner or nothing. The build's `reader` was previously accepted as a last resort,
+        which could never work: the repair republishes, and `publish_ring_buckets` refuses a
+        read-only store outright. With no writer there is simply nothing this process can repair.
+        """
+        # STARTUP-owed only. Running this on every build reset the flush deadline each time and
+        # collapsed the RING_FLUSH_SECONDS coalescing window, so the ring published before it was
+        # complete and the first page load rendered `incomplete_persisted_bucket` with zero cost --
+        # the same symptom, caused by the repair instead of cured by it.
+        #
+        # `_ring_publications` counts what THIS process has published, so it is zero exactly while
+        # a restart still owes the buckets a previous process left pending.
+        if self._ring_publications:
+            return
+        owner = publisher if publisher is not None else self.writer
+        if owner is None:
+            return
+        self.repair_pending_ring_slots(owner)
+
+    def _retire_unrebuildable_owed_cells(
+        self,
+        ring_writer: storage.Store,
+        cells: frozenset[materializer.DirtyCell],
+    ) -> frozenset[materializer.DirtyCell]:
+        """Settle owed cells the current generation cannot rebuild, and return the rest.
+
+        THE FIRST INCORRECT TRANSITION this closes: after a restart whose wall clock has advanced,
+        an owed 1-second cell is still physically present in its ring slot but its bucket has left
+        the materializer's candidate window. Startup repair stages it, `_ring_writes` finds no
+        candidate bucket, `_flush_ring_if_due` writes nothing, and the ledger row survives every
+        later pass -- so `read_ring_window` hid that bucket permanently while the contradicted
+        payload sat in the slot.
+
+        Only a cell whose resolution the candidate DID materialize is judged here. A resolution
+        with no materialized layer means this generation has no opinion about that window at all,
+        which is not the same as "outside it", and treating it as unrebuildable would clear the
+        ring on a cold or partial build.
+
+        The clear and the retirement are one storage-owner transaction, never two steps here.
+        """
+        with self.cache_lock:
+            candidate = None if self._cache is None else self._cache.generation
+        if candidate is None:
+            return cells
+        rebuildable = {
+            (layer.resolution, bucket.start)
+            for layer in candidate.layers
+            for bucket in layer.buckets
+        }
+        materialized_resolutions = {
+            layer.resolution for layer in candidate.layers if layer.buckets
+        }
+        unrebuildable = frozenset(
+            cell for cell in cells
+            if cell.resolution in materialized_resolutions
+            and (cell.resolution, cell.start) not in rebuildable
+        )
+        if not unrebuildable:
+            return cells
+        ring_writer.retire_unrebuildable_ring_cells(
+            (cell.resolution, cell.start) for cell in unrebuildable
+        )
+        return cells - unrebuildable
+
     def repair_pending_ring_slots(
         self,
         publisher: storage.Store | None = None,
@@ -1785,28 +1863,48 @@ class StatsCurrentService:
         ring_writer = self.writer if publisher is None else publisher
         if ring_writer is None or self._cache is None:
             return None
-        # Through the public store method, and tolerant of a store that does not offer one: a
-        # reader or a test double has no ledger to repair from, and that is not an error.
-        reader = getattr(ring_writer, "pending_invalidation_cells", None)
-        if reader is None:
-            return None
-        pending = reader()
+        pending = ring_writer.pending_invalidation_cells()
         if not pending:
             return None
         cells = frozenset(
             materializer.DirtyCell(resolution_seconds, bucket_start)
             for resolution_seconds, bucket_start, _generation in pending
         )
+        # An owed cell that has aged out of the materializer's candidate window can never be
+        # rebuilt: staging it produces no write, so no publication answers it and the row stays
+        # pending forever while the read path hides the slot. Settle those as honest gaps FIRST,
+        # so only genuinely rebuildable cells are staged for republication below.
+        cells = self._retire_unrebuildable_owed_cells(ring_writer, cells)
+        if not cells:
+            return None
+        # TRACED FIRST INCORRECT TRANSITION: at restart `_stage_ring_candidate` has already staged
+        # the WHOLE ring -- measured 1248 cells -- so merely bringing the deadline forward made the
+        # repair publish all 1248 immediately instead of the 4 cells actually owed. That turns a
+        # bounded repair into a forced full-ring publication of a generation that has not settled,
+        # which is what pushed the restart's right edge out as incomplete.
+        #
+        # So the repair publishes EXACTLY the owed cells: the rest of the staged set is set aside
+        # for the duration and restored afterwards, so the ordinary cadence still owns it and
+        # `_restart_ring_cells` still gets to decide the first steady-state publication.
         with self.work_lock:
-            self._pending_ring_dirty.update(cells)
+            deferred = self._pending_ring_dirty - cells
+            self._pending_ring_dirty = set(cells)
             self._ring_source_generation = max(
                 self._ring_source_generation,
                 max(generation for _r, _b, generation in pending),
             )
-            # Due NOW. The cells are exact and already bounded by the ring's slot count, so this is
-            # a bounded repair rather than a bypass of the coalescing cadence.
+            previous_deadline = self._next_ring_flush_at
             self._next_ring_flush_at = self.monotonic()
-        return self._flush_ring_if_due(publisher)
+        try:
+            published = self._flush_ring_if_due(publisher)
+        finally:
+            with self.work_lock:
+                # Whatever the repair did not consume goes back to the ordinary cadence, with its
+                # original deadline, so startup repair cannot reset the steady-state window.
+                self._pending_ring_dirty |= deferred
+                if self._pending_ring_dirty and self._next_ring_flush_at is None:
+                    self._next_ring_flush_at = previous_deadline
+        return published
 
     def _flush_ring_if_due(
         self,
@@ -1912,12 +2010,9 @@ class StatsCurrentService:
                 self._collect_host_facts_if_due(publisher)
                 work = self._take_work(scheduled=True)
                 if work is not None:
-                    self._build_once(reader, *work)
-                    # Immediately after the build that produced a generation to publish FROM, and
-                    # before the ordinary cadence. A restart leaves the in-memory dirty set empty
-                    # while the durable ledger still owes buckets, so without this the right edge
-                    # stays hidden until something else happens to dirty it.
-                    self.repair_pending_ring_slots(publisher)
+                    # The worker's OWN writable handle. sqlite3 connections are thread-owned, and
+                    # the startup repair inside this build publishes and retires ledger rows.
+                    self._build_once(reader, *work, publisher=publisher)
                 self._flush_ring_if_due(publisher)
         finally:
             try:
@@ -2194,7 +2289,8 @@ class StatsCurrentService:
             self._record_failure("host_collector", error)
 
     def _build_once(self, reader: storage.Store, full: bool,
-                    dirty: frozenset[materializer.DirtyCell], coverage_refresh: bool = False) -> None:
+                    dirty: frozenset[materializer.DirtyCell], coverage_refresh: bool = False,
+                    publisher: storage.Store | None = None) -> None:
         started = self.monotonic()
         used_full = full
         self._building = True
@@ -2312,6 +2408,13 @@ class StatsCurrentService:
                 self._encodes_skipped_idle += 1
             if self._publish(candidate, encoded, resolutions=resolutions):
                 self._stage_ring_candidate(previous, candidate)
+                # BEFORE the readiness signal, not after. Running this in the worker after
+                # `_build_once` returned meant readiness was announced with durable invalidations
+                # still pending -- measured at 139 outstanding when `cache_ready_event` was set --
+                # so the first cold request after a restart saw ready=True and still read a gap.
+                # Ready has to mean every consumer-visible owner for this generation is
+                # established, and an owed slot is exactly such an owner.
+                self._repair_startup_owed_slots(publisher)
                 # Ready means every consumer-visible owner for this generation has been
                 # established. Setting the event inside _publish let a waiter advance an
                 # injected monotonic clock before ring staging chose its flush deadline.
@@ -3635,6 +3738,21 @@ class StatsCurrentService:
             )
             if window.ring_generation <= 0:
                 return RingSnapshotRead(None, "ring_unfilled")
+            if window.pending_invalidations:
+                # TRACED FIRST INCORRECT TRANSITION for the restart landing: a browser posting its
+                # own telemetry invalidates the right-edge bucket at every resolution. At 60s that
+                # is the SAME bucket the seeded usage atom lives in, so `read_ring_window` reported
+                # it missing (correctly -- the slot is contradicted) and this owner substituted a
+                # `_ring_gap_bucket` zero. The page then rendered a cost total of 0 for a store
+                # that holds 12 tokens, and `no_data` blamed `incomplete_persisted_bucket`.
+                #
+                # A contradicted bucket that the materializer can still rebuild is NOT an honest
+                # gap: the honest gap is reserved for a slot no generation can rebuild, and that
+                # slot is cleared, so it leaves no pending row behind. While a row is still
+                # pending, the storage contract is that the bucket routes to the MATERIALIZER --
+                # so this owner declines the whole persisted view and lets the live cache answer,
+                # rather than fabricating a zero the store's own facts disagree with.
+                return RingSnapshotRead(None, "ring_contradicted")
             decoded = tuple(_decode_ring_bucket(row) for row in window.rows)
             latest = max(
                 decoded,

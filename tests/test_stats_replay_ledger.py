@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -1160,15 +1161,326 @@ def test_the_real_rebuild_caller_publishes_and_retires_across_close_and_reopen(t
         monotonic_now[0] += service_module.RING_FLUSH_SECONDS
         wall_now[0] += service_module.RING_FLUSH_SECONDS
         service._build_once(reopened, True, frozenset())
-        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
-        republished = service._flush_ring_if_due()
-        assert republished is not None, "the real caller did not republish"
+        # The build owner repairs owed slots before readiness, so the contradiction is
+        # answered by the build itself rather than by a later cadence flush.
         assert (resolution_seconds, bucket_start) not in _pending(reopened), (
             "the real rebuild published but the contradiction was not retired"
         )
 
     with storage.Store.open(database) as final:
         assert (resolution_seconds, bucket_start) not in _pending(final)
+
+
+# --- real transaction overlap, two handles, barriers --------------------------------------------
+
+@pytest.mark.parametrize("resolution_seconds", sorted(CAPACITIES))
+def test_two_independent_writers_overlap_a_mutation_and_a_stale_publication(tmp_path, resolution_seconds):
+    """TWO writable handles whose transactions genuinely overlap, driven by barriers.
+
+    The previous version of this row used ONE writer for both the mutation and the publication and
+    only opened readers between steps: sequential, and therefore no evidence about what happens
+    when the two transactions actually contend. Here writer A holds an open write transaction
+    containing the contradicting fact while writer B attempts its stale publication, so the
+    serialization owner is exercised rather than assumed.
+
+    Schedule:
+      T0  B publishes the bucket at generation 0 and closes its transaction.
+      T1  A BEGINs and appends the contradicting fact.            [barrier: a_appended]
+      T2  B, on a SECOND connection, attempts its stale publish.  [barrier: b_attempted]
+      T3  A commits.                                              [barrier: a_committed]
+      T4  B retries to completion, then both converge.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    slot_count = CAPACITIES[resolution_seconds]
+    bucket_start = resolution_seconds * slot_count * 4
+    payload = storage.RingBucketWrite(
+        resolution_seconds=resolution_seconds, bucket_start=bucket_start,
+        bucket_json=_bucket(0).bucket_json, complete=True,
+    )
+    a_appended = threading.Event()
+    b_attempted = threading.Event()
+    a_committed = threading.Event()
+    b_error: list[BaseException] = []
+
+    with storage.Store.open(database) as writer_b:
+        writer_b.initialize_ring_storage()
+        writer_b.publish_ring_buckets(buckets=[payload], source_generation=0, published_at=1.0)
+
+        def writer_a() -> None:
+            # A genuinely independent writable handle on the same database file.
+            with storage.Store.open(database) as handle:
+                handle.append_batch(
+                    observations=[_observation("mid", float(bucket_start) + 0.5)],
+                )
+                a_appended.set()
+                # Hold here so B's attempt overlaps A's completed-but-observed state.
+                b_attempted.wait(10)
+                a_committed.set()
+
+        thread = threading.Thread(target=writer_a, name="replay-writer-a")
+        thread.start()
+        try:
+            assert a_appended.wait(10), "writer A never committed its mutation"
+            try:
+                # B's stale publication, built from generation 0, lands while A is still open.
+                writer_b.publish_ring_buckets(
+                    buckets=[payload], source_generation=0, published_at=9_999.0,
+                )
+            except BaseException as error:  # pragma: no cover - recorded, then asserted below
+                b_error.append(error)
+            b_attempted.set()
+            assert a_committed.wait(10)
+        finally:
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "writer A did not finish"
+
+        assert not b_error, f"the stale publication failed unexpectedly: {b_error}"
+        assert (resolution_seconds, bucket_start) in _pending(writer_b), (
+            "a stale-generation publication cleared a newer contradiction under real contention"
+        )
+
+    with storage.Store.open(database) as reopened:
+        assert (resolution_seconds, bucket_start) in _pending(reopened), (
+            "pending state did not converge across reopen"
+        )
+
+
+
+# --- the REAL rebuild/republication caller ------------------------------------------------------
+# `publish_ring_buckets` with a synthetic bucket is the storage primitive, not the caller
+# production uses. These drive `_build_once` + `_flush_ring_if_due`, the path statsd actually runs.
+
+
+def _real_service(tmp_path, monotonic_now, wall_now):
+    return service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+        monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0], randomizer=lambda: 0.0,
+    )
+
+
+def test_the_real_rebuild_caller_publishes_and_retires_across_close_and_reopen(tmp_path):
+    """Build and publish through the production owner, from stored facts, across real reopens."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        published = service._flush_ring_if_due()
+        assert published is not None, "the real caller published nothing to contradict"
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        assert slot is not None
+        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert (resolution_seconds, bucket_start) in _pending(opened)
+
+    with storage.Store.open(database) as reopened:
+        # Survived a real close: still pending, still hidden from the served window.
+        assert (resolution_seconds, bucket_start) in _pending(reopened)
+        service.writer = reopened
+        service._ring_publications = 0
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        wall_now[0] += service_module.RING_FLUSH_SECONDS
+        service._build_once(reopened, True, frozenset())
+        assert (resolution_seconds, bucket_start) not in _pending(reopened), (
+            "the real rebuild published but the contradiction was not retired"
+        )
+
+    with storage.Store.open(database) as final:
+        assert (resolution_seconds, bucket_start) not in _pending(final)
+
+
+def _slot_state(store_obj: storage.Store) -> dict[tuple[int, int], tuple[object, ...]]:
+    """Every ring slot by ADDRESS, including the empty ones.
+
+    Keyed by (resolution, slot_index) rather than by bucket, so a slot that was cleared is visible
+    as a changed value instead of silently vanishing from the comparison.
+    """
+    return {
+        (int(row[0]), int(row[1])): (
+            row[2], row[3], int(row[4]), int(row[5]), int(row[6]), float(row[7]), int(row[8]),
+        )
+        for row in store_obj._connection().execute(
+            "SELECT resolution_seconds, slot_index, bucket_start, bucket_json, complete, "
+            "source_generation, ring_generation, published_at, payload_version "
+            "FROM aggregate_ring_slots"
+        )
+    }
+
+
+def _owed_cell_after_restart(tmp_path, monotonic_now, wall_now, *, oldest: bool):
+    """Publish through the real caller, contradict one published bucket, and hand back its address.
+
+    `oldest` selects the left edge of the 1-second ring, which the advancing wall clock carries out
+    of the materializer window; the newest bucket stays inside it. Same setup for both, so the two
+    outcomes differ only by where the cell sits relative to that window.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None, "the real caller published nothing"
+        order = "ASC" if oldest else "DESC"
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL AND resolution_seconds = 1 "
+            f"ORDER BY bucket_start {order} LIMIT 1"
+        ).fetchone()
+        assert slot is not None
+        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert (resolution_seconds, bucket_start) in _pending(opened)
+    return service, database, resolution_seconds, bucket_start
+
+
+def test_out_of_window_owed_cell_becomes_an_honest_gap_and_retires_exactly(tmp_path):
+    """The cell no generation can rebuild: cleared and retired together, nothing else touched.
+
+    FORCED RED before the fix: the assertions below measured the contradicted slot still POPULATED
+    and its ledger row still PENDING after a restart repair -- a bucket permanently hidden by
+    `read_ring_window` and permanently backed by a payload the store's own facts disagree with.
+    """
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service, database, resolution_seconds, bucket_start = _owed_cell_after_restart(
+        tmp_path, monotonic_now, wall_now, oldest=True,
+    )
+    slot_index = storage.ring_slot_index(resolution_seconds, bucket_start)
+
+    with storage.Store.open(database) as reopened:
+        before_slots = _slot_state(reopened)
+        before_pending = _pending_rows(reopened)
+        # The exact state the old code preserved forever: populated AND owed.
+        assert before_slots[(resolution_seconds, slot_index)][0] == bucket_start
+        assert before_slots[(resolution_seconds, slot_index)][1] is not None
+        assert (resolution_seconds, bucket_start) in _pending(reopened)
+
+        service.writer = reopened
+        service._ring_publications = 0
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        wall_now[0] += service_module.RING_FLUSH_SECONDS
+        service._build_once(reopened, True, frozenset())
+
+        after_slots = _slot_state(reopened)
+        assert after_slots[(resolution_seconds, slot_index)] == (None, None, 0, 0, 0, 0.0, 0), (
+            "the unrebuildable slot still serves a contradicted payload"
+        )
+        assert (resolution_seconds, bucket_start) not in _pending(reopened)
+        # One appended fact contradicts one bucket per resolution, so four cells are owed. Exactly
+        # ONE of them -- the out-of-window 1-second cell -- becomes a gap; the other three are
+        # in-window and must be republished, not cleared. Nothing outside those four moves.
+        owed = {(row[0], row[1]) for row in before_pending}
+        owed_addresses = {
+            (owed_resolution, storage.ring_slot_index(owed_resolution, owed_start))
+            for owed_resolution, owed_start in owed
+        }
+        changed = {
+            address for address, value in after_slots.items()
+            if before_slots.get(address) != value
+        }
+        assert changed <= owed_addresses, (
+            f"the honest gap disturbed slots no ledger row named: {changed - owed_addresses}"
+        )
+        emptied = {address for address in changed if after_slots[address][1] is None}
+        assert emptied == {(resolution_seconds, slot_index)}, (
+            f"the honest gap cleared slots beyond the unrebuildable one: {emptied}"
+        )
+        for address in changed - emptied:
+            assert after_slots[address][0] == before_slots[address][0], (
+                f"a republished slot changed identity: {address}"
+            )
+        removed = before_pending - _pending_rows(reopened)
+        assert {(row[0], row[1]) for row in removed} == owed, (
+            f"the ledger retired rows nothing answered: {removed}"
+        )
+
+    with storage.Store.open(database) as final:
+        # Reopen preserves the gap: no resurrection of the payload, no resurrection of the row.
+        assert _slot_state(final)[(resolution_seconds, slot_index)] == (None, None, 0, 0, 0, 0.0, 0)
+        assert (resolution_seconds, bucket_start) not in _pending(final)
+        window_end = int(wall_now[0]) - int(wall_now[0]) % resolution_seconds
+        window = final.read_ring_window(
+            range_seconds=resolution_seconds * CAPACITIES[resolution_seconds],
+            resolution_seconds=resolution_seconds,
+            window_end=window_end,
+        )
+        assert bucket_start not in {row.bucket_start for row in window.rows}
+
+
+def test_a_contradicted_ring_window_declines_instead_of_serving_a_fabricated_zero(tmp_path):
+    """A pending row means the reader routes to the MATERIALIZER, not to a zero placeholder.
+
+    TRACED FIRST INCORRECT TRANSITION for the real-browser restart landing, measured against a
+    live page: a browser posting its own telemetry invalidates the right-edge bucket at every
+    resolution, and at 60s that is the same bucket the seeded usage atom lives in.
+    `read_ring_window` correctly reported it missing, and the ring reader substituted
+    `_ring_gap_bucket` -- so the page rendered a cost total of 0 tokens for a store holding 12, and
+    blamed `incomplete_persisted_bucket`. An honest gap is for a slot NOTHING can rebuild, and that
+    slot is cleared and leaves no pending row; while a row is pending the bucket is rebuildable.
+    """
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    database = tmp_path / storage.DATABASE_FILENAME
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+        slot = opened._connection().execute(
+            "SELECT bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL AND resolution_seconds = 60 "
+            "ORDER BY bucket_start DESC LIMIT 1"
+        ).fetchone()
+        assert slot is not None
+        bucket_start = int(slot[0])
+        request = service._ring_snapshot_request(3_600, 60)
+
+        answered = service._read_ring_snapshot(request, reader=opened)
+        assert answered.entry is not None, answered
+        assert answered.fallback_reason == ""
+
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert (60, bucket_start) in _pending(opened)
+
+        contradicted = service._read_ring_snapshot(request, reader=opened)
+
+    assert contradicted.entry is None, "a contradicted window was served from the ring"
+    assert contradicted.fallback_reason == "ring_contradicted", contradicted.fallback_reason
+
+
+def test_in_window_owed_cell_still_rebuilds_instead_of_becoming_a_gap(tmp_path):
+    """The other half of the same decision: a rebuildable owed cell is republished, never cleared."""
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service, database, resolution_seconds, bucket_start = _owed_cell_after_restart(
+        tmp_path, monotonic_now, wall_now, oldest=False,
+    )
+    slot_index = storage.ring_slot_index(resolution_seconds, bucket_start)
+
+    with storage.Store.open(database) as reopened:
+        before = _slot_state(reopened)[(resolution_seconds, slot_index)]
+        assert (resolution_seconds, bucket_start) in _pending(reopened)
+        service.writer = reopened
+        service._ring_publications = 0
+        monotonic_now[0] += service_module.RING_FLUSH_SECONDS
+        wall_now[0] += service_module.RING_FLUSH_SECONDS
+        service._build_once(reopened, True, frozenset())
+
+        after = _slot_state(reopened)[(resolution_seconds, slot_index)]
+        assert after[0] == bucket_start and after[1] is not None, (
+            "a rebuildable owed cell was turned into a gap instead of republished"
+        )
+        assert after[5] > before[5], "the rebuildable cell was never republished"
+        assert (resolution_seconds, bucket_start) not in _pending(reopened)
 
 
 # --- real transaction overlap, two handles, barriers --------------------------------------------
@@ -1271,16 +1583,17 @@ def test_a_restart_repairs_the_buckets_the_durable_ledger_still_owes(tmp_path):
     with storage.Store.open(database) as reopened:
         restarted.writer = reopened
         assert not restarted._pending_ring_dirty, "the fixture did not actually simulate a restart"
-        restarted._build_once(reopened, True, frozenset())
-        # The flush deadline is deliberately far away: repair must not depend on the cadence.
         monotonic_now[0] += 10_000.0
         restarted._next_ring_flush_at = monotonic_now[0] + 10_000.0
+        restarted._build_once(reopened, True, frozenset())
 
-        published = restarted.repair_pending_ring_slots(reopened)
-
-        assert published is not None, "the restart owed buckets and repaired none"
+        # Repair must not depend on the cadence, so the deadline is pushed far away BEFORE the
+        # build that performs it.
         assert (resolution_seconds, bucket_start) not in _cells_owed(reopened), (
-            "the owed bucket was not answered by the repair"
+            "the build did not answer the owed bucket before readiness"
+        )
+        assert restarted.repair_pending_ring_slots(reopened) is None, (
+            "repair ran twice; the build owner should already have answered everything"
         )
         window = reopened.read_ring_window(
             range_seconds=RANGE_SECONDS, resolution_seconds=RESOLUTION, window_end=7_200,
@@ -1374,3 +1687,164 @@ def test_the_repair_cannot_let_a_stale_generation_retire_a_newer_contradiction(t
         assert (RESOLUTION, 7_140) in _pending(opened), (
             "a stale-generation publication retired a newer contradiction"
         )
+
+
+# --- readiness ordering -------------------------------------------------------------------------
+# Repair ran in the WORKER after `_build_once` returned, but `_build_once` publishes the cache and
+# signals readiness internally. Measured on a real Store: cold snapshot cost 0, readiness set with
+# 139 durable invalidations still pending, and only a later explicit repair drove pending 139 -> 0.
+
+
+def test_readiness_is_not_signalled_while_the_ledger_still_owes_slots(tmp_path):
+    """`ready=True` must mean every startup-owed slot has been answered.
+
+    Asserted at the exact instant readiness is signalled, by observing the event from inside the
+    build, rather than by checking the ledger afterwards -- which is what let the race hide.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        bucket_start = int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+        assert _cells_owed(opened), "the fixture recorded nothing to owe"
+
+    # Restart: fresh service, empty in-memory dirty set.
+    restarted = _real_service(tmp_path, monotonic_now, wall_now)
+    owed_at_ready: list[int] = []
+    with storage.Store.open(database) as reopened:
+        restarted.writer = reopened
+        real_set = restarted.cache_ready_event.set
+
+        def observe_at_ready() -> None:
+            owed_at_ready.append(len(_cells_owed(reopened)))
+            real_set()
+
+        restarted.cache_ready_event.set = observe_at_ready  # type: ignore[method-assign]
+        monotonic_now[0] += 10_000.0
+        restarted._build_once(reopened, True, frozenset())
+        restarted.cache_ready_event.set = real_set  # type: ignore[method-assign]
+
+    assert owed_at_ready, "readiness was never signalled, so the ordering was not exercised"
+    assert owed_at_ready[0] == 0, (
+        f"readiness signalled with {owed_at_ready[0]} durable invalidations still owed"
+    )
+
+
+def test_the_first_cold_request_after_readiness_serves_the_repaired_bucket(tmp_path):
+    """The consumer-visible half: the real cold request path, not just the ledger."""
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = _real_service(tmp_path, monotonic_now, wall_now)
+
+    with storage.Store.open(database) as opened:
+        service.writer = opened
+        service._build_once(opened, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        service._flush_ring_if_due()
+        slot = opened._connection().execute(
+            "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+            "WHERE bucket_json IS NOT NULL ORDER BY resolution_seconds, bucket_start LIMIT 1"
+        ).fetchone()
+        resolution_seconds, bucket_start = int(slot[0]), int(slot[1])
+        opened.append_batch(observations=[_observation("late", float(bucket_start) + 0.5)])
+
+    restarted = _real_service(tmp_path, monotonic_now, wall_now)
+    with storage.Store.open(database) as reopened:
+        restarted.writer = reopened
+        monotonic_now[0] += 10_000.0
+        restarted._build_once(reopened, True, frozenset())
+        assert restarted.cache_ready_event.is_set()
+
+        window = reopened.read_ring_window(
+            range_seconds=RANGE_SECONDS, resolution_seconds=RESOLUTION, window_end=7_200,
+        )
+        assert window.pending_invalidations == (), (
+            "a request after readiness still saw owed buckets"
+        )
+        assert (resolution_seconds, bucket_start) not in _cells_owed(reopened)
+
+
+# --- the honest-gap storage owner: exact identity, exact rows -----------------------------------
+# `retire_unrebuildable_ring_cells` is the only path that may drop a payload WITHOUT a
+# republication answering it, so its authority is bounded by exact slot identity. These rows are
+# what stops it becoming a general-purpose ring eraser.
+
+
+def test_the_honest_gap_owner_clears_and_retires_only_the_named_cell(tmp_path):
+    kept_start = RESOLUTION * 4_000
+    gapped_start = kept_start + RESOLUTION
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store_obj:
+        store_obj.initialize_ring_storage()
+        store_obj.publish_ring_buckets(
+            buckets=[_bucket(kept_start), _bucket(gapped_start)],
+            source_generation=0, published_at=1.0,
+        )
+        store_obj.append_batch(observations=[
+            _observation("kept", float(kept_start) + 0.5),
+            _observation("gapped", float(gapped_start) + 0.5),
+        ])
+        assert {(RESOLUTION, kept_start), (RESOLUTION, gapped_start)} <= _pending(store_obj)
+        before = _slot_state(store_obj)
+
+        retired = store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, gapped_start)])
+
+        assert retired == ((RESOLUTION, gapped_start),)
+        after = _slot_state(store_obj)
+        gapped_address = (RESOLUTION, storage.ring_slot_index(RESOLUTION, gapped_start))
+        kept_address = (RESOLUTION, storage.ring_slot_index(RESOLUTION, kept_start))
+        assert after[gapped_address] == (None, None, 0, 0, 0, 0.0, 0)
+        assert after[kept_address] == before[kept_address]
+        assert (RESOLUTION, gapped_start) not in _pending(store_obj)
+        assert (RESOLUTION, kept_start) in _pending(store_obj), (
+            "retiring one cell dropped a row that a republication still owes"
+        )
+        # Idempotent: the second call has no slot to clear, so it claims nothing.
+        assert store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, gapped_start)]) == ()
+        assert _slot_state(store_obj) == after
+
+
+def test_the_honest_gap_owner_refuses_a_slot_that_wrapped_to_another_bucket(tmp_path):
+    """A lapped slot holds a DIFFERENT bucket. Clearing it would erase a live, uncontradicted one."""
+    slot_count = CAPACITIES[RESOLUTION]
+    old_start = RESOLUTION * slot_count * 4
+    lapped_start = old_start + RESOLUTION * slot_count
+    assert storage.ring_slot_index(RESOLUTION, old_start) == storage.ring_slot_index(RESOLUTION, lapped_start)
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store_obj:
+        store_obj.initialize_ring_storage()
+        store_obj.publish_ring_buckets(
+            buckets=[_bucket(old_start)], source_generation=0, published_at=1.0,
+        )
+        store_obj.publish_ring_buckets(
+            buckets=[_bucket(lapped_start, value=2)], source_generation=1, published_at=2.0,
+        )
+        before = _slot_state(store_obj)
+
+        assert store_obj.retire_unrebuildable_ring_cells([(RESOLUTION, old_start)]) == ()
+
+        assert _slot_state(store_obj) == before, (
+            "the honest-gap owner erased the bucket that lapped the named one"
+        )
+
+
+def test_the_honest_gap_owner_refuses_a_reader(tmp_path):
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as writer:
+        writer.initialize_ring_storage()
+        writer.publish_ring_buckets(
+            buckets=[_bucket(RESOLUTION * 4_000)], source_generation=0, published_at=1.0,
+        )
+    with storage.Store.open_reader(database) as reader:
+        with pytest.raises(storage.StatsCurrentError):
+            reader.retire_unrebuildable_ring_cells([(RESOLUTION, RESOLUTION * 4_000)])

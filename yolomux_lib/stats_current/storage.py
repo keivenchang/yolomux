@@ -627,6 +627,16 @@ def _decoded_ring_bucket_json(value: object) -> str:
         raise SchemaMismatchError("aggregate ring bucket compression is invalid") from error
 
 
+def ring_slot_index(resolution_seconds: int, bucket_start: int) -> int:
+    """The one owner of bucket-start -> ring slot address.
+
+    Writes, reads, and every caller that needs to name a slot must agree exactly, because a ring
+    IS its modular addressing: two copies that disagree by one write a bucket where a reader will
+    never look for it.
+    """
+    return (bucket_start // resolution_seconds) % stats_resolution.RING_CAPACITIES[resolution_seconds]
+
+
 def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | bytes, int]:
     if not isinstance(bucket, RingBucketWrite):
         raise StorageValidationError("ring bucket must be a RingBucketWrite")
@@ -655,7 +665,7 @@ def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | b
         raise StorageValidationError("bucket_json must be a JSON object")
     if not isinstance(bucket.complete, bool):
         raise StorageValidationError("complete must be a boolean")
-    slot_index = (bucket_start // resolution_seconds) % slot_count
+    slot_index = ring_slot_index(resolution_seconds, bucket_start)
     return (
         resolution_seconds,
         slot_index,
@@ -2438,6 +2448,65 @@ class Store:
                 raise SchemaMismatchError("aggregate publication row is missing")
         return RingPublication(ring_generation, source, published, len(prepared))
 
+    def retire_unrebuildable_ring_cells(
+        self,
+        cells: Iterable[tuple[int, int]],
+    ) -> tuple[tuple[int, int], ...]:
+        """Clear an exact contradicted slot and retire its exact pending row, together.
+
+        The ONE owner of the honest-gap transition. A pending invalidation is answered by a
+        republication (`publish_ring_buckets`), and that is the only path that may retire a row
+        whose bucket is still rebuildable. But a bucket that has aged out of the materializer's
+        candidate window can never be rebuilt again: startup repair stages it, no candidate bucket
+        exists to write, no publication answers it, and the row stays pending forever while
+        `read_ring_window` hides the slot. The retained payload is then both permanently hidden and
+        permanently contradicted.
+
+        The serving decision is an honest gap: drop the contradicted payload and the row it owes in
+        ONE transaction, so there is never a moment where the slot is served without its
+        contradiction or the row survives its slot. Retirement is a DELETE, matching
+        `_retire_unactionable_invalidations`, because no publication ever answered this row --
+        stamping `applied_at` would claim a republication that did not happen.
+
+        Exactness is the whole safety argument. A slot is cleared only while it still holds that
+        EXACT `bucket_start`; a slot the ring has lapped onto another bucket is a different
+        identity and is left untouched, and its row is left to the ordinary unactionable sweep.
+        Callers must only pass cells they have measured to be unrebuildable.
+        """
+        if self.read_only:
+            raise StatsCurrentError("stats store reader cannot retire ring cells")
+        addressed = sorted({
+            (
+                _validate_nonnegative_integer(resolution_seconds, "resolution_seconds"),
+                _validate_nonnegative_integer(bucket_start, "bucket_start"),
+            )
+            for resolution_seconds, bucket_start in cells
+        })
+        if not addressed:
+            return ()
+        connection = self._require_ring_storage()
+        retired: list[tuple[int, int]] = []
+        with _transaction(connection):
+            for resolution_seconds, bucket_start in addressed:
+                cleared = connection.execute(
+                    "UPDATE aggregate_ring_slots SET bucket_start = NULL, bucket_json = NULL, "
+                    "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0, "
+                    "payload_version = 0 "
+                    "WHERE resolution_seconds = ? AND bucket_start = ? AND bucket_json IS NOT NULL",
+                    (resolution_seconds, bucket_start),
+                ).rowcount
+                if not cleared:
+                    # Wrapped, never published, or already cleared: a different identity now owns
+                    # that slot, so this method has no authority over either half of the pair.
+                    continue
+                connection.execute(
+                    "DELETE FROM ring_invalidations WHERE resolution_seconds = ? "
+                    "AND bucket_start = ? AND applied_at IS NULL",
+                    (resolution_seconds, bucket_start),
+                )
+                retired.append((resolution_seconds, bucket_start))
+        return tuple(retired)
+
     def read_ring_window(
         self,
         *,
@@ -2463,7 +2532,6 @@ class Store:
         connection = self._require_ring_storage()
         window_start = end - range_value
         expected_starts = tuple(range(window_start, end, resolution_value))
-        slot_count = stats_resolution.RING_CAPACITIES[resolution_value]
         with _transaction(connection):
             publication = connection.execute(
                 "SELECT ring_generation, source_generation, published_at "
@@ -2500,7 +2568,7 @@ class Store:
             rows: list[RingBucketRow] = []
             missing: list[int] = []
             for bucket_start in expected_starts:
-                slot_index = (bucket_start // resolution_value) % slot_count
+                slot_index = ring_slot_index(resolution_value, bucket_start)
                 candidate = slot_rows.get(slot_index)
                 if candidate is None or candidate[1] is None or int(candidate[1]) != bucket_start:
                     missing.append(bucket_start)
