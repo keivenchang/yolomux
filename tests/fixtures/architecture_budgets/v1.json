@@ -2114,6 +2114,7 @@
     "tests/test_gate_tmux_identity.py": 261,
     "tests/test_gate_tmux_recovery.py": 41,
     "tests/test_gate_transcript_roots.py": 339,
+    "tests/test_gate_watchd_kernel_watches.py": 226,
     "tests/test_gate_worktree_protection.py": 322,
     "tests/test_host_diagnostics.py": 222,
     "tests/test_host_identity.py": 307,
