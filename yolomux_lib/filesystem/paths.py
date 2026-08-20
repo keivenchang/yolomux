@@ -574,6 +574,17 @@ class SafePathHandle:
             "this platform cannot expose the pinned filesystem descriptor",
             status=500,
             message_key="fs.error.operationFailed",
+            # The localized string stays the shared generic one, because nothing the USER can do
+            # differs here.  An OPERATOR reading a 500 does need to tell this apart from every other
+            # operation failure: it is a platform capability refusal, not a fault in the request or
+            # the file, and it is the fail-closed branch of the descriptor-bound authorization owner
+            # rather than a re-resolution.  `diagnostic` is the existing field for exactly that --
+            # operator-facing detail carried alongside an unchanged localized message.
+            diagnostic=(
+                "descriptor-bound authorization refused: no per-descriptor path root "
+                f"({', '.join(str(root) for root in DESCRIPTOR_PATH_ROOTS)}) is available on this "
+                "platform, so the authorized generation cannot be named for the consumer"
+            ),
         )
 
 
