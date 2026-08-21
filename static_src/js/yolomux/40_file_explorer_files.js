@@ -3474,10 +3474,18 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
-    differMode,
-    autoExpand: options.autoExpand,
-  });
+  // renderTreeChildren already computed dirExpanded from its own collapsedSet/expandedSet (the diff
+  // viewer's toggle state, e.g.) to decide child recursion; route that same value through here instead
+  // of recomputing via the global fileTreeDirectoryExpanded, which has no knowledge of collapsedSet and
+  // would desync the row's aria-expanded/disclosure state from the Set that actually drives collapse.
+  const expanded = entry.kind === 'dir' && (
+    typeof options.dirExpanded === 'boolean'
+      ? options.dirExpanded
+      : fileTreeDirectoryExpanded(fullPath, {
+        differMode,
+        autoExpand: options.autoExpand,
+      })
+  );
   const loadedChildListing = options.entriesByDir instanceof Map
     && options.entriesByDir.has(normalizeDirectoryPath(fullPath));
   const pendingExpansion = !differMode && entry.kind === 'dir' && (
@@ -3523,6 +3531,16 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     relDir,
     imagePreviewEligible: entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES,
   };
+}
+
+function scheduleFileTreeRowActivation(row, fullPath, entry, event) {
+  const token = {};
+  row.__fileTreePendingActivation = token;
+  setTimeout(() => {
+    if (row.__fileTreePendingActivation !== token) return;
+    row.__fileTreePendingActivation = null;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  }, 0);
 }
 
 function bindFinderRowHandlers(row, state) {
@@ -3586,7 +3604,7 @@ function bindFinderRowHandlers(row, state) {
     if (event.detail > 1) return;
     row.__fileTreePointerActivated = true;
     setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.onclick = event => {
     if (row.__fileTreeSuppressClick) {
@@ -3608,7 +3626,7 @@ function bindFinderRowHandlers(row, state) {
     }
     event.stopPropagation();
     if (event.detail > 1) return;
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.ondblclick = event => {
     event.preventDefault();
@@ -3619,6 +3637,14 @@ function bindFinderRowHandlers(row, state) {
   row.oncontextmenu = event => {
     event.preventDefault();
     event.stopPropagation();
+    // Observed on macOS: a trackpad/Control-click secondary click can report `button: 0` on the
+    // pointerdown/pointerup pair even though `contextmenu` also fires correctly. That false
+    // button-0 reading lets onpointerup's own activation call run BEFORE this handler ever sees
+    // the gesture, so a same-tick suppression flag here is too late. onpointerup instead defers
+    // its activation by one macrotask via scheduleFileTreeRowActivation; cancel that here, since
+    // contextmenu always dispatches synchronously before that deferred tick can run.
+    row.__fileTreeSuppressClick = true;
+    row.__fileTreePendingActivation = null;
     closeFileImagePreview();
     showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
@@ -3794,7 +3820,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const hasRenderedChildren = entry.kind === 'dir' && (
       Boolean(childContainerForRow(row, fullPath)) || Array.isArray(childEntries)
     );
-    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
+    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren, dirExpanded});
     nextNodes.push(row);
     if (entry.kind === 'dir' && dirExpanded) {
       const existingChildContainer = childContainerForRow(row, fullPath);

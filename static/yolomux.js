@@ -12369,8 +12369,46 @@ function stateDef(key) {
   return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
+// Must match the server's own bound (`ATTENTION_ACK_KEY_MAX_LENGTH` in app.py) -- the server
+// enforces this same limit in UTF-8 bytes on every key it receives, including this client-local
+// fallback shape, and rejects the whole batch with 400 when every key in it is oversized.
+const ATTENTION_ACK_KEY_MAX_BYTES = 512;
+
+function attentionAcknowledgementUtf8ByteLength(text) {
+  return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(text).length : String(text).length;
+}
+
+// A synchronous, dependency-free 64-bit-ish digest (two FNV-1a lanes). `crypto.subtle.digest` is
+// async and this key must resolve in the same tick its caller already runs in; this is a local
+// dedup identifier, not a security boundary, so a strong non-cryptographic hash is sufficient.
+function attentionAcknowledgementSyncDigest(text) {
+  let lane1 = 0x811c9dc5;
+  let lane2 = 0x1000193;
+  const value = String(text);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    lane1 = Math.imul(lane1 ^ code, 0x01000193) >>> 0;
+    lane2 = Math.imul(lane2 ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${lane1.toString(16).padStart(8, '0')}${lane2.toString(16).padStart(8, '0')}`;
+}
+
 function attentionAcknowledgementKey(parts = []) {
-  return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+  const encoded = (Array.isArray(parts) ? parts : []).map(part => String(part || ''));
+  const value = JSON.stringify(encoded);
+  if (!encoded.length || attentionAcknowledgementUtf8ByteLength(value) <= ATTENTION_ACK_KEY_MAX_BYTES) return value;
+  // Oversized: this is normally free-text prompt/question signature text, which has no length
+  // cap of its own and is always appended last by every caller. Digest only that trailing part
+  // -- deterministically, so the identical long value always collapses to the identical short
+  // key (idempotent, not lossy-truncated, which would let two different long values that share a
+  // prefix collide) -- and leave the leading structured parts (kind/session/window markers a
+  // caller may parse back out via `attentionAcknowledgementKeySession`) untouched.
+  const digested = encoded.slice();
+  digested[digested.length - 1] = attentionAcknowledgementSyncDigest(encoded[encoded.length - 1]);
+  const digestedValue = JSON.stringify(digested);
+  if (attentionAcknowledgementUtf8ByteLength(digestedValue) <= ATTENTION_ACK_KEY_MAX_BYTES) return digestedValue;
+  // Extremely defensive: more than one oversized part. Digest everything.
+  return JSON.stringify(encoded.map(part => attentionAcknowledgementSyncDigest(part)));
 }
 
 function attentionAcknowledgementKeySession(key) {
@@ -12387,7 +12425,7 @@ function attentionAcknowledgementRecord(key, create = false) {
   if (!value) return null;
   let record = attentionAcknowledgementRecords.get(value) || null;
   if (!record && create) {
-    record = {recordedAt: null, timer: null, pending: false};
+    record = {recordedAt: null, timer: null, pending: false, rejected: false};
     attentionAcknowledgementRecords.set(value, record);
   }
   return record;
@@ -12407,7 +12445,12 @@ function pruneAttentionAcknowledgementRecords() {
 }
 
 function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
-  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  // A permanently-rejected record must survive release: it is the only thing stopping the next
+  // idle-record sweep from immediately forgetting that this exact key was already told no, which
+  // would let the retry loop it exists to prevent start right back up. It still leaves through the
+  // ordinary bounded size eviction in `pruneAttentionAcknowledgementRecords`, same as every other
+  // record -- this is not a second unbounded container, just a longer-lived entry in the one owner.
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true || record.rejected === true) return false;
   attentionAcknowledgementRecords.delete(String(key || ''));
   return true;
 }
@@ -12518,6 +12561,15 @@ async function submitAttentionAcknowledgementKeys(keys) {
     applyAttentionAcknowledgementResponse({...payload, acknowledged});
   } catch (error) {
     console.warn('attention acknowledgement failed', error);
+    // A 400 means the server permanently refused this exact key (malformed/oversized), not a
+    // transient failure -- resubmitting it forever would only reproduce the same 400 forever.
+    // Mark it on the SAME bounded record every other acknowledgement field lives on (never a
+    // second parallel container -- see the "parallel acknowledgement containers cannot return"
+    // guard in layout_restore.test.js); this is a backstop, not a substitute for keeping keys
+    // valid in the first place (see `attentionAcknowledgementKey`'s own bounding).
+    if (Number(error?.status) === 400) {
+      for (const key of keys) attentionAcknowledgementRecord(key, true).rejected = true;
+    }
   } finally {
     for (const key of keys) {
       const record = attentionAcknowledgementRecord(key);
@@ -12536,7 +12588,9 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true
+    && attentionAcknowledgementRecord(key)?.rejected !== true
+    && !attentionAcknowledgementKeyIsRecorded(key));
   if (!pending.length) return true;
   for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
   pruneAttentionAcknowledgementRecords();
@@ -23759,10 +23813,18 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
-    differMode,
-    autoExpand: options.autoExpand,
-  });
+  // renderTreeChildren already computed dirExpanded from its own collapsedSet/expandedSet (the diff
+  // viewer's toggle state, e.g.) to decide child recursion; route that same value through here instead
+  // of recomputing via the global fileTreeDirectoryExpanded, which has no knowledge of collapsedSet and
+  // would desync the row's aria-expanded/disclosure state from the Set that actually drives collapse.
+  const expanded = entry.kind === 'dir' && (
+    typeof options.dirExpanded === 'boolean'
+      ? options.dirExpanded
+      : fileTreeDirectoryExpanded(fullPath, {
+        differMode,
+        autoExpand: options.autoExpand,
+      })
+  );
   const loadedChildListing = options.entriesByDir instanceof Map
     && options.entriesByDir.has(normalizeDirectoryPath(fullPath));
   const pendingExpansion = !differMode && entry.kind === 'dir' && (
@@ -23808,6 +23870,16 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     relDir,
     imagePreviewEligible: entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES,
   };
+}
+
+function scheduleFileTreeRowActivation(row, fullPath, entry, event) {
+  const token = {};
+  row.__fileTreePendingActivation = token;
+  setTimeout(() => {
+    if (row.__fileTreePendingActivation !== token) return;
+    row.__fileTreePendingActivation = null;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  }, 0);
 }
 
 function bindFinderRowHandlers(row, state) {
@@ -23871,7 +23943,7 @@ function bindFinderRowHandlers(row, state) {
     if (event.detail > 1) return;
     row.__fileTreePointerActivated = true;
     setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.onclick = event => {
     if (row.__fileTreeSuppressClick) {
@@ -23893,7 +23965,7 @@ function bindFinderRowHandlers(row, state) {
     }
     event.stopPropagation();
     if (event.detail > 1) return;
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.ondblclick = event => {
     event.preventDefault();
@@ -23904,6 +23976,14 @@ function bindFinderRowHandlers(row, state) {
   row.oncontextmenu = event => {
     event.preventDefault();
     event.stopPropagation();
+    // Observed on macOS: a trackpad/Control-click secondary click can report `button: 0` on the
+    // pointerdown/pointerup pair even though `contextmenu` also fires correctly. That false
+    // button-0 reading lets onpointerup's own activation call run BEFORE this handler ever sees
+    // the gesture, so a same-tick suppression flag here is too late. onpointerup instead defers
+    // its activation by one macrotask via scheduleFileTreeRowActivation; cancel that here, since
+    // contextmenu always dispatches synchronously before that deferred tick can run.
+    row.__fileTreeSuppressClick = true;
+    row.__fileTreePendingActivation = null;
     closeFileImagePreview();
     showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
@@ -24079,7 +24159,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const hasRenderedChildren = entry.kind === 'dir' && (
       Boolean(childContainerForRow(row, fullPath)) || Array.isArray(childEntries)
     );
-    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
+    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren, dirExpanded});
     nextNodes.push(row);
     if (entry.kind === 'dir' && dirExpanded) {
       const existingChildContainer = childContainerForRow(row, fullPath);
@@ -26388,6 +26468,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   closeSessionContextMenu();
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const selectedPaths = fileTreeActionPaths(fullPath);
   const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
@@ -56094,8 +56180,12 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
-      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
-        .some(item => Number(item?.samples || 0) > 0),
+      // Same fix as the CPU/memory per-process series below: absence requires a real census of
+      // this exact device, not merely "some GPU device somewhere had data this bucket".
+      familyHasData: bucket => {
+        const source = bucket?.hostMetrics?.gpuDevices;
+        return source instanceof Map && source.size > 0 && !(Number(source.get(deviceId)?.samples || 0) > 0);
+      },
       displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
@@ -56175,9 +56265,18 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
     value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
     hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
     sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
-    familyHasData: bucket => cpu
-      ? Number(bucket?.systemCpuCount || 0) > 0
-      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    // A held per-process gauge may only be cleared by a real census of THIS process family that
+    // did not include this process -- not by "the system-memory/CPU family had any data this
+    // bucket", which is true on almost every bucket regardless of whether THIS sparse process was
+    // re-sampled. That conflation cleared the hold on ordinary system-memory-only buckets, so a
+    // process with 5-minute sample cadence held for a beat then dropped to a synthetic zero every
+    // bucket in between -- the sawtooth in the Memory pressure chart. Absence must come from the
+    // same per-process map this series reads (`bucket.hostMetrics[mapName]`): non-empty (a real
+    // census ran this bucket) and missing this exact `hostProcessId` (that census did not find it).
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.[mapName];
+      return source instanceof Map && source.size > 0 && !source.has(hostProcessId);
+    },
     ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
   }));
 }
@@ -56266,7 +56365,12 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
+    // Same fix as the CPU/memory per-process series: absence requires a real census that covered
+    // THIS service and did not find it, not merely "some service had data this bucket".
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.serviceLoad;
+      return source instanceof Map && source.size > 0 && !(Number(source.get(key)?.cpuSamples || 0) > 0);
+    },
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }

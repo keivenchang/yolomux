@@ -1250,10 +1250,34 @@ class PersistentJobBroker:
         return executor
 
     def _shutdown_executor(self, *, lane: str) -> None:
+        """Shut down one lane's process pool and prove every worker process is actually gone.
+
+        `ProcessPoolExecutor.shutdown(wait=False, ...)` only stops the executor from accepting
+        new work; it does not wait for spawned worker PROCESSES to exit, and its `_ExecutorManagerThread`
+        is daemonized so it cannot itself block process exit. But `multiprocessing` separately
+        registers an `atexit` hook (`multiprocessing.util._exit_function`) that unconditionally
+        `join()`s every still-`active_children()` process with NO timeout. If a worker was mid-git
+        subprocess (or any other blocking call) when the lane was told to stop, that worker never
+        exits on its own, and the whole jobd process then hangs forever inside Python's own
+        interpreter-shutdown thread-join -- reachable via `sample`/`py-spy` as `wait_for_thread_shutdown`,
+        with the listening socket already unlinked, looking alive but serving nothing. Terminating
+        (then killing, if needed) every worker here, synchronously and with bounded timeouts, means
+        no active child is left for that atexit hook to hang on, regardless of what it was doing.
+        """
         executor = self.executors.get(lane)
         self.executors[lane] = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        if executor is None:
+            return
+        workers = list(executor._processes.values())
+        executor.shutdown(wait=False, cancel_futures=True)
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+        for worker in workers:
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=1.0)
 
     def _record_payload(self, record: JobRecord, *, include_result: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {

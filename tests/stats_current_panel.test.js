@@ -309,7 +309,55 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
   assert.match(visibleServiceSource, /if \(key === 'web'/);
   assert.match(serviceSource, /debugGraphVisibleServiceLoadItems\(buckets\)/);
-  assert.match(serviceSource, /familyHasData: bucket => debugGraphVisibleServiceLoadItems\(\[bucket\]\)\.length > 0/);
+  // familyHasData must prove THIS service was censused-and-absent, not merely that some service
+  // had data in the bucket -- the old form cleared a sparse service's held gauge on every
+  // ordinary bucket, producing a synthetic sawtooth to zero. It must read this series' own key
+  // out of the bucket's serviceLoad census map.
+  assert.match(serviceSource, /familyHasData: bucket => \{/);
+  assert.match(serviceSource, /source instanceof Map && source\.size > 0 && !\(Number\(source\.get\(key\)\?\.cpuSamples \|\| 0\) > 0\)/);
+});
+
+test('a sparse per-process RSS hold survives ordinary system-memory-only buckets and clears only on a real census miss', () => {
+  // Forces the sawtooth red before the fix: an old-form `familyHasData` (true whenever the
+  // bucket has ANY system-memory samples) clears the hold on bucket 2 below even though no
+  // per-process census ran that bucket, producing a synthetic zero exactly like the reported
+  // chart. The corrected form only clears on bucket 4, where a real census ran and did not
+  // include this process.
+  const processSeries = slice(source, 'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({', '\nfunction normalizedDebugGraphServiceLoadMode(');
+  const projectSeries = sourceFunction('debugGraphProjectSeriesSamples', 'debugGraphSeriesData');
+  const context = {
+    result: null,
+    Map, Set, Number, String, Math, Boolean,
+    jsDebugGraphAgentTokenColors: ['blue'],
+    jsDebugGraphCpuProcessAreaColors: ['cyan'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 120000},
+    jsDebugGraphRawBucketMs: 5000,
+    debugGraphStablePaletteIndex: (_key, count) => count - 1,
+    debugGraphDisplayHoldOutage: bucket => Number(bucket?.disconnectedMs || 0) > 0,
+    debugGraphHostMetricBucketValue: (bucket, series) => Number(bucket?.hostMetrics?.memoryProcesses?.get?.(series.hostProcessId)?.totalBytes || 0),
+    debugGraphHostMetricBucketHasData: (bucket, series) => Number(bucket?.hostMetrics?.memoryProcesses?.get?.(series.hostProcessId)?.samples || 0) > 0,
+    debugGraphHostMetricBucketItem: (bucket, series) => bucket?.hostMetrics?.memoryProcesses?.get?.(series.hostProcessId) || null,
+  };
+  vm.runInNewContext(`
+    ${processSeries}
+    ${projectSeries}
+    const censusBucket = {startMs: 0, durationMs: 5000, hostMetrics: {memoryProcesses: new Map([['python', {label: 'python', totalBytes: 400, samples: 1}]])}};
+    const def = debugGraphMemoryProcessSeriesDefs([censusBucket])[0];
+    const observedBucket = censusBucket;
+    const sparseBucket = {startMs: 5000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map()}};
+    const censusMissBucket = {startMs: 15000, durationMs: 5000, hostMetrics: {memoryProcesses: new Map([['other', {label: 'other', totalBytes: 200, samples: 1}]])}};
+    const projection = debugGraphProjectSeriesSamples(def, [observedBucket, sparseBucket, sparseBucket, censusMissBucket]);
+    result = {
+      hasData: projection.hasDataValues,
+      held: projection.provenanceValues.map(p => (p ? p.held : null)),
+      values: projection.values,
+    };
+  `, context);
+  const outcome = JSON.parse(JSON.stringify(context.result));
+  assert.deepEqual(outcome.hasData, [true, true, true, false]);
+  assert.deepEqual(outcome.held, [false, true, true, null]);
+  assert.deepEqual(outcome.values, [400, 400, 400, 0]);
 });
 
 test('CPU keeps the exact serving port as the only solid series and shows a gap, never promoting a peer', () => {

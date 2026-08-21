@@ -381,6 +381,13 @@ class YoagentPrewarmRecord:
 
 ATTENTION_ACK_MAX_KEYS = 4096
 ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
+# The server is the one generating these keys (`attention_ack_key`), so it owns keeping every key
+# under this bound -- `acknowledge_attention` enforces the same limit on the way back in. Prompt
+# and question text used as a signature has no length cap of its own, so a long pending prompt
+# produced a key over the limit, got silently dropped by every ack attempt, and the client retried
+# forever (never receiving an "acknowledged" response). One shared constant so the two ends cannot
+# drift out of sync again.
+ATTENTION_ACK_KEY_MAX_LENGTH = 512
 ATTENTION_INSTANCE_MAX_ENTRIES = 2048
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
@@ -16270,8 +16277,36 @@ class TmuxWebtermApp:
 
     @staticmethod
     def attention_ack_key(*parts: Any, host_identity: Any | None = None) -> str:
+        """One deterministic key per attention event, bounded to `ATTENTION_ACK_KEY_MAX_LENGTH` bytes.
+
+        The server is the sole generator of this key -- the browser only echoes it back to
+        `acknowledge_attention`, which enforces the same bound on the way back in -- so this
+        function alone owns keeping every key it produces inside that limit. `parts` routinely
+        includes free-text prompt/question signature text (`prompt_attention_signature`) with no
+        length cap of its own; a long pending prompt used to produce a key over the limit that
+        every ack attempt silently dropped, so the browser retried forever without ever receiving
+        an "acknowledged" response. An ordinary short key is returned byte-for-byte unchanged
+        (wire/parsing compatibility for `attentionAcknowledgementKeySession` and friends); only a
+        key that would exceed the bound has its LAST part -- by convention the free-text
+        signature, never the leading kind/session/window markers a caller parses back out of the
+        key -- replaced with a stable digest, so the identical long value always collapses to the
+        identical short key (collision-resistant, deterministic; never lossy truncation, which
+        would let two different long prompts sharing a prefix collide onto one key).
+        """
         identity = host_identity or current_host_identity()
-        value = json.dumps([str(part or "") for part in parts], separators=(",", ":"))
+        encoded_parts = [str(part or "") for part in parts]
+        value = json.dumps(encoded_parts, separators=(",", ":"))
+        key = identity.qualify_key("attention-ack", value)
+        if not encoded_parts or len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH:
+            return key
+        digested_parts = list(encoded_parts)
+        digested_parts[-1] = hashlib.sha256(encoded_parts[-1].encode("utf-8")).hexdigest()
+        value = json.dumps(digested_parts, separators=(",", ":"))
+        key = identity.qualify_key("attention-ack", value)
+        if len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH:
+            return key
+        # Extremely defensive: more than one oversized part. Digest everything.
+        value = json.dumps([hashlib.sha256(part.encode("utf-8")).hexdigest() for part in encoded_parts], separators=(",", ":"))
         return identity.qualify_key("attention-ack", value)
 
     @staticmethod
@@ -16715,7 +16750,11 @@ class TmuxWebtermApp:
         keys: list[str] = []
         for raw in raw_keys:
             key = str(raw or "").strip()
-            if not key or len(key) > 512 or key in keys:
+            # Validate by UTF-8 bytes, matching `attention_ack_key`'s own bound and the wire/storage
+            # limit this is actually protecting -- a Python character-length check let multibyte
+            # (CJK, emoji, ...) keys up to 4x the real byte budget through, or rejected pure-ASCII
+            # keys well under it for the wrong reason.
+            if not key or len(key.encode("utf-8")) > ATTENTION_ACK_KEY_MAX_LENGTH or key in keys:
                 continue
             keys.append(key)
         if not keys:

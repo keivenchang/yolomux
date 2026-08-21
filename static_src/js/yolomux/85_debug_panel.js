@@ -1345,8 +1345,12 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
-      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
-        .some(item => Number(item?.samples || 0) > 0),
+      // Same fix as the CPU/memory per-process series below: absence requires a real census of
+      // this exact device, not merely "some GPU device somewhere had data this bucket".
+      familyHasData: bucket => {
+        const source = bucket?.hostMetrics?.gpuDevices;
+        return source instanceof Map && source.size > 0 && !(Number(source.get(deviceId)?.samples || 0) > 0);
+      },
       displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
@@ -1426,9 +1430,18 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
     value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
     hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
     sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
-    familyHasData: bucket => cpu
-      ? Number(bucket?.systemCpuCount || 0) > 0
-      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    // A held per-process gauge may only be cleared by a real census of THIS process family that
+    // did not include this process -- not by "the system-memory/CPU family had any data this
+    // bucket", which is true on almost every bucket regardless of whether THIS sparse process was
+    // re-sampled. That conflation cleared the hold on ordinary system-memory-only buckets, so a
+    // process with 5-minute sample cadence held for a beat then dropped to a synthetic zero every
+    // bucket in between -- the sawtooth in the Memory pressure chart. Absence must come from the
+    // same per-process map this series reads (`bucket.hostMetrics[mapName]`): non-empty (a real
+    // census ran this bucket) and missing this exact `hostProcessId` (that census did not find it).
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.[mapName];
+      return source instanceof Map && source.size > 0 && !source.has(hostProcessId);
+    },
     ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
   }));
 }
@@ -1517,7 +1530,12 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
+    // Same fix as the CPU/memory per-process series: absence requires a real census that covered
+    // THIS service and did not find it, not merely "some service had data this bucket".
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.serviceLoad;
+      return source instanceof Map && source.size > 0 && !(Number(source.get(key)?.cpuSamples || 0) > 0);
+    },
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }

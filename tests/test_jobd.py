@@ -36,6 +36,11 @@ from _git_helpers import git
 from _git_helpers import init_repo
 
 
+def _blocking_worker_task():
+    """Module-level so the spawn context can pickle it; simulates a worker mid-task at shutdown."""
+    time.sleep(30)
+
+
 def _session_info_json(session, repo, transcript=None, kind="claude"):
     pane = TmuxPaneInfo(
         session=session, window="0", pane="0", pane_id="%1", target=f"{session}:0.0",
@@ -2260,6 +2265,9 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
     broken.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2381,6 +2389,9 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
     crashed.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2773,6 +2784,9 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
     failing.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2834,6 +2848,19 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     class Process:
         def __init__(self, pid):
             self.pid = pid
+            self._alive = False
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            pass
+
+        def join(self, timeout=None):
+            del timeout
+
+        def kill(self):
+            pass
 
     class Executor:
         def __init__(self, pid):
@@ -2858,6 +2885,37 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     assert sorted(shutdown_pids) == [101, 102, 103, 104]
     assert set(service.executors) == set(jobd.JOBD_LANE_PRIORITIES)
     assert all(executor is None for executor in service.executors.values())
+
+
+def test_shutdown_executor_terminates_a_worker_stuck_mid_task_without_hanging(tmp_path):
+    """Forces the real hang red: a worker mid-task at shutdown must not survive `_shutdown_executor`.
+
+    Reproduces the exact defect found via `sample`/`py-spy` on a live macOS jobd: a
+    `ProcessPoolExecutor` worker still running when its lane is told to shut down was left
+    alive by `shutdown(wait=False, ...)`, so Python's own `multiprocessing.util._exit_function`
+    atexit hook later blocked forever inside `wait_for_thread_shutdown` trying to join it, with
+    the listening socket already unlinked. Before the fix this worker stays alive well past a
+    bounded `join(timeout=2.0)`, since nothing terminates it and its task sleeps 30s. After the
+    fix `_shutdown_executor` terminates (then kills, if needed) every process it owns, so the
+    worker is provably dead within the bound below.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    executor = service._executor("freshness")
+    future = executor.submit(_blocking_worker_task)
+    deadline = time.monotonic() + 10.0
+    while not executor._processes and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert executor._processes, "worker process never started"
+    workers = list(executor._processes.values())
+    assert any(worker.is_alive() for worker in workers), "worker process did not report alive"
+
+    service._shutdown_executor(lane=service._lane_for_priority("freshness"))
+
+    for worker in workers:
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), "worker process survived a bounded join after shutdown"
+    assert not executor._processes, "executor still tracks a worker process after shutdown"
+    future.cancel()
 
 
 def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):
