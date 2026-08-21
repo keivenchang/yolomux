@@ -3116,7 +3116,7 @@ def _refresh_dirty_subtrees(
     exclude_path: Callable[[Path], bool] | None,
     access_descriptor: int,
     operation: str,
-) -> tuple[list[IndexEntry], bool, int, int]:
+) -> tuple[list[IndexEntry], bool, int, int, list[Path]]:
     with ri.lock:
         previous = list(ri.entries)
         previous_by_path = dict(ri.entry_by_path)
@@ -3134,7 +3134,7 @@ def _refresh_dirty_subtrees(
     if not usable_dirty_paths:
         # Excluded work must be a true no-op. In particular, do not filter and
         # re-sort every retained row merely to ignore a .git/cache event.
-        return previous, previously_truncated, 0, ignored
+        return previous, previously_truncated, 0, ignored, []
 
     with contextlib.ExitStack() as descriptors:
         opened: dict[Path, tuple[int | None, os.stat_result | None]] = {}
@@ -3146,6 +3146,29 @@ def _refresh_dirty_subtrees(
                 continue
             descriptors.callback(os.close, descriptor)
             opened[dirty] = (descriptor, os.fstat(descriptor))
+
+        # A truncated snapshot is already known not to represent the whole root. Rewalking one
+        # changed directory cannot restore that missing coverage, but filtering its 100,000
+        # retained rows is still O(index size x dirty paths) and was the measured one-core hot
+        # loop. Keep cheap exact-file updates; consume directory/deleted-subtree notifications as
+        # ignored work so they neither scan the retained list nor loop on every scheduler tick.
+        if previously_truncated:
+            exact_files = {
+                dirty: opened[dirty]
+                for dirty in usable_dirty_paths
+                if (
+                    opened[dirty][1] is not None
+                    and stat.S_ISREG(opened[dirty][1].st_mode)
+                )
+                or (
+                    opened[dirty][1] is None
+                    and str(dirty) in previous_by_path
+                )
+            }
+            ignored += len(usable_dirty_paths) - len(exact_files)
+            if not exact_files:
+                return previous, True, 0, ignored, []
+            opened = exact_files
 
         # Native backends overwhelmingly report a regular file rather than its
         # parent directory.  Do not turn that into an 80k-row comprehension and
@@ -3183,12 +3206,19 @@ def _refresh_dirty_subtrees(
                 entries.insert(left, entry)
                 entry_by_path[path] = entry
                 refreshed_count += 1
-            return entries, previously_truncated, refreshed_count, ignored
+            return entries, previously_truncated, refreshed_count, ignored, list(opened)
 
+        relative_prefixes = tuple(
+            dirty.relative_to(ri.root).as_posix().rstrip("/")
+            for dirty in usable_dirty_paths
+        )
         retained = [
             entry
             for entry in previous
-            if not any(_path_is_within(Path(entry[0]), dirty) for dirty in usable_dirty_paths)
+            if not any(
+                entry[2] == prefix or entry[2].startswith(prefix + "/")
+                for prefix in relative_prefixes
+            )
         ]
         refreshed: list[IndexEntry] = []
         truncated = previously_truncated
@@ -3225,11 +3255,27 @@ def _refresh_dirty_subtrees(
                 refreshed.append((str(dirty), dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime)))
             else:
                 ignored += 1
-        entries = sorted([*retained, *refreshed], key=lambda entry: entry[2].lower())
+        # `retained` is still sorted and a subtree walk is much smaller than the complete index.
+        # Sort only the refreshed rows, then merge, instead of sorting all retained rows again.
+        refreshed.sort(key=lambda entry: entry[2].lower())
+        entries: list[IndexEntry] = []
+        retained_index = 0
+        refreshed_index = 0
+        while retained_index < len(retained) and refreshed_index < len(refreshed):
+            retained_entry = retained[retained_index]
+            refreshed_entry = refreshed[refreshed_index]
+            if retained_entry[2].lower() <= refreshed_entry[2].lower():
+                entries.append(retained_entry)
+                retained_index += 1
+            else:
+                entries.append(refreshed_entry)
+                refreshed_index += 1
+        entries.extend(retained[retained_index:])
+        entries.extend(refreshed[refreshed_index:])
         if len(entries) > ri.max_files:
             entries = entries[:ri.max_files]
             truncated = True
-        return entries, truncated, len(refreshed), ignored
+        return entries, truncated, len(refreshed), ignored, list(opened)
 
 
 def mark_paths_dirty(
@@ -3312,7 +3358,15 @@ def schedule_refreshes(now: float | None = None) -> int:
             should_flush = ri.persist_pending and monotonic_now - ri.last_persisted_at >= PERSIST_DEBOUNCE_SECONDS
             freshness_anchor = ri.last_full_build_at or ri.built_at
             has_dirty = bool(ri.dirty_paths)
-            ttl_stale = ri.ready and ri.refresh_seconds > 0 and wall_now - freshness_anchor >= ri.refresh_seconds
+            # Repeating a full crawl cannot make a max-files-truncated index complete. Keep its
+            # retained snapshot until the configured root/limit changes; exact file events still
+            # take the incremental path below.
+            ttl_stale = (
+                ri.ready
+                and not ri.too_large
+                and ri.refresh_seconds > 0
+                and wall_now - freshness_anchor >= ri.refresh_seconds
+            )
             building = ri.building
             skip_dirs = set(ri.skip_dirs)
             exclude_path = ri.exclude_path
@@ -3328,7 +3382,12 @@ def schedule_refreshes(now: float | None = None) -> int:
             # After HOT_REPAIR_STARVATION_BOUND consecutive hot repairs, yield ONE full-safety-refresh
             # instead. The full re-list covers the pending dirty subtrees too, so clearing them here
             # loses no repair -- a change that arrives after the yield simply re-marks and re-heats.
-            starving = has_dirty and not building and ri.consecutive_hot_repairs >= HOT_REPAIR_STARVATION_BOUND
+            starving = (
+                has_dirty
+                and not ri.too_large
+                and not building
+                and ri.consecutive_hot_repairs >= HOT_REPAIR_STARVATION_BOUND
+            )
             if starving:
                 ri.dirty_paths.clear()
                 has_dirty = False
@@ -3783,7 +3842,7 @@ def _run_build(
         if dirty_paths:
             access_fd = ri.duplicate_root_fd()
             access_root = _descriptor_path(access_fd)
-            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(
+            entries, truncated, scanned_entries, ignored_entries, applied_dirty_paths = _refresh_dirty_subtrees(
                 ri,
                 dirty_paths,
                 skip_dirs,
@@ -3809,6 +3868,7 @@ def _run_build(
             entries.sort(key=lambda entry: (entry[2].lower(), entry[0]))
             scanned_entries = len(entries)
             build_kind = "full"
+            applied_dirty_paths = []
         if ri.stop_event.is_set() or not current():
             with ri.lock:
                 if generation is None or ri.active_generation == generation:
@@ -3844,7 +3904,7 @@ def _run_build(
             else:
                 ri.published_tombstone_identity = captured_tombstone_identity
                 ri.ready = True
-            _record_pending_delta(ri, dirty_paths, build_kind)
+            _record_pending_delta(ri, applied_dirty_paths, build_kind)
         if not current():
             return
         _persist(ri, skip_dirs, exclude_signature)

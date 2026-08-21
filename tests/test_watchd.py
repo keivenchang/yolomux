@@ -2177,7 +2177,7 @@ def test_an_unknown_watchd_error_code_is_still_collapsed_to_service_unavailable(
     assert "totally_invented_code" not in emitted[0][0][2]
 
 
-def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):
+def test_web_defers_watchd_bridge_without_descriptor_demand(monkeypatch):
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
     wait_entered = threading.Event()
     release = threading.Event()
@@ -2207,11 +2207,9 @@ def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):
     monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
     webapp.start_client_event_watcher()
     try:
-        assert wait_entered.wait(1.0)
-        thread_names = {thread.name for thread in threading.enumerate()}
-        assert "watchd-revision" in thread_names
-        assert "native-filesystem-watch" not in thread_names
-        assert not any("notify-rs" in name for name in thread_names)
+        assert not wait_entered.wait(0.1)
+        record = webapp.client_watch_service.event_watcher_record
+        assert record.watchd_worker is None
     finally:
         release.set()
         webapp.stop_client_event_watcher()

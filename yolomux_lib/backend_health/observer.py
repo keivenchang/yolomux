@@ -747,10 +747,10 @@ class ObservationCycle:
     duration_seconds: float
     states: Mapping[str, tuple[str, str]]
     probe_outcomes: Mapping[str, str]
-    # (resource, state, reason_code, recovery_outcome, pid, process_start_identity). Recovery and
-    # process identity are part of the STABLE SIGNATURE because both can change while the service
-    # remains ready. Omitting identity hid fast daemon restarts and froze the retained epoch.
-    signature: tuple[tuple[str, str, str, str, int, str], ...]
+    # (resource, state, reason_code, recovery_outcome, pid, process_start_identity,
+    # absence_expected). Recovery, process identity, and expected absence are part of the STABLE
+    # SIGNATURE because each can change while the visible state remains the same.
+    signature: tuple[tuple[str, str, str, str, int, str, bool], ...]
     published: bool = False
     revision: int = 0
     persisted: bool = False
@@ -831,7 +831,7 @@ class BackendHealthObserver:
         # instead of an absent one, and a recovery to `ready` still has to debounce.
         self._accepted: dict[str, tuple[str, str]] = {name: _INITIAL_HEALTH for name in self.inventory}
         self._candidates: dict[str, tuple[tuple[str, str], int]] = {}
-        self._published_signature: tuple[tuple[str, str, str, str, int, str], ...] | None = None
+        self._published_signature: tuple[tuple[str, str, str, str, int, str, bool], ...] | None = None
         self._observations = 0
         self._cycle_failures = 0
         self._last_cycle_error = ""
@@ -1044,11 +1044,15 @@ class BackendHealthObserver:
 
         observed: dict[str, tuple[str, str]] = {}
         observed_identities: dict[str, tuple[int, str]] = {}
+        observed_expected_absence: dict[str, bool] = {}
         collected: dict[str, Mapping[str, Any]] = {}
         for row in snapshot.rows:
             observed[row.service] = observed_health(row.fields, outcomes.get(row.service, PROBE_FAILED))
             pid = row.pid if row.pid > 0 else 0
             observed_identities[row.service] = (pid, str(self._identity_source(pid) or "") if pid > 0 else "")
+            observed_expected_absence[row.service] = (
+                observed[row.service][0] == "starting" and bool(recovery_row_fence(row.fields))
+            )
             collected[row.service] = row.fields
 
         with self._lock:
@@ -1065,13 +1069,25 @@ class BackendHealthObserver:
         with self._lock:
             published_identities = {
                 name: (pid, start_identity)
-                for name, _state, _reason, _recovery, pid, start_identity in (self._published_signature or ())
+                for name, _state, _reason, _recovery, pid, start_identity, _expected in (self._published_signature or ())
+            }
+            published_expected_absence = {
+                name: expected
+                for name, _state, _reason, _recovery, _pid, _start_identity, expected in (self._published_signature or ())
             }
             accepted_identities = {
                 name: (
                     observed_identities.get(name, (0, ""))
                     if observed.get(name) == health
                     else published_identities.get(name, (0, ""))
+                )
+                for name, health in accepted.items()
+            }
+            accepted_expected_absence = {
+                name: (
+                    observed_expected_absence.get(name, False)
+                    if observed.get(name) == health
+                    else published_expected_absence.get(name, False)
                 )
                 for name, health in accepted.items()
             }
@@ -1084,6 +1100,7 @@ class BackendHealthObserver:
                         recovery.get(name, RECOVERY_NONE),
                         accepted_identities.get(name, (0, ""))[0],
                         accepted_identities.get(name, (0, ""))[1],
+                        accepted_expected_absence.get(name, False),
                     )
                     for name, (state, reason) in accepted.items()
                 )
@@ -1115,7 +1132,14 @@ class BackendHealthObserver:
         # failures with zero events published still reported `alive=true`, eight completed
         # cycles, a two-second cycle age and a single consecutive failure. The supervisor in
         # `_run` counts the raise; nothing here may claim the cycle finished before then.
-        published = self._publish_change(cycle, accepted, accepted_identities, signature, recovery)
+        published = self._publish_change(
+            cycle,
+            accepted,
+            accepted_identities,
+            accepted_expected_absence,
+            signature,
+            recovery,
+        )
         self._record_cycle_completed()
         return published
 
@@ -1210,7 +1234,8 @@ class BackendHealthObserver:
         cycle: ObservationCycle,
         accepted: Mapping[str, tuple[str, str]],
         identities: Mapping[str, tuple[int, str]],
-        signature: tuple[tuple[str, str, str, str, int, str], ...],
+        expected_absence: Mapping[str, bool],
+        signature: tuple[tuple[str, str, str, str, int, str, bool], ...],
         recovery: Mapping[str, str],
     ) -> ObservationCycle:
         observations = tuple(
@@ -1221,6 +1246,7 @@ class BackendHealthObserver:
                 recovery_outcome=recovery.get(name, RECOVERY_NONE),
                 pid=identities.get(name, (0, ""))[0],
                 process_start_identity=identities.get(name, (0, ""))[1],
+                absence_expected=expected_absence.get(name, False),
                 # See the module docstring: an invented counter is worse than an absent one.
                 counters_available=False,
             )

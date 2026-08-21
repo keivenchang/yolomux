@@ -885,6 +885,18 @@ def test_safety_refresh_does_not_duplicate_generations_while_building(tmp_path, 
     assert calls == []
 
 
+def test_truncated_root_does_not_repeat_a_ttl_full_refresh(tmp_path, monkeypatch):
+    _root, ri = _ready_registered_root(tmp_path)
+    with ri.lock:
+        ri.truncated = True
+        ri.too_large = True
+    calls: list[dict] = []
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **kwargs: calls.append(kwargs) or True)
+
+    assert file_index.schedule_refreshes(now=1000.0 + 5000) == 0
+    assert calls == []
+
+
 def test_safety_refresh_reconciles_a_change_no_event_marked_dirty(tmp_path):
     # Missed-event repair: a change with NO watch event and NO dirty mark is still reconciled by the
     # full-safety-refresh re-listing, through the same frontier, without a duplicate generation.

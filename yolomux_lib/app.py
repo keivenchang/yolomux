@@ -2596,6 +2596,11 @@ class WatchBridge:
         with app.client_events.lock:
             has_client_event_subscribers = bool(app.client_events.subscribers)
         if descriptor_changed and has_client_event_subscribers:
+            # The SSE worker owns several non-filesystem channels, so its existence is not
+            # filesystem-watch demand. A descriptor is the one demand owner for watchd; route
+            # the first descriptor through the idempotent lifecycle entry point so an existing
+            # core/status/operation stream starts watchd exactly when it gains file state.
+            app.start_client_event_watcher()
             app.start_client_watch_snapshot_publish()
         return {
             "ok": True,
@@ -4357,20 +4362,30 @@ class WatchBridge:
 
     def start_client_event_watcher(self, app) -> None:
         now = time.monotonic()
+        retained_record = None
         with self.state.lock:
             current = self.state.event_watcher_record
             if current.worker is not None and current.worker.is_alive():
-                # A retained client-event worker must not make a previously failed tmux signal
-                # watcher permanent. New SSE subscribers are the lifecycle re-entry point.
-                app.start_tmux_signal_event_watcher()
-                return
-            record = ClientEventWatcherRecord(
-                next_attention_ack_poll_at=now + app.server_attention_ack_event_poll_seconds(),
-                next_tmux_signal_poll_at=now + app.server_tmux_signal_event_poll_seconds(),
-            )
-            worker = threading.Thread(target=app.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
-            record.worker = worker
-            self.state.event_watcher_record = record
+                retained_record = current
+                watchd_demanded = bool(self.state.descriptors)
+            else:
+                record = ClientEventWatcherRecord(
+                    next_attention_ack_poll_at=now + app.server_attention_ack_event_poll_seconds(),
+                    next_tmux_signal_poll_at=now + app.server_tmux_signal_event_poll_seconds(),
+                )
+                worker = threading.Thread(target=app.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
+                record.worker = worker
+                self.state.event_watcher_record = record
+                watchd_demanded = bool(self.state.descriptors)
+
+        if retained_record is not None:
+            # A retained client-event worker must not make a previously failed child watcher
+            # permanent. New SSE subscribers are the lifecycle re-entry point, while watchd is
+            # repaired only when the descriptor owner says filesystem demand exists.
+            app.start_tmux_signal_event_watcher()
+            if watchd_demanded:
+                app.start_watchd_revision_watcher(retained_record)
+            return
 
         def rollback() -> None:
             owned = False
@@ -4390,18 +4405,19 @@ class WatchBridge:
             rollback()
             raise
         common.start_thread_with_rollback(worker, rollback)
-        try:
-            app.start_watchd_revision_watcher(record)
-        except RuntimeError as exc:
-            # watchd owns both native watching and its polling fallback. The web
-            # process reports a typed unavailable state and never scans locally.
-            app.log_event(
-                None,
-                "watchd_error",
-                f"watchd revision bridge failed to start: {exc}",
-                {"diagnostic": str(exc)},
-                message_key="events.message.clientEvent.directoryWatchFailed",
-            )
+        if watchd_demanded:
+            try:
+                app.start_watchd_revision_watcher(record)
+            except RuntimeError as exc:
+                # watchd owns both native watching and its polling fallback. The web
+                # process reports a typed unavailable state and never scans locally.
+                app.log_event(
+                    None,
+                    "watchd_error",
+                    f"watchd revision bridge failed to start: {exc}",
+                    {"diagnostic": str(exc)},
+                    message_key="events.message.clientEvent.directoryWatchFailed",
+                )
 
     def stop_client_event_watcher(self, app) -> None:
         app.stop_tmux_signal_event_watcher()

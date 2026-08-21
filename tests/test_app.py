@@ -685,7 +685,8 @@ def test_the_system_status_row_publishes_the_retained_health_it_was_attached_to(
     for row in payload["services"]:
         assert set(row["metrics"]) == {"cpu_now_percent", "rss_bytes", "uptime_seconds"}, row["id"]
         assert set(row["health"]["metrics"]) == {
-            "restart_count", "observations", "request_count", "error_count",
+            "restart_count", "process_start_count", "demand_start_count", "unexpected_restart_count",
+            "observations", "request_count", "error_count",
             "completed_count", "latency_average_ms", "latency_max_ms",
         }, row["id"]
     # A service the observer never recorded says so; it does not borrow jobd's numbers.
@@ -3689,7 +3690,7 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     try:
         webapp.start_client_event_watcher()
-        assert started == ["client-event-watch", "watchd-revision"]
+        assert started == ["client-event-watch"]
         record = webapp.client_watch_service.event_watcher_record
         assert record.next_attention_ack_poll_at == pytest.approx(112.0)
         assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
@@ -8351,8 +8352,10 @@ def test_unchanged_client_watch_descriptor_refreshes_ttl_without_restarting_snap
     webapp = app_module.TmuxWebtermApp([])
     wakes = []
     snapshots = []
+    lifecycle_starts = []
     monkeypatch.setattr(webapp, "wake_client_event_watcher", lambda: wakes.append("wake"))
     monkeypatch.setattr(webapp, "start_client_watch_snapshot_publish", lambda: snapshots.append("snapshot") or True)
+    monkeypatch.setattr(webapp, "start_client_event_watcher", lambda: lifecycle_starts.append("start"))
     subscriber, _queue = webapp.client_events.subscribe(channels="files", client_id="browser-a")
     descriptor = {"client_id": "browser-a", "roots": ["/repo"], "files": ["/repo/open.py"]}
     try:
@@ -8362,6 +8365,7 @@ def test_unchanged_client_watch_descriptor_refreshes_ttl_without_restarting_snap
 
         assert wakes == ["wake", "wake"]
         assert snapshots == ["snapshot", "snapshot"]
+        assert lifecycle_starts == ["start", "start"]
         assert webapp.client_watch_service.descriptors["browser-a"].descriptor_generation == 2
     finally:
         webapp.client_events.unsubscribe(subscriber)

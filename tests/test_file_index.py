@@ -406,6 +406,54 @@ def test_single_file_save_is_a_row_delta_not_a_full_index_rewrite(tmp_path, monk
         assert conn.execute("SELECT size FROM entries WHERE path = ?", (str(changed),)).fetchone() == (len("after-with-a-different-size"),)
 
 
+def test_truncated_index_keeps_exact_file_updates_without_rewalking_directories(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    changed_dir = root / "package"
+    changed_dir.mkdir(parents=True)
+    exact_file = root / "exact.txt"
+    exact_file.write_text("before", encoding="utf-8")
+    stale_file = changed_dir / "stale.txt"
+    stale_file.write_text("before", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_enabled=False)
+    with index.lock:
+        index.truncated = True
+        index.too_large = True
+
+    exact_file.write_text("after-with-new-size", encoding="utf-8")
+    stale_file.write_text("directory-change-is-not-repaired", encoding="utf-8")
+    file_index.mark_paths_dirty([exact_file, changed_dir])
+
+    original_path_is_within = file_index._path_is_within
+
+    def reject_retained_row_scan(path, parent):
+        if parent in {exact_file, changed_dir}:
+            raise AssertionError("truncated directory dirties must not scan retained rows")
+        return original_path_is_within(path, parent)
+
+    monkeypatch.setattr(
+        file_index,
+        "_path_is_within",
+        reject_retained_row_scan,
+    )
+    monkeypatch.setattr(
+        file_index,
+        "_walk_root_with_metrics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("truncated directory dirties must not rewalk")),
+    )
+
+    file_index._run_build(index, SEARCH_SKIP_DIRS)
+
+    by_relative = {entry[2]: entry for entry in index.entries}
+    assert by_relative["exact.txt"][3] == len("after-with-new-size")
+    assert by_relative["package/stale.txt"][3] == len("before")
+    assert index.dirty_paths == set()
+    assert index.too_large is True
+    assert index.scanned_entries == 1
+    assert index.ignored_entries == 1
+
+
 def test_root_notification_does_not_schedule_an_unbounded_incremental_rewalk(tmp_path, monkeypatch):
     _clear_registry()
     root = tmp_path / "root"
