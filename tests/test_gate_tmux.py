@@ -684,7 +684,9 @@ def test_s1_negative_control_stalled_websocket_fails_send_completeness(browser, 
         session,
         label="negative-control-stalled-websocket",
         sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        pressure=True,
+        # Output pressure has its own positive control. This negative control injects one
+        # transport defect and must not acquire a second, scheduler-sensitive precondition.
+        pressure=False,
         after_key=stall_socket,
     )
     reasons = _negative_control_reasons(observed)

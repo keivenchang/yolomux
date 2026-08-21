@@ -922,7 +922,12 @@ def certification_step(evidence_dir: Path) -> Step:
         ["python3", "-m", "pytest", *CERTIFICATION_NODE_IDS, "-p", "no:xdist", "-o", "junit_family=xunit1", f"--junit-xml={junit_path}", "-rs", "-q"],
         tuple(
             [(name, "1") for name in latency_calibration.CERTIFICATION_ENV_NAMES]
-            + [("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir))]
+            + [
+                ("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir)),
+                # Certification runs alone and owns the complete port range; a synthetic lane
+                # name would be rejected by gate_http_port_candidates before any unit runs.
+                (CHECK_LANE_ENV, ""),
+            ]
         ),
     )
 
@@ -1163,7 +1168,7 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
     started = time.monotonic()
     start_clean_state = working_tree_clean_state()
     retirement = retire_owned_processes(expected_containers=expected_containers)
-    preflight = latency_calibration.host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
+    preflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
     lane_result: LaneResult | None = None
     postflight: dict[str, object] | None = None
     outcomes: dict[str, dict[str, object]] | None = None
@@ -1172,7 +1177,7 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
     if preflight is not None and preflight["qualified"]:
         lane_result = run_lane(Lane("certification", "latency certification", (certification_step(evidence_dir),)))
         returncode = lane_result.steps[-1].returncode if lane_result.steps else None
-        postflight = latency_calibration.host_qualification(evidence_root=evidence_dir)
+        postflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
         junit_admission = certification_junit_admission(evidence_dir / CERTIFICATION_JUNIT_NAME)
         outcomes = junit_admission["outcomes"] if junit_admission["admitted"] else certification_outcomes(evidence_dir / CERTIFICATION_JUNIT_NAME)
     verdict = certification_verdict(retirement=retirement, preflight=preflight, postflight=postflight, outcomes=outcomes, returncode=returncode, junit_admission=junit_admission)

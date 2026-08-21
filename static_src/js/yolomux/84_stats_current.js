@@ -2191,7 +2191,7 @@
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
       yolomuxBackgroundRead: requestOptions.background === true,
-    }));
+    }), allowNotModified ? Object.freeze({quietStatuses: Object.freeze([304])}) : undefined);
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
     let failurePayload = null;
     if (response?.status !== 200 && response?.status !== 304 && typeof response?.json === 'function') {

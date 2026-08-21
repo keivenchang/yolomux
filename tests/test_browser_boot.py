@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import json
+import shlex
 import subprocess
 from urllib.parse import urlencode
 
@@ -509,21 +510,17 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         assert 120 <= pane_geometry["height"] <= pane_geometry["viewportHeight"] + 1, pane_geometry
         pane_heights.append({"stage": stage, **pane_geometry})
         stage_marker = f"{marker}-{stage}"
-        browser.execute_cdp_cmd("Input.insertText", {"text": f"echo {stage_marker}"})
+        acknowledgment_path = tmp_path / f"{stage_marker}.ack"
+        command = f"printf '%s\\n' {shlex.quote(stage_marker)} > {shlex.quote(str(acknowledgment_path))}"
+        browser.execute_cdp_cmd("Input.insertText", {"text": command})
         browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
         browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
         try:
-            output = WebDriverWait(browser, 12).until(
-                lambda driver: (
-                    text if (text := driver.execute_script(
-                        """
-                        const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
-                        const text = buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
-                        return text.split('\\n').filter(line => line.trim() === arguments[1]).length === 1 ? text : '';
-                        """,
-                        session,
-                        stage_marker,
-                    )) else False
+            acknowledgment = WebDriverWait(browser, 12).until(
+                lambda _driver: (
+                    text if acknowledgment_path.is_file()
+                    and (text := acknowledgment_path.read_text(encoding="utf-8")) == f"{stage_marker}\n"
+                    else False
                 ),
                 message=f"focused real xterm did not deliver native text after {stage}",
             )
@@ -540,11 +537,17 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
                 """,
                 session,
             )
+            state["acknowledgmentPath"] = str(acknowledgment_path)
+            state["acknowledgmentExists"] = acknowledgment_path.is_file()
+            state["acknowledgmentValue"] = (
+                acknowledgment_path.read_text(encoding="utf-8", errors="replace")
+                if acknowledgment_path.is_file()
+                else ""
+            )
             pane_capture = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-S", "-100", "-t", f"{session}:")
             state["tmuxPane"] = pane_capture.stdout
             raise AssertionError(f"focused real xterm input state after {stage}: {state}") from exc
-        assert sum(line.strip() == stage_marker for line in output.splitlines()) == 1, output
-        return output
+        return acknowledgment
 
     def touch_tab(target_session, touch_id):
         point = WebDriverWait(browser, 8).until(

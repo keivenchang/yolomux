@@ -1722,8 +1722,8 @@ test('browser transport uses one authenticated current stream and exact snapshot
   const clock = new FakeClock();
   const fetches = [];
   let current300Generation = 1;
-  const fetchImpl = async (url, options) => {
-    fetches.push({url, options});
+  const fetchImpl = async (url, options, internalOptions) => {
+    fetches.push({url, options, internalOptions});
     if (url === '/api/stats-capabilities') return response(200, capabilities());
     const parsed = new URL(url, 'http://stats.test');
     assert.equal(parsed.pathname, '/api/stats-snapshot');
@@ -1762,6 +1762,12 @@ test('browser transport uses one authenticated current stream and exact snapshot
     '/api/stats-snapshot?range_seconds=300&resolution=1',
     'client_id=browser-current&since_generation=0',
   ].join('&'));
+  assert.equal(fetches[0].internalOptions, undefined, 'capability reads have no expected non-2xx status');
+  assert.deepStrictEqual(
+    [...fetches[1].internalOptions.quietStatuses],
+    [304],
+    'conditional snapshots tell the shared API instrumentation that not-modified is expected',
+  );
   for (const call of fetches) {
     assert.equal(call.options.method, 'GET');
     assert.equal(call.options.credentials, 'same-origin');

@@ -450,6 +450,7 @@ def test_browser_capability_preflight_names_missing_dependency_browser_and_drive
     browser.write_text("", encoding="utf-8")
     monkeypatch.undo()
     monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(
         check.shutil,
         "which",
@@ -1151,6 +1152,7 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
     assert ["-o", "junit_family=xunit1"] == step.args[step.args.index("-o"):step.args.index("-o") + 2], step.args
     environment = dict(step.env)
     assert environment["YOLOMUX_E2E_EVIDENCE_DIR"] == "/tmp/yolomux-certification-probe"
+    assert environment[check.CHECK_LANE_ENV] == ""
     for name in latency_calibration.CERTIFICATION_ENV_NAMES:
         assert environment[name] == "1", environment
 
@@ -1526,6 +1528,41 @@ def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reas
     inside = {signal: limit / 2 for signal, limit in limits.items()}
     qualified = latency_calibration.require_qualified_host(nodeid="n", label="l", measurement=inside)
     assert qualified["qualified"] is True and qualified["reasons"] == []
+
+
+def test_certification_host_qualification_requires_two_clean_windows_after_a_transient(monkeypatch):
+    limits = latency_calibration.HOST_QUALIFICATION_LIMITS
+    red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
+    green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
+    windows = iter((red, green, green))
+    calls = []
+
+    def qualify(**kwargs):
+        calls.append(kwargs)
+        return next(windows)
+
+    monkeypatch.setattr(latency_calibration, "host_qualification", qualify)
+    recovered = latency_calibration.certification_host_qualification()
+
+    assert recovered["qualified"] is True
+    assert len(calls) == 3
+    assert recovered["confirmation"]["recovered_transient"] is True
+    assert [window["qualified"] for window in recovered["confirmation"]["windows"]] == [False, True, True]
+
+
+@pytest.mark.parametrize("sequence", [(False, False, False), (False, True, False), (False, False, True)])
+def test_certification_host_qualification_never_recovers_without_two_clean_confirmations(monkeypatch, sequence):
+    limits = latency_calibration.HOST_QUALIFICATION_LIMITS
+    red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
+    green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
+    windows = iter(green if qualified else red for qualified in sequence)
+    monkeypatch.setattr(latency_calibration, "host_qualification", lambda **_kwargs: next(windows))
+
+    refused = latency_calibration.certification_host_qualification()
+
+    assert refused["qualified"] is False
+    assert refused["confirmation"]["recovered_transient"] is False
+    assert [window["qualified"] for window in refused["confirmation"]["windows"]] == list(sequence)
 
 
 def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqualified_host(monkeypatch):
@@ -2180,6 +2217,7 @@ def test_retirement_counts_live_test_containers_the_process_walk_cannot_see(monk
         observed_command.append(command)
         return Completed()
 
+    monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
     monkeypatch.setattr(check.subprocess, "run", fake_run)
     probe = check.running_test_containers()
     assert observed_command[0] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"]
