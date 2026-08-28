@@ -347,7 +347,7 @@ def _visible_directory_names(
                             )
                             paths.authority_pinned(operation, entry_path)
                             entry_stat = os.fstat(link_fd)
-                            target_text = os.readlink("", dir_fd=link_fd)
+                            target_text = os.readlink(name, dir_fd=directory_descriptor)
                         except OSError as error:
                             raise error
                         finally:

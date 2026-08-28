@@ -748,6 +748,26 @@ def test_error_payload_reuses_typed_message_metadata_and_keeps_diagnostic():
     }
 
 
+def test_filesystem_os_error_preserves_the_original_message_in_its_api_payload():
+    original = PermissionError(1, "Operation not permitted", "Documents")
+
+    error = FilesystemError.os_error(original)
+
+    assert error.status == HTTPStatus.FORBIDDEN
+    assert str(error) == "[Errno 1] Operation not permitted: 'Documents'"
+    assert error.payload(path="/Users/keivenc/Documents") == {
+        "error": "[Errno 1] Operation not permitted: 'Documents'",
+        "user_message": {
+            "key": "fs.error.operationFailed",
+            "params": {},
+            "fallback": "[Errno 1] Operation not permitted: 'Documents'",
+        },
+        "diagnostic": "[Errno 1] Operation not permitted: 'Documents'",
+        "path": "/Users/keivenc/Documents",
+        "status": 403,
+    }
+
+
 def test_parse_repo_refs_param_rejects_garbage():
     assert parse_repo_refs_param(None) is None
     assert parse_repo_refs_param("") is None
@@ -2385,11 +2405,11 @@ def test_filesystem_batch_product_returns_typed_permission_failure_without_raisi
         "ok": False,
         "path": "/restricted/item",
         "status": 403,
-        "error": "filesystem operation failed",
+        "error": "[Errno 13] permission denied: '/restricted/item'",
         "user_message": {
             "key": "fs.error.operationFailed",
             "params": {},
-            "fallback": "filesystem operation failed",
+            "fallback": "[Errno 13] permission denied: '/restricted/item'",
         },
         "diagnostic": "[Errno 13] permission denied: '/restricted/item'",
     }]

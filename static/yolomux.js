@@ -3767,6 +3767,7 @@ function userMessageText(value, fallback = '') {
     ? canonicalError.message
     : (payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {});
   const rawError = typeof payload.error === 'string' ? payload.error : '';
+  if (String(descriptor.key || '') === 'fs.error.operationFailed' && rawError) return rawError;
   return messageDescriptorText(descriptor, rawError || source.message || fallback || '');
 }
 
@@ -3786,6 +3787,7 @@ function userMessageSnapshot(value, fallback = '') {
   const params = rawParams && typeof rawParams === 'object' ? rawParams : {};
   const sourceText = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
   const rawError = typeof payload.error === 'string' ? payload.error : '';
+  const preservesFilesystemOsError = String(descriptor.key || '') === 'fs.error.operationFailed' && Boolean(rawError);
   const rawFallback = String(
     rawError
     || descriptor.fallback
@@ -3797,7 +3799,7 @@ function userMessageSnapshot(value, fallback = '') {
   return {
     error: rawFallback,
     user_message: {
-      key,
+      key: preservesFilesystemOsError ? '' : key,
       params: {...params},
       fallback: String(descriptor.fallback || rawFallback),
     },

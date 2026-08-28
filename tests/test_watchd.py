@@ -1992,7 +1992,7 @@ def test_watchd_initial_scan_failure_does_not_activate_polling_generation(tmp_pa
     assert record.watchd_state == "errored"
     assert record.watchd_failed_generation == 2
     row = webapp.watchd_runtime_status()
-    assert row["last_failure"] == "watch_generation_scan_failed"
+    assert row["last_failure"] == "initial scan failed"
     assert observed_health({**row, "pid": 100}) == ("degraded", "service_unhealthy")
 
 

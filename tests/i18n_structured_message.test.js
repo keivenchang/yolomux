@@ -68,6 +68,25 @@ assert.deepStrictEqual(
   },
 );
 assert.equal(
+  api.userMessageText({
+    error: "[Errno 1] Operation not permitted: 'Documents'",
+    user_message: {key: 'fs.error.operationFailed', params: {}, fallback: "[Errno 1] Operation not permitted: 'Documents'"},
+  }),
+  "[Errno 1] Operation not permitted: 'Documents'",
+  'filesystem OS failures display the original server error instead of the generic localized label',
+);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(api.userMessageSnapshot({
+    error: "[Errno 1] Operation not permitted: 'Documents'",
+    user_message: {key: 'fs.error.operationFailed', params: {}, fallback: "[Errno 1] Operation not permitted: 'Documents'"},
+  }))),
+  {
+    error: "[Errno 1] Operation not permitted: 'Documents'",
+    user_message: {key: '', params: {}, fallback: "[Errno 1] Operation not permitted: 'Documents'"},
+  },
+  'cached filesystem OS failures retain the original server error through later GUI renders',
+);
+assert.equal(
   api.structuredMessageText({message: 'legacy raw event'}, 'message'),
   'legacy raw event',
   'legacy payloads without descriptors remain readable',

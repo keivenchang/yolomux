@@ -45,11 +45,12 @@ class FilesystemError(Exception):
     @classmethod
     def os_error(cls, error: OSError, status: int | None = None) -> "FilesystemError":
         resolved_status = int(status) if status is not None else 403 if isinstance(error, PermissionError) else 500
+        original_message = str(error)
         return cls(
-            "filesystem operation failed",
+            original_message,
             status=resolved_status,
             message_key="fs.error.operationFailed",
-            diagnostic=error,
+            diagnostic=original_message,
         )
 
     @classmethod

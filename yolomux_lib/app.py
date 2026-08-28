@@ -3039,6 +3039,7 @@ class WatchBridge:
             record.watchd_applied_generation = watch_generation
             record.watchd_active_generation = active_watch_generation
             record.watchd_failed_generation = failed_watch_generation
+            record.watchd_last_error = str(revision.get("last_error") or "")
             record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
             record.filesystem_roots = roots
             if revision.get("fallback"):
@@ -3441,6 +3442,7 @@ class WatchBridge:
             watch_generation = record.watchd_applied_generation
             active_watch_generation = record.watchd_active_generation
             failed_watch_generation = record.watchd_failed_generation
+            last_error = record.watchd_last_error
         identity = local_service_projection.registry_process_identity(app.watch_client.registry)
         return local_service_projection.local_service_runtime_row(
             "watchd",
@@ -3455,7 +3457,7 @@ class WatchBridge:
             last_failure=(
                 ""
                 if state in {"starting", "ready", "polling", "idle"}
-                else ("watch_generation_scan_failed" if failed_watch_generation == watch_generation else state)
+                else (last_error if failed_watch_generation == watch_generation and last_error else state)
             ),
             resources=app.watch_client.registry.resources(identity.pid),
             fields_before_failure={
