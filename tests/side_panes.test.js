@@ -466,6 +466,12 @@ async function runSidePaneSuite() {
     assert.equal(api.paneSwapAllowed('main1', 'main2'), true);
   });
 
+  test('YO!stats Dockview tabs retain the shared native drag source', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    assert.match(source, /createDockviewTabRenderer\(\)[\s\S]*bindPaneTabNativeDragSource\(element, \(\) => item, \(\) => slotForItem\(item\)\)/,
+      'virtual YO!stats tabs use the same native drag source as regular pane tabs');
+  });
+
   test('tab transfers allow only side-allowed items to cross pane roles', () => {
     const api = loadYolomux('', ['1']);
     const slots = {

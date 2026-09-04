@@ -2146,6 +2146,9 @@ function createDockviewTabRenderer() {
   let item = '';
   let api = null;
   let disposables = [];
+  const bindDrag = () => {
+    bindPaneTabNativeDragSource(element, () => item, () => slotForItem(item));
+  };
   const render = () => {
     if (dockviewLayoutState.applyingFromLayout) return;
     if (!item) return;
@@ -2164,6 +2167,7 @@ function createDockviewTabRenderer() {
     }
     cleanupDetachedPaneTabPopover(element);
     element.innerHTML = dockviewPaneTabHtml(item);
+    bindDrag();
     if (isFileEditorItem(item)) {
       bindFilePopoverActions(element);
       bindPaneTabPopover(element, item);
