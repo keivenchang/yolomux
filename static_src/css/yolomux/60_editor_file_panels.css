@@ -1184,7 +1184,7 @@ body.file-explorer-mode-files .file-explorer-mode-files-diff-only,
 .file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-mode-files-only,
 .file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-only,
 .file-explorer-panel:not([data-file-explorer-mode="diff"]) .file-explorer-mode-diff-only,
-.file-explorer-panel[data-file-explorer-mode="finder"].file-explorer-root-mode-fixed .file-explorer-mode-files-diff-only,
+.file-explorer-panel[data-file-explorer-view="finder"].file-explorer-root-mode-fixed .file-explorer-mode-files-diff-only,
 .file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-diff-only {
   display: none;
 }

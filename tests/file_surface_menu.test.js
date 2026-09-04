@@ -102,6 +102,7 @@ test('Finder and Differ render shared selectors with independent selected-sessio
 test('Finder hides its Session control outside Sync mode', () => {
   assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*fileExplorerRootMode === 'sync'[\s\S]*control\.hidden = !visible/);
   assert.match(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
+  assert.match(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed/);
   assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
 });
 
