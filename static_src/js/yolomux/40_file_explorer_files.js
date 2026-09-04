@@ -1300,6 +1300,11 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
+  const finderIsSynced = fileExplorerRootMode === 'sync';
+  for (const panel of document.querySelectorAll('.file-explorer-panel[data-file-explorer-view="finder"]')) {
+    panel.classList.toggle('file-explorer-root-mode-sync', finderIsSynced);
+    panel.classList.toggle('file-explorer-root-mode-fixed', !finderIsSynced);
+  }
   if (typeof syncFileExplorerSessionControlVisibility === 'function') {
     syncFileExplorerSessionControlVisibility();
   }
