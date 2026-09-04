@@ -8334,9 +8334,26 @@ class TmuxWebtermApp:
             (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower()): row
             for row in discovered_rows
         }
+        discovered_by_window: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for discovered in discovered_rows:
+            window_key = (
+                str(discovered.get("session") or ""),
+                str(discovered.get("window_index") if discovered.get("window_index") is not None else discovered.get("window") or ""),
+                str(discovered.get("kind") or "").lower(),
+            )
+            discovered_by_window.setdefault(window_key, []).append(discovered)
         for row in rows:
             key = (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower())
             discovered = discovered_by_key.get(key)
+            if discovered is None and str(row.get("kind") or "").lower() == "opencode":
+                window_key = (
+                    str(row.get("session") or ""),
+                    str(row.get("window_index") if row.get("window_index") is not None else row.get("window") or ""),
+                    "opencode",
+                )
+                window_matches = discovered_by_window.get(window_key, [])
+                if len(window_matches) == 1:
+                    discovered = window_matches[0]
             if discovered is None or str(row.get("kind") or "").lower() != "opencode":
                 continue
             for field in ("agent_session_id", "cwd", "started_at"):
