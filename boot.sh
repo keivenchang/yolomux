@@ -3,12 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  platform_default_port=8880
-else
-  platform_default_port=7110
-fi
-primary_port="${YOLOMUX_PORT:-$platform_default_port}"
+primary_port="${YOLOMUX_PORT:-${YOLOMUX_DEFAULT_PORT:-}}"
 # An explicit port names this launcher's primary owner. Do not let an inherited server's owner
 # port redirect a separately configured test/dev launch; without YOLOMUX_PORT, retain the override.
 if [[ -n "${YOLOMUX_PORT:-}" ]]; then
@@ -31,7 +26,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command|--check-assets] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7110 on Linux. Non-primary ports use --dev by default.
+Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh
@@ -108,7 +103,12 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [[ "${#ports[@]}" -eq 0 ]]; then
+  [[ -n "$primary_port" ]] || die "no port selected; set YOLOMUX_DEFAULT_PORT or pass an explicit port"
   add_port "$default_port"
+elif [[ -z "$primary_port" ]]; then
+  primary_port="${ports[0]}"
+  background_owner_primary_port="$primary_port"
+  default_port="$primary_port"
 fi
 
 path_entries=()
