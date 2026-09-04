@@ -1382,13 +1382,15 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
+  const finderSelectionChanged = fileExplorerFinderSelectedSession !== normalizedSession;
+  fileExplorerFinderSelectedSession = normalizedSession;
   const previous = fileExplorerExplicitSyncSessionTarget();
   const changed = setExplicitPaneFocusItem(normalizedSession);
   if (changed) {
     if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
   }
-  return changed;
+  return changed || finderSelectionChanged;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {

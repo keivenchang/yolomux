@@ -22773,13 +22773,15 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
+  const finderSelectionChanged = fileExplorerFinderSelectedSession !== normalizedSession;
+  fileExplorerFinderSelectedSession = normalizedSession;
   const previous = fileExplorerExplicitSyncSessionTarget();
   const changed = setExplicitPaneFocusItem(normalizedSession);
   if (changed) {
     if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
   }
-  return changed;
+  return changed || finderSelectionChanged;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {
@@ -40247,6 +40249,11 @@ function dockviewCommitPanelActivation(item, options = {}) {
   return true;
 }
 
+function dockviewCommitTouchTabActivation(event) {
+  const state = dockviewLayoutState.tabPointerDrag;
+  return Boolean(state) && state.dragged !== true && event?.type === 'touchend';
+}
+
 function dockviewCore() {
   return window['dockview-core'] || null;
 }
@@ -40849,6 +40856,7 @@ function dockviewTrackTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  state.dragged = true;
   beginLayoutMutationCompletion(state);
   const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) {
@@ -41273,6 +41281,10 @@ function dockviewInstallTabPointerReorderFallback() {
     dockviewTrackPanePointerDrag(event);
   };
   const finish = event => {
+    if (dockviewCommitTouchTabActivation(event)) {
+      const state = dockviewLayoutState.tabPointerDrag;
+      dockviewCommitPanelActivation(state.item, {userInitiated: true});
+    }
     dockviewFinishTabPointerDrag(event);
     dockviewFinishPanePointerDrag(event);
   };
