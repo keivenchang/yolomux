@@ -2245,7 +2245,14 @@ def session_files_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
     return (
         info.session,
         tuple(sorted(str(pane.current_path or "") for pane in info.panes if pane.current_path)),
-        tuple(sorted(str(agent.cwd or "") for agent in info.agents if agent.cwd)),
+        tuple(sorted(
+            (
+                str(agent.cwd or ""),
+                str(agent.session_id or "") if agent.kind == "opencode" else "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
+            for agent in info.agents if agent.cwd or (agent.kind == "opencode" and agent.session_id)
+        )),
     )
 
 
@@ -2264,7 +2271,14 @@ def metadata_warm_session_signature(info: SessionInfo) -> tuple[Any, ...]:
     )
     agents = tuple(
         sorted(
-            (agent.pane_target, agent.cwd or "", agent.kind, agent.command, agent.session_id or "")
+            (
+                agent.pane_target,
+                agent.cwd or "",
+                agent.kind,
+                agent.command,
+                agent.session_id or "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
             for agent in info.agents
         )
     )
@@ -14040,7 +14054,14 @@ class TmuxWebtermApp:
         graph: dict[str, Any] | None,
     ) -> tuple[Any, ...]:
         """Name every source that can change one session's canonical work graph."""
-        session_generation = self.client_event_payload_signature(asdict(info))
+        session_generation = (
+            self.client_event_payload_signature(asdict(info)),
+            tuple(
+                stats_current_opencode.tool_database_revision()
+                for agent in info.agents
+                if agent.kind == "opencode"
+            ),
+        )
         repository_generations = self.metadata_warm_repository_signature(graph)
         provider_generation = self.metadata_cache.source_generation()
         worktrees = graph.get("git_worktrees") if isinstance(graph, dict) else None
