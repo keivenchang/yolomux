@@ -2215,8 +2215,8 @@ function syncFileExplorerDiffSessionControls() {
   }
 }
 
-function syncFileExplorerSessionControlVisibility() {
-  for (const control of document.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
+function syncFileExplorerSessionControlVisibility(scope = document) {
+  for (const control of scope.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
     const visible = fileExplorerRootMode === 'sync';
     control.hidden = !visible;
     control.setAttribute('aria-hidden', visible ? 'false' : 'true');
@@ -3168,6 +3168,9 @@ function createFileExplorerPanel(item = finderItemId) {
   if (view !== 'finder') bindFileExplorerChangesResizer(panel);
   applyFileExplorerPanelView(panel, item);
   if (view === 'finder') {
+    panel.classList.toggle('file-explorer-root-mode-sync', fileExplorerRootMode === 'sync');
+    panel.classList.toggle('file-explorer-root-mode-fixed', fileExplorerRootMode !== 'sync');
+    syncFileExplorerSessionControlVisibility(panel);
     renderFileExplorerRootModeControls();
     refreshFileExplorerPanelTree(panel);
   } else {
