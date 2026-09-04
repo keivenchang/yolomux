@@ -922,6 +922,50 @@ def test_token_adapter_passes_safe_opencode_started_at_to_the_reader(monkeypatch
     }]
 
 
+def test_stats_roster_recovers_opencode_identity_by_unique_window_when_pane_target_is_missing(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["frontend-crates"]
+    webapp.status_snapshot_payload = lambda: {
+        "sessions": {
+            "frontend-crates": {
+                "agent_windows": [{"window_index": 3, "kind": "opencode", "pane_target": ""}],
+            },
+        },
+    }
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({}, []))
+    webapp.stats_agent_window_rows_from_discovered_sessions = lambda _sessions: [{
+        "session": "frontend-crates", "window_index": 3, "kind": "opencode", "pane_target": "%74",
+        "agent_session_id": "ses-exact", "cwd": "/home/keivenc/dev/frontend-crates", "started_at": 10.0,
+    }]
+
+    rows = webapp.stats_agent_window_rows()
+
+    assert rows[0]["agent_session_id"] == "ses-exact"
+    assert rows[0]["cwd"] == "/home/keivenc/dev/frontend-crates"
+    assert rows[0]["started_at"] == 10.0
+
+
+def test_stats_roster_does_not_choose_between_multiple_opencode_window_matches(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["frontend-crates"]
+    webapp.status_snapshot_payload = lambda: {
+        "sessions": {
+            "frontend-crates": {
+                "agent_windows": [{"window_index": 3, "kind": "opencode", "pane_target": ""}],
+            },
+        },
+    }
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({}, []))
+    webapp.stats_agent_window_rows_from_discovered_sessions = lambda _sessions: [
+        {"session": "frontend-crates", "window_index": 3, "kind": "opencode", "pane_target": "%123", "agent_session_id": "ses-123"},
+        {"session": "frontend-crates", "window_index": 3, "kind": "opencode", "pane_target": "%456", "agent_session_id": "ses-456"},
+    ]
+
+    rows = webapp.stats_agent_window_rows()
+
+    assert "agent_session_id" not in rows[0]
+
+
 def test_token_adapter_fences_opencode_cursor_to_the_stats_database(monkeypatch, tmp_path):
     database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"new stats database")
