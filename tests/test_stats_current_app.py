@@ -933,10 +933,20 @@ def test_stats_roster_recovers_opencode_identity_by_unique_window_when_pane_targ
         },
     }
     monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({}, []))
-    webapp.stats_agent_window_rows_from_discovered_sessions = lambda _sessions: [{
-        "session": "frontend-crates", "window_index": 3, "kind": "opencode", "pane_target": "%74",
-        "agent_session_id": "ses-exact", "cwd": "/home/keivenc/dev/frontend-crates", "started_at": 10.0,
-    }]
+    webapp.stats_agent_window_rows_from_discovered_sessions = lambda _sessions: [
+        {
+            "session": "frontend-crates", "window_index": 3, "kind": "opencode", "pane_target": "%74",
+            "agent_session_id": "ses-exact", "cwd": "/home/keivenc/dev/frontend-crates", "started_at": 10.0,
+        },
+        {
+            "session": "other-session", "window_index": 3, "kind": "opencode", "pane_target": "%81",
+            "agent_session_id": "ses-other", "cwd": "/home/keivenc/dev/other", "started_at": 11.0,
+        },
+        {
+            "session": "frontend-crates", "window_index": 3, "kind": "codex", "pane_target": "%82",
+            "agent_session_id": "ses-codex", "cwd": "/home/keivenc/dev/frontend-crates", "started_at": 12.0,
+        },
+    ]
 
     rows = webapp.stats_agent_window_rows()
 
