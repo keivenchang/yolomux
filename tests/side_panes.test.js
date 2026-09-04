@@ -467,7 +467,7 @@ async function runSidePaneSuite() {
   });
 
   test('YO!stats Dockview tabs retain the shared native drag source', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    const source = fs.readFileSync(`${__dirname}/../static_src/js/yolomux/75_dockview_layout.js`, 'utf8');
     assert.match(source, /createDockviewTabRenderer\(\)[\s\S]*bindPaneTabNativeDragSource\(element, \(\) => item, \(\) => slotForItem\(item\)\)/,
       'virtual YO!stats tabs use the same native drag source as regular pane tabs');
   });
