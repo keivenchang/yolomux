@@ -1209,6 +1209,7 @@ globalThis.__layoutTestApi = {
   fileExplorerSessionFilesTargetSessionForTest: fileExplorerSessionFilesTargetSession,
   fileExplorerFinderTargetSessionForTest: fileExplorerFinderTargetSession,
   switchFileExplorerFinderSessionForTest: switchFileExplorerFinderSession,
+  switchFileExplorerChangesSessionForTest: switchFileExplorerChangesSession,
   sessionFilesCacheKeyForTest: sessionFilesCacheKey,
   clientSessionFilesWatchRequestsForTest: clientSessionFilesWatchRequests,
   setGlobalDiffRefsForTest(fromRef, toRef) {

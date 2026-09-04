@@ -2351,10 +2351,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
   const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
+  const syncTargetChanged = explicit && Boolean(fileExplorerVisibleSyncSession)
+    && String(syncPlan.session || '') !== String(fileExplorerVisibleSyncSession || '');
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
-    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || syncTargetChanged || (explicit && staleInFlightSync))
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {

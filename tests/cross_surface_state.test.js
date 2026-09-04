@@ -956,6 +956,15 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Differ interaction leaves Finder selected session intact');
     assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
   });
+  test('Differ session selector remains authoritative after switching away and back', () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '1', loaded: true, files: [], repos: [], errors: []});
+    api.setFileExplorerChangesSelectedSessionForTest('2');
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'Differ selector owns the target immediately');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '2', loaded: true, files: [], repos: [], errors: []});
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'later payload reads do not restore the previous session');
+  });
   test('Finder sync prefers live tmux path over transcript metadata', () => {
     const signalPathApi = loadYolomux('', ['5']);
     signalPathApi.setTranscriptInfoForTest('5', {

@@ -23742,10 +23742,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
   const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
+  const syncTargetChanged = explicit && Boolean(fileExplorerVisibleSyncSession)
+    && String(syncPlan.session || '') !== String(fileExplorerVisibleSyncSession || '');
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
-    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || syncTargetChanged || (explicit && staleInFlightSync))
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
@@ -65872,10 +65874,7 @@ function fileExplorerSelectedSessionForView(view) {
 
 function fileExplorerFinderTargetSession() {
   const selected = fileExplorerSelectedSessionForView('finder');
-  if (selected) {
-    fileExplorerFinderSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
@@ -65883,13 +65882,45 @@ function fileExplorerFinderTargetSession() {
 
 function fileExplorerSessionFilesTargetSession() {
   const selected = fileExplorerSelectedSessionForView('differ');
-  if (selected) {
-    fileExplorerChangesSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
+}
+
+function sessionFilesSurfaceDescriptor(destination, options = {}) {
+  const normalizedDestination = destination === 'finder' ? 'finder' : 'differ';
+  const state = sessionFilesStateForDestination(normalizedDestination);
+  const session = options.session || (normalizedDestination === 'finder'
+    ? fileExplorerFinderTargetSession()
+    : fileExplorerSessionFilesTargetSession());
+  return {
+    destination: normalizedDestination,
+    state,
+    session,
+    visible: normalizedDestination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible(),
+    cache: sessionFilesCacheForDestination(normalizedDestination),
+  };
+}
+
+function sessionFilesSurfaceNeedsFetch(view, state, session) {
+  if (view === 'finder') return !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session);
+  return !sessionFilesPayloadIsLoadedForSession(state.payload, session);
+}
+
+function ensureSessionFilesSurfaceLoaded(view, options = {}) {
+  if (view === 'tabber') {
+    fetchTabberActivity();
+    return;
+  }
+  const destination = view === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(destination, options);
+  if (!surface.session || sessionFilesSurfaceNeedsFetch(view, surface.state, surface.session) === false) return;
+  if (clientPushCanSupplyData() && options.fetchEvenWhenPush !== true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  } else {
+    fetchSessionFiles({destination, session: surface.session, silent: true});
+  }
 }
 
 function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
@@ -65965,6 +65996,7 @@ function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'di
 
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  if (!isTmuxSession(session) || !sessions.includes(session)) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
@@ -66018,7 +66050,6 @@ function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
   if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
-  if (fileExplorerChangesSelectedSession === session) return false;
   fileExplorerChangesSelectedSession = session;
   if (document.querySelector('.file-explorer-changes-panel')) {
     switchFileExplorerChangesSession(session);
@@ -66170,7 +66201,7 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = sessionFilesSurfaceDescriptor(destination).visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
@@ -66183,20 +66214,21 @@ function renderSessionFilesDestination(destination, options = {}) {
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = options.destination === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(options.destination, options);
+  const destination = surface.destination;
   const forceRefresh = options.force === true;
   const freshGit = options.freshGit === true;
   const backgroundRefresh = options.background === true;
   const cacheOnly = options.cacheOnly === true;
   const cacheView = String(options.cacheView || '');
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = surface.visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
-  const state = sessionFilesStateForDestination(destination);
+  const session = surface.session;
+  const state = surface.state;
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true, destination);
@@ -68143,19 +68175,7 @@ function createFileExplorerPanel(item = finderItemId) {
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
-    }
-  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
-    }
-  } else if (view === 'tabber') fetchTabberActivity();
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return panel;
 }
 
@@ -68255,10 +68275,7 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
-    const session = fileExplorerFinderTargetSession();
-    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
-      fetchSessionFiles({destination: 'finder', session, silent: true});
-    }
+    ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -68266,10 +68283,7 @@ function activateFileExplorerSurface(item) {
     fetchTabberActivity();
     return true;
   }
-  const session = fileExplorerSessionFilesTargetSession();
-  if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'differ', session, silent: true});
-  }
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return true;
 }
 
