@@ -79,7 +79,7 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
   if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
   const userInitiated = options.userInitiated === true || pendingUserGesture;
-  if (isTmuxSession(panelItem) && userInitiated && focusedPanelItem !== panelItem) {
+  if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
   }
   setFocusedPanelItem(panelItem, {userInitiated});
