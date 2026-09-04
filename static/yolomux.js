@@ -22691,6 +22691,9 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
+  if (typeof syncFileExplorerSessionControlVisibility === 'function') {
+    syncFileExplorerSessionControlVisibility();
+  }
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -67235,6 +67238,14 @@ function syncFileExplorerDiffSessionControls() {
     } else if (select.value !== session) {
       select.value = session;
     }
+  }
+}
+
+function syncFileExplorerSessionControlVisibility() {
+  for (const control of document.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
+    const visible = fileExplorerRootMode === 'sync';
+    control.hidden = !visible;
+    control.setAttribute('aria-hidden', visible ? 'false' : 'true');
   }
 }
 

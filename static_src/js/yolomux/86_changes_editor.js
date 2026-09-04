@@ -2215,6 +2215,14 @@ function syncFileExplorerDiffSessionControls() {
   }
 }
 
+function syncFileExplorerSessionControlVisibility() {
+  for (const control of document.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
+    const visible = fileExplorerRootMode === 'sync';
+    control.hidden = !visible;
+    control.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+}
+
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   // Legacy/test callers without an item still receive their requested compatibility view; live

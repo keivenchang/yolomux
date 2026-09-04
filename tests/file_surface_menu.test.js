@@ -99,6 +99,11 @@ test('Finder and Differ render shared selectors with independent selected-sessio
   assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
 
+test('Finder hides its Session control outside Sync mode', () => {
+  assert.match(panel, /function syncFileExplorerSessionControlVisibility\(\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*fileExplorerRootMode === 'sync'[\s\S]*control\.hidden = !visible/);
+  assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
+});
+
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
   assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
   assert.match(dockview, /function dockviewHeaderActionsHtml\(item, slot = slotForItem\(item\)\)[\s\S]*if \(!isLayoutItem\(item\)\) return ''[\s\S]*if \(slotIsSidePane\(slot\)\)[\s\S]*if \(isVirtualItem\(item\)\) return `\$\{paneHandle\}\$\{virtualPanelControlsHtml\(item/);

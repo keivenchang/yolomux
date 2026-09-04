@@ -1300,6 +1300,9 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
+  if (typeof syncFileExplorerSessionControlVisibility === 'function') {
+    syncFileExplorerSessionControlVisibility();
+  }
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
