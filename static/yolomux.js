@@ -40243,6 +40243,7 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const userInitiated = options.userInitiated === true || pendingUserGesture;
   if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
+    scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
   }
   setFocusedPanelItem(panelItem, {userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
