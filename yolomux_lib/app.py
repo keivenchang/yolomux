@@ -8949,14 +8949,6 @@ class TmuxWebtermApp:
             if getattr(row_provider, "__self__", None) is self
             else row_provider()
         )
-        if rows:
-            self.log_event(
-                None,
-                "stats_agent_tokens_rows",
-                "OpenCode token collector found agent rows",
-                {"rows": len(rows), "kinds": sorted({str(row.get("kind") or "") for row in rows})},
-                message_key="events.message.statsAgentTokensRows",
-            )
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly
