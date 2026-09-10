@@ -8949,7 +8949,7 @@ class TmuxWebtermApp:
             if getattr(row_provider, "__self__", None) is self
             else row_provider()
         )
-        logger.info("stats agent token collector rows=%d", len(rows))
+        logger.warning("stats agent token collector rows=%d", len(rows))
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly

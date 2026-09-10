@@ -132,6 +132,7 @@ class StatsCurrentRuntime:
         family: str,
     ) -> Callable[[scheduler.CollectorAttempt], None]:
         def collect(attempt: scheduler.CollectorAttempt) -> None:
+            logger.warning("stats collector attempt family=%s epoch=%s", family, attempt.epoch_id)
             attempt.assert_current()
             facts = self._collectors[family](attempt)
             if not isinstance(facts, collectors.CollectorFacts):
