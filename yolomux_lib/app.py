@@ -8950,6 +8950,7 @@ class TmuxWebtermApp:
             else row_provider()
         )
         logger.warning("stats agent token collector rows=%d", len(rows))
+        print(f"STATS_TRACE rows={len(rows)} kinds={[str(row.get('kind') or '') for row in rows]}", flush=True)
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly
