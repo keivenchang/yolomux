@@ -9044,6 +9044,13 @@ class TmuxWebtermApp:
             opencode_results[token_key] = result
             if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
                 opencode_claims.setdefault(result.session.session_id, set()).add(token_key)
+        logger.warning(
+            "OpenCode token reads total=%d successful=%d unavailable=%d claims=%d",
+            len(opencode_results),
+            sum(isinstance(result, stats_current_opencode.OpenCodeReadSuccess) for result in opencode_results.values()),
+            sum(not isinstance(result, stats_current_opencode.OpenCodeReadSuccess) for result in opencode_results.values()),
+            len(opencode_claims),
+        )
         conflicting_opencode_keys = {
             token_key
             for claimants in opencode_claims.values()
