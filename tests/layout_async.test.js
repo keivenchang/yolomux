@@ -6043,7 +6043,7 @@ async function runLayoutAsyncSuite() {
       globalThemeMode: 'light',
       terminalThemeMode: 'light',
       themeMode: 'github-light',
-      previewDisplayMode: 'vanilla',
+      previewDisplayMode: 'theme',
       wrapEnabled: true,
       lineNumbersEnabled: false,
       blameEnabled: true,
@@ -8851,9 +8851,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(has(dt({types: ['text/plain'], data: {'text/plain': 'hello'}})), false, '78.5: plain text is not image-bearing');
       assert.equal(has(dt({items: [{kind: 'file', type: 'application/pdf', getAsFile() { return {name: 'a.pdf', type: 'application/pdf'}; }}]})), false, '78.5: a non-image file item is not image-bearing');
       assert.equal(has(null), false, '78.5: missing payload is not image-bearing');
-      assert.equal(files(dt({items: [fileItem(), fileItem('image/jpeg')]})).length, 2, '78.5: extracts every image File item (multi-image)');
-      assert.equal(files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]})).length, 1, '78.5: extracts only image entries from a plain File list');
-      assert.equal(files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}})).length, 1, '78.5: extracts image data URLs from rich text/html');
+      assert.equal((await files(dt({items: [fileItem(), fileItem('image/jpeg')]}))).length, 2, '78.5: extracts every image File item (multi-image)');
+      assert.equal((await files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]}))).length, 1, '78.5: extracts only image entries from a plain File list');
+      assert.equal((await files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}}))).length, 1, '78.5: extracts image data URLs from rich text/html');
     }
 
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
@@ -9021,7 +9021,8 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.equal(pasteEvent.defaultPrevented, true, 'remote Markdown image paste is claimed');
       assert.equal(pasteEvent.propagationStopped, true, 'remote Markdown image paste stops propagation');
-      assert.equal(calls.length, 0, 'remote Markdown image paste does not upload without an extractable File');
+      assert.equal(calls.length, 1, 'remote Markdown image paste fetches the rich image source before deciding whether it is uploadable');
+      assert.equal(calls[0].url, 'https://example.com/remote.png', 'remote Markdown image paste fetches the image source');
       assert.equal(sent.length, 0, 'remote Markdown image paste never leaks to xterm');
     }
 
@@ -9066,10 +9067,10 @@ async function runLayoutAsyncSuite() {
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
       const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      assert.ok(/scope\.ownEvent\('paste', document, 'paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
-      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
+      assert.ok(/scope\.ownEvent\('paste', document, 'paste', async event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
+      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', async event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
-      assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
+      assert.ok(/const files = await dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
       assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
       assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
     }
@@ -10594,7 +10595,7 @@ async function runLayoutAsyncSuite() {
       const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8').includes('ClipboardItem'));
       assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\)[\s\S]*copyTextToClipboard\(text\)\.then\([\s\S]*showCopyFeedback\(options\)/, 'one parent owns text-copy success and failure feedback');
       assert.deepEqual(rawTextWriterFiles, ['10_core_utils.js'], 'the raw text writer stays private to the shared feedback parent');
-      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
+      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js', '88_markdown_preview.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
       assert.equal([...core.matchAll(/copyTextToClipboard\(/g)].length, 2, 'only the shared feedback parent may invoke the raw text clipboard writer');
       assert.match(files, /navigator\.clipboard\.write\(\[new ClipboardItem[\s\S]*showCopyFeedback\(/, 'image clipboard writes report through the shared feedback parent');
       assert.match(core, /function copyTerminalSelectionToClipboardEvent[\s\S]*showCopyFeedback\(/, 'the synchronous terminal copy-event path keeps activation while reporting feedback');

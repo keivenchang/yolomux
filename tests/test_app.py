@@ -668,7 +668,7 @@ def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
                 "usage": {"last_accepted_at": 1.0, "quarantined_conflict_count": 2},
             },
         })
-        monkeypatch.setattr(webapp.stats_current_transcript_usage, "status", lambda: {
+        monkeypatch.setattr(webapp.stats_current_client, "agent_token_usage_status", lambda: {
             "committed_appended_bytes": 14,
             "last_visible_append_at": time.time(),
             "visible_append_age_seconds": 0.0,

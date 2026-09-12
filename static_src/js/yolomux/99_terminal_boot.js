@@ -3531,7 +3531,7 @@ function bindFileUpload(panel, session) {
     if (panel.contains(event.relatedTarget)) return;
     panel.classList.remove(CLS.fileDragOver);
   });
-  panel.addEventListener('drop', event => {
+  panel.addEventListener('drop', async event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -3539,7 +3539,9 @@ function bindFileUpload(panel, session) {
     // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
     // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
-    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    const dropped = event.dataTransfer?.files?.length
+      ? event.dataTransfer.files
+      : await dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
