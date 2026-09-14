@@ -4507,7 +4507,7 @@ async function runLayoutAsyncSuite() {
     const terminalCases = [
       ['malformed_payload', null, quiet],
       ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
-      ['older_work_graph_generation', metadataFor(4, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      ['older_work_graph_generation', metadataFor(1, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
       // The committed-render outcome is current at the entry gate and superseded at the render
       // gate, which is the only way to reach the fourth terminal exit.
       ['committed_render_superseded', metadataFor(5, ['1']), {
@@ -4568,7 +4568,7 @@ async function runLayoutAsyncSuite() {
     );
   });
 
-  await testAsync('metadata apply records the generation it rendered and a machine-readable reason for every drop', async () => {
+  await testAsync('metadata apply records build freshness and rejects only stale same-epoch work graphs', async () => {
     // Regression: a dropped metadata payload returned a bare `false` that no caller read, and the
     // rendered model carried no identity, so "the refresh landed and had nothing new" and "the
     // refresh was silently discarded" were indistinguishable. A create-session gate could only tell
@@ -4592,18 +4592,29 @@ async function runLayoutAsyncSuite() {
       {applied: true, reason: 'applied', payloadGeneration: 7},
     );
 
-    const dropped = await api.applySessionMetadataPayloadForTest({
+    const newerBuild = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 8},
       session_order: ['1'],
-      sessions: {'1': {panes: [], work_graph: {version: 1, generation: 3}}},
+      sessions: {'1': {panes: [], marker: 'newer-build', work_graph: {version: 1, generation: 3}}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    const afterNewerBuild = api.transcriptMetadataStateForTest();
+    assert.equal(newerBuild, true, 'a newer same-epoch metadata build may carry an older work-graph generation');
+    assert.equal(afterNewerBuild.payload.sessions['1'].marker, 'newer-build');
+    assert.equal(afterNewerBuild.generation, 8, 'the newer metadata build becomes the rendered identity');
+
+    const dropped = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 7},
+      session_order: ['1'],
+      sessions: {'1': {panes: [], marker: 'stale-build', work_graph: {version: 1, generation: 2}}},
     }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
     const afterDrop = api.transcriptMetadataStateForTest();
-    assert.equal(dropped, false, 'an older session work graph is still refused');
+    assert.equal(dropped, false, 'an older same-epoch metadata build with an older graph is refused');
     assert.deepStrictEqual(
       {applied: afterDrop.lastApply.applied, reason: afterDrop.lastApply.reason, session: afterDrop.lastApply.session},
       {applied: false, reason: 'older_work_graph_generation', session: '1'},
     );
-    assert.equal(afterDrop.generation, 7, 'a refused payload cannot advance the rendered generation');
+    assert.equal(afterDrop.generation, 8, 'a refused payload cannot move the rendered generation backward');
+    assert.equal(afterDrop.payload.sessions['1'].marker, 'newer-build', 'a stale payload cannot replace the newer build');
 
     const superseded = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 9},
@@ -4625,7 +4636,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(unidentified, true, 'an identity-less payload is still rendered');
     assert.equal(afterUnidentified.payload.sessions['1'].marker, 'legacy-server');
     assert.equal(afterUnidentified.epoch, 'epoch-a', 'an identity-less payload cannot change which server the client is tracking');
-    assert.equal(afterUnidentified.generation, 7, 'a bare generation scalar cannot advance the applied identity');
+    assert.equal(afterUnidentified.generation, 8, 'a bare generation scalar cannot advance the applied identity');
   });
 
   await testAsync('a superseded response still records the build the server promised', async () => {
@@ -4869,13 +4880,14 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.payload.sessions['1'].work_graph.generation, 5, 'the previous epoch\'s work graph is not carried forward');
     assert.deepStrictEqual(canonical(state.payload.indexed_repos), [], 'nor its indexed-repo baseline');
 
-    // Negative control: inside ONE epoch the same refusal still applies, so the acceptance above is
-    // caused by the epoch change and not by the work-graph comparison having been removed.
+    // Negative control: inside ONE epoch, an old/equal metadata build still cannot replace a newer
+    // work graph. The acceptance above is caused by the epoch change, not by stale protection being
+    // removed.
     const refused = await api.applySessionMetadataPayloadForTest(
-      metadataPayload(EPOCH_B, 2, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
+      metadataPayload(EPOCH_B, 1, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
       {refreshAuto: false, refreshActivity: false, refreshContext: false},
     );
-    assert.equal(refused, false, 'an older work graph within the same epoch is still refused');
+    assert.equal(refused, false, 'an old same-epoch metadata build is still refused');
     assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_work_graph_generation');
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['1'].marker, 'new-server-lightweight');
   });
@@ -8980,6 +8992,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(content, 'hello\n![one](note/one.png)\n![two file](note/two%20file.png)', 'Markdown editor paste preserves original image filenames as alt text and inserts file-directory links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
+      assert.equal(api.markdownPreviewImageTarget('note/one.png', path).path, '/repo/docs/note/one.png', 'uploaded Markdown references retain relative source semantics for the owning Markdown file');
     }
 
     // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
