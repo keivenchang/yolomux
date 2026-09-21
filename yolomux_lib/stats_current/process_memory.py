@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded host process-memory census for the elected stats owner."""
+"""Bounded host process-memory census for the local stats writer."""
 
 from __future__ import annotations
 
